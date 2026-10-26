@@ -12,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/nekoutils"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -155,6 +156,9 @@ func (s *Selector) SelectOutbound(tag string) bool {
 	s.interruptGroup.Interrupt(s.interruptExternalConnections)
 	if s.history != nil {
 		s.history.NotifyUpdated()
+	}
+	if nekoutils.Selector_OnProxySelected != nil {
+		nekoutils.Selector_OnProxySelected(s.Tag(), tag)
 	}
 	return true
 }
