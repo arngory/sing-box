@@ -56,6 +56,9 @@ func NewLocalRuleSet(ctx context.Context, logger logger.Logger, tag string, opti
 		}
 	} else {
 		if strings.HasPrefix(options.LocalOptions.Path, "geoip:") {
+			if nekoutils.GetGeoIPHeadlessRules == nil {
+				return nil, E.New("geoip database is not available")
+			}
 			rules, err := nekoutils.GetGeoIPHeadlessRules(strings.TrimPrefix(options.LocalOptions.Path, "geoip:"))
 			if err != nil {
 				return nil, err
@@ -67,6 +70,9 @@ func NewLocalRuleSet(ctx context.Context, logger logger.Logger, tag string, opti
 			return ruleSet, nil
 		}
 		if strings.HasPrefix(options.LocalOptions.Path, "geosite:") {
+			if nekoutils.GetGeoSiteHeadlessRules == nil {
+				return nil, E.New("geosite database is not available")
+			}
 			rules, err := nekoutils.GetGeoSiteHeadlessRules(strings.TrimPrefix(options.LocalOptions.Path, "geosite:"))
 			if err != nil {
 				return nil, err
