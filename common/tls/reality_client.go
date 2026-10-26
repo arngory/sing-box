@@ -28,6 +28,7 @@ import (
 	"unsafe"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -140,6 +141,10 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
+	// neko: honour fragment/record_fragment like the plain uTLS client does
+	if e.uClient.fragment || e.uClient.recordFragment {
+		conn = tf.NewConn(conn, ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
+	}
 	uConn := utls.UClient(conn, uConfig, e.uClient.id)
 	verifier.UConn = uConn
 	err := uConn.BuildHandshakeState()
