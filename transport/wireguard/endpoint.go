@@ -55,11 +55,23 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 	if options.ListenPort != 0 {
 		ipcConf += "\nlisten_port=" + F.ToString(options.ListenPort)
 	}
+	// AmneziaWG device-global obfuscation lines (jc=, h1=, i1=, ...); without the
+	// with_awg build tag a non-empty AmneziaWG config is an error (from sing-box-lx)
+	awgLines, err := awgIpcLines(options.AmneziaWG)
+	if err != nil {
+		return nil, err
+	}
+	ipcConf += awgLines
 	var peers []peerConfig
 	for peerIndex, rawPeer := range options.Peers {
+		// "N", or under AWG 3.x a "min-max" range the device re-picks at every keepalive
+		keepalive, err := awgKeepaliveSpec(rawPeer.PersistentKeepaliveInterval)
+		if err != nil {
+			return nil, E.Cause(err, "persistent_keepalive_interval for peer ", peerIndex)
+		}
 		peer := peerConfig{
 			allowedIPs: rawPeer.AllowedIPs,
-			keepalive:  rawPeer.PersistentKeepaliveInterval,
+			keepalive:  keepalive,
 		}
 		if rawPeer.Endpoint.Addr.IsValid() {
 			peer.endpoint = rawPeer.Endpoint.AddrPort()
@@ -100,8 +112,22 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		return nil, err
 	}
 	allowedAddresses := allowedIPSet.Prefixes()
+	// AmneziaWG's s4 prepends junk bytes to every transport message, so an AWG
+	// endpoint needs a lower MTU than plain WireGuard (from sing-box-lx)
+	awgJunk := options.AmneziaWG.S4
 	if options.MTU == 0 {
 		options.MTU = 1408
+		if awgJunk > 0 {
+			options.MTU = 1280
+		}
+	}
+	if awgJunk > 0 {
+		const pathMTU = 1492       // conservative (PPPoE) path
+		const wgOverhead = 28 + 32 // UDP/IP + WireGuard transport header
+		if budget := pathMTU - wgOverhead - int(awgJunk); int(options.MTU) > budget {
+			options.Logger.Warn("amneziawg: mtu ", options.MTU, " may be too high for s4 junk (", awgJunk,
+				" bytes), transport packets can fail with \"message too long\"; consider mtu <= ", budget, " or 1280")
+		}
 	}
 	deviceOptions := DeviceOptions{
 		Context:         options.Context,
@@ -206,6 +232,14 @@ func (e *Endpoint) Start(postStart bool) error {
 		},
 	}
 	wgDevice := device.NewDevice(e.options.Context, e.returnDevice, bind, logger, e.options.Workers)
+	// from sing-box-lx: on handshake give-up the device rebinds its socket (a fresh
+	// port unless listen_port is set) and retries, so a dead NAT or DPI flow entry
+	// does not hold the endpoint down until a manual reconnect
+	wgDevice.SetGiveUpRebind(true, e.options.ListenPort == 0)
+	// AmneziaWG: the QUIC masquerade decoy is generated per handshake
+	if decoy := awgDecoyFunc(e.options.AmneziaWG, e.options.Logger); decoy != nil {
+		wgDevice.SetDecoyPacketsFunc(decoy)
+	}
 	e.tunDevice.SetDevice(wgDevice)
 	domainPeers := make(map[device.NoisePublicKey]*peerConfig)
 	for peerIndex, peer := range e.peers {
@@ -338,7 +372,7 @@ type peerConfig struct {
 	publicKeyHex    string
 	preSharedKeyHex string
 	allowedIPs      []netip.Prefix
-	keepalive       uint16
+	keepalive       string
 	reserved        [3]uint8
 }
 
@@ -354,8 +388,8 @@ func (c peerConfig) GenerateIpcLines() string {
 	for _, allowedIP := range c.allowedIPs {
 		ipcLines.WriteString("\nallowed_ip=" + allowedIP.String())
 	}
-	if c.keepalive > 0 {
-		ipcLines.WriteString("\npersistent_keepalive_interval=" + F.ToString(c.keepalive))
+	if c.keepalive != "" {
+		ipcLines.WriteString("\npersistent_keepalive_interval=" + c.keepalive)
 	}
 	return ipcLines.String()
 }

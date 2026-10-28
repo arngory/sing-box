@@ -127,6 +127,8 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			}
 		}),
 		Workers: options.Workers,
+		// AmneziaWG obfuscation, applied only with the with_awg build tag
+		AmneziaWG: options.AmneziaWGOptions,
 	})
 	if err != nil {
 		return nil, err

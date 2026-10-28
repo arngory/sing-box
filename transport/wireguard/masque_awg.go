@@ -1,0 +1,399 @@
+//go:build with_awg
+
+// Masquerade I1 generators (009) — WireSock-style declarative obfuscation.
+//
+// All four profiles are client-initiated decoys: QUIC = one Initial carrying a
+// whole ClientHello (quic_initial_awg.go), STUN = WebRTC Binding Request
+// (stun_request_awg.go), DNS = client query (masqueDNSQueryCPS below), SIP =
+// INVITE (i1), no SDP body (sip_invite_awg.go).
+// The DNS/SIP packet shapes are inspired by the open-source
+// WireSock reference, but translated from its server-side responses into the
+// client-side requests a UA actually sends first:
+//
+//	https://github.com/wiresock/amneziawg-install
+//	amneziawg-proxy/src/transform.rs (MIT License, Copyright (c) WireSock)
+//	amneziawg-proxy/src/quic_handshake.rs::is_valid_sni_hostname
+//
+// The LDH hostname validator (validateMasqueDomain) mirrors WireSock's
+// is_valid_sni_hostname.
+//
+// IMPORTANT — model difference from WireSock. WireSock is a *server-side* UDP
+// proxy that rewrites the leading S1–S4 padding of a datagram whose tail is the
+// real (encrypted) WireGuard ciphertext. Its generators seed a PRNG from that
+// tail and size length fields to cover it. We instead emit a *standalone* I1
+// decoy packet sent before the handshake (amneziawg-go send.go calls
+// Obfuscate(buf, nil) — src is nil, so there is no ciphertext tail). We
+// therefore port the protocol *structure* but make every decoy self-contained:
+// the whole datagram is the CPS output, length fields cover only the bytes we
+// actually emit, and entropy comes from the engine's <r N> tag (cryptographic
+// randomness, fresh per packet) rather than a payload-seeded LCG. This is an
+// honest decoy, not a byte-for-byte replay of WireSock traffic.
+package wireguard
+
+import (
+	"encoding/hex"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/sagernet/sing-box/option"
+	E "github.com/sagernet/sing/common/exceptions"
+)
+
+// Masquerade protocol identifiers (option.AmneziaWGOptions.Ip).
+const (
+	masqueProtoQUIC = "quic"
+	masqueProtoDNS  = "dns"
+	masqueProtoSTUN = "stun"
+	masqueProtoSIP  = "sip"
+)
+
+// masqueI1 turns the WireSock-style Id/Ip/Ib masquerade sugar into an
+// AmneziaWG I1 "controlled packet sequence" (CPS) string, or returns "" when no
+// masquerade is configured (Id/Ip/Ib all empty).
+//
+// The returned string is a CPS spec understood by the vendored amneziawg-go
+// obfuscation engine (newObfChain): a sequence of <b 0xHEX> (static bytes),
+// <r N> (N cryptographically-random bytes), <rc N> (N random ASCII letters) and
+// <rd N> (N random digits) tags. When the chain is obfuscated with a nil source
+// (as I1 decoys are, see amneziawg-go send.go), the whole output is this fixed
+// skeleton plus fresh randomness — a self-contained protocol-shaped decoy.
+//
+// It enforces the validation rules (mutual exclusion with an explicit I1,
+// known Ip, known Ib, strict LDH Id) and fails fast with a clear error so a bad
+// config is rejected at endpoint build / `sing-box check` rather than silently
+// degrading.
+func masqueI1(o option.AmneziaWGOptions) (string, error) {
+	if o.Id == "" && o.Ip == "" && o.Ib == "" {
+		return "", nil
+	}
+
+	// Mutual exclusion: id/ip/ib are sugar over I1, so a config that sets both
+	// is ambiguous (which one wins?) and almost certainly a mistake.
+	if o.I1 != "" {
+		return "", E.New("amneziawg: id/ip/ib masquerade conflicts with an explicit i1; use one or the other")
+	}
+
+	proto := strings.ToLower(strings.TrimSpace(o.Ip))
+	if proto == "" {
+		return "", E.New("amneziawg: ip (masquerade protocol) is required when id/ib is set; one of quic|dns|stun|sip")
+	}
+
+	// id is REQUIRED only for quic (it becomes the ClientHello SNI). dns and sip
+	// use it on the wire (QNAME / SIP host) but fall back to a generated pseudo
+	// name when empty, so id is optional there; stun is hostname-less and ignores
+	// it. Whenever id IS set (any protocol) it is still LDH-validated — it must
+	// never reach the wire unchecked.
+	domain := strings.TrimSpace(o.Id)
+	if domain != "" {
+		if err := validateMasqueDomain(domain); err != nil {
+			return "", err
+		}
+	}
+
+	browser, err := normalizeMasqueBrowser(o.Ib, proto)
+	if err != nil {
+		return "", err
+	}
+
+	switch proto {
+	case masqueProtoQUIC:
+		if domain == "" {
+			return "", E.New("amneziawg: id (masquerade domain) is required for ip=quic (it becomes the ClientHello SNI)")
+		}
+		return masqueQUICInitialCPS(domain, browser)
+	case masqueProtoSTUN:
+		return masqueSTUNRequestCPS()
+	case masqueProtoDNS:
+		// id optional for dns: used as the QNAME when set, else a pseudo-domain is
+		// generated (PseudoGen, domain-only — never an IP). A set id is LDH-validated above.
+		if domain == "" {
+			domain = pgDomainHost()
+		}
+		return masqueDNSQueryCPS(domain)
+	case masqueProtoSIP:
+		// id optional for sip: used as the SIP host when set, else a pseudo-host
+		// is generated (PseudoGen). A set id is still LDH-validated above.
+		// ip=sip is multi-packet: i1 = a complete INVITE, i2 = the matching 100
+		// Trying for the SAME dialog (filled by masqueI1I2). This path returns the
+		// INVITE; masqueI1I2 rebuilds the pair in one pass so both share a dialog.
+		return masqueSIPInviteCPS(newSIPDialog(domain))
+	default:
+		return "", E.New("amneziawg: unknown masquerade protocol ", strconv.Quote(proto), "; one of quic|dns|stun|sip")
+	}
+}
+
+// masqueI1I2 builds both decoy slots (i1, i2) from the id/ip/ib sugar in a
+// single call, so multi-packet profiles whose two halves must agree are built
+// from ONE generation pass. It returns ("","",nil) when no masquerade is set.
+//
+//   - ip=quic   → ONE QUIC Initial with the whole ClientHello (i1 only,
+//     i2 == ""). A single Initial is exactly what a real client sends to start
+//     one QUIC session; two Initials with different DCIDs would read as two
+//     abandoned sessions (each DCID is a distinct connection), which is more
+//     anomalous, not less. Realism comes from the browser-accurate ClientHello
+//     (Ib → uTLS) and the frame layout, not from packet count.
+//   - ip=sip    → ONE packet: a complete INVITE (i1), no SDP body. The
+//     "100 Trying" that used to ride in i2 was a server response sent by the
+//     client — a direction a UAC never produces (and a WireSock-style
+//     responder answers the INVITE itself) — so i2 stays empty.
+//   - dns/stun  → single-packet decoys: i1 only, i2 == "".
+//
+// i1 is produced by masqueI1 (which also runs all validation); i2 is kept in
+// the signature for the wiring code and is always "" today.
+func masqueI1I2(o option.AmneziaWGOptions) (i1, i2 string, err error) {
+	i1, err = masqueI1(o)
+	return i1, "", err
+}
+
+// validateMasqueDomain enforces a strict LDH (letter-digit-hyphen) hostname,
+// mirroring WireSock's quic_handshake.rs::is_valid_sni_hostname. This is a
+// SECURITY boundary, not cosmetics: the domain is interpolated into SIP header
+// text, encoded into a DNS QNAME, and placed in the QUIC ClientHello SNI
+// (server_name) extension, so control bytes (\r \n \0 \t) or SIP/URI
+// metacharacters (> ; @ " space) would allow header injection / label
+// corruption. Only ASCII alphanumerics, '-' and '_' are allowed; '_' is
+// permitted because it is legal in DNS QNAMEs (service labels) and cannot break
+// SIP framing.
+//
+// Rules (per label, split on '.'): non-empty, ≤63 bytes, no leading/trailing
+// '-'; whole name non-empty, ≤253 bytes, no leading/trailing '.' (one trailing
+// dot is tolerated and trimmed before checks, as a fully-qualified name).
+func validateMasqueDomain(domain string) error {
+	if domain == "" {
+		return E.New("amneziawg: id (masquerade domain) is required when ip/ib is set")
+	}
+	// Tolerate a single trailing dot (fully-qualified form) before validation.
+	name := strings.TrimSuffix(domain, ".")
+	if name == "" || len(name) > 253 {
+		return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": empty or longer than 253 bytes")
+	}
+	if strings.HasPrefix(name, ".") {
+		return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": leading dot")
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" {
+			return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": empty label")
+		}
+		if len(label) > 63 {
+			return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": label longer than 63 bytes")
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": label with leading/trailing hyphen")
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+				(c >= '0' && c <= '9') || c == '-' || c == '_'
+			if !ok {
+				return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": illegal character (only a-z A-Z 0-9 - _ allowed)")
+			}
+		}
+	}
+	return nil
+}
+
+// masqueBrowser identifiers (option.AmneziaWGOptions.Ib).
+const (
+	masqueBrowserChrome     = "chrome"      // Chrome 155 ClientHello without the PQ key_share, one 1250-byte Initial
+	masqueBrowserChromeFull = "chrome-full" // Chrome 155 ClientHello with X25519MLKEM768, one Initial above the MTU
+	masqueBrowserFirefox    = "firefox"
+	masqueBrowserCurl       = "curl"
+)
+
+// normalizeMasqueBrowser validates Ib against the accepted set and returns it
+// lower-cased, or "" when unset.
+//
+// Ib selects both the TLS fingerprint of the ClientHello and the QUIC frame
+// layout of the Initial (see quic_initial_awg.go and
+// quic_clienthello_utls_awg.go). It is only meaningful for ip=quic; for
+// dns/stun/sip it is rejected.
+func normalizeMasqueBrowser(ib, proto string) (string, error) {
+	browser := strings.ToLower(strings.TrimSpace(ib))
+	if browser == "" {
+		return "", nil
+	}
+	switch browser {
+	case masqueBrowserChrome, masqueBrowserChromeFull, masqueBrowserFirefox, masqueBrowserCurl:
+	default:
+		return "", E.New("amneziawg: unknown masquerade browser ", strconv.Quote(ib), "; one of chrome|chrome-full|firefox|curl")
+	}
+	if proto != masqueProtoQUIC {
+		return "", E.New("amneziawg: ib (browser) is only meaningful with ip=quic, got ip=", strconv.Quote(proto))
+	}
+	return browser, nil
+}
+
+// ---------------------------------------------------------------------------
+// CPS skeleton builder
+// ---------------------------------------------------------------------------
+
+// cpsBuilder accumulates an AmneziaWG CPS spec. Static bytes are emitted as a
+// single <b 0xHEX> tag; entropy as <r N>. Tags are space-separated so the
+// vendored newObfChain (which scans for <...> tokens and ignores text between
+// them) parses them unambiguously.
+type cpsBuilder struct {
+	parts []string
+}
+
+// addBytes appends a <b 0xHEX> static-bytes tag. No-op for an empty slice
+// (newBytesObf rejects an empty argument).
+func (c *cpsBuilder) addBytes(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	c.parts = append(c.parts, "<b 0x"+hex.EncodeToString(b)+">")
+}
+
+// addRand appends a <r N> tag: N cryptographically-random bytes filled by the
+// engine at obfuscation time. No-op for n <= 0.
+func (c *cpsBuilder) addRand(n int) {
+	if n <= 0 {
+		return
+	}
+	c.parts = append(c.parts, fmt.Sprintf("<r %d>", n))
+}
+
+// addRandChars appends a <rc N> tag: N random ASCII letters ([a-zA-Z]). Used
+// for token/value fields that must be printable text (SIP tokens, STUN
+// SOFTWARE). No-op for n <= 0.
+func (c *cpsBuilder) addRandChars(n int) {
+	if n <= 0 {
+		return
+	}
+	c.parts = append(c.parts, fmt.Sprintf("<rc %d>", n))
+}
+
+// addRandDigits appends a <rd N> tag: N random ASCII digits ([0-9]). Used for
+// numeric token fields (SIP CSeq). No-op for n <= 0.
+func (c *cpsBuilder) addRandDigits(n int) {
+	if n <= 0 {
+		return
+	}
+	c.parts = append(c.parts, fmt.Sprintf("<rd %d>", n))
+}
+
+func (c *cpsBuilder) String() string {
+	return strings.Join(c.parts, "")
+}
+
+// ---------------------------------------------------------------------------
+// DNS — EDNS OPT query (a client-initiated lookup; direction-corrected)
+// ---------------------------------------------------------------------------
+//
+// Device status. ip=dns emits a DNS QUERY (QR=0) — what a client legitimately
+// sends first, fixing the wrong-direction anomaly of the earlier QR=1 response
+// (a response sent unsolicited as the first packet is a server-role packet in
+// the client's slot; the STUN profile had the same defect). But the decoy still
+// goes to the WARP endpoint (a datacenter Cloudflare IP on UDP/2408), which is
+// NOT a resolver — raw DNS lives on :53. On the LTE/WARP DPI this feature targets,
+// STUN was blocked as a protocol CLASS toward that destination regardless of
+// packet quality, and a DNS query is expected to behave the same (the
+// destination, not the direction, is the likely blocker). This profile is NOT
+// device-confirmed for WARP — use ip=quic for WARP. ip=dns is kept for other
+// providers whose DPI only checks well-formedness, not protocol-to-destination.
+//
+// Layout (one well-formed DNS query, no trailing bytes), the shape a stub
+// resolver sends: header, one HTTPS question, an EDNS OPT RR advertising the
+// UDP payload size and carrying no options.
+//
+//	[ Header 12 ][ Question (QNAME + HTTPS + IN) ][ OPT RR 11, RDLENGTH 0 ]
+//
+// TXID is <r 2> (fresh per packet, like a stub resolver). An earlier shape
+// appended an unknown EDNS option (0xFDE9) with 40 random bytes — inherited from
+// WireSock's server-side S1 tail — which no resolver sends and which a DNS
+// dissector flags; it is gone.
+
+const (
+	// EDNS OPT advertised UDP payload size (modern resolver default, RFC 6891).
+	dnsOptUDPSize uint16 = 1232
+	// QTYPE HTTPS (RR type 65, RFC 9460): the most common query a modern browser
+	// emits per navigation — the most "expected" query shape on the wire.
+	dnsQTypeHTTPS uint16 = 0x0041
+)
+
+// masqueDNSQueryCPS builds an EDNS DNS query (QR=0) for the configured domain
+// (QNAME): one HTTPS question and an OPT RR without options. The whole datagram
+// parses as one well-formed DNS message with no trailing bytes.
+func masqueDNSQueryCPS(domain string) (string, error) {
+	qname, err := encodeDNSName(domain)
+	if err != nil {
+		return "", err
+	}
+
+	// Question section after QNAME: QTYPE HTTPS (0x0041) + QCLASS IN (0x0001).
+	qtHi, qtLo := be16(dnsQTypeHTTPS)
+	question := make([]byte, 0, len(qname)+4)
+	question = append(question, qname...)
+	question = append(question, qtHi, qtLo, 0x00, 0x01)
+
+	var hdr cpsBuilder
+
+	// Header (12 B). TXID is emitted as <r 2> separately; the remaining 10 bytes
+	// are the static flags + section counts.
+	hdr.addRand(2) // TXID
+	hdr.addBytes([]byte{
+		0x01, 0x00, // QR=0 (query), opcode=0, AA=0, TC=0, RD=1 | RA=0, Z=0, RCODE=0
+		0x00, 0x01, // QDCOUNT = 1
+		0x00, 0x00, // ANCOUNT = 0
+		0x00, 0x00, // NSCOUNT = 0
+		0x00, 0x01, // ARCOUNT = 1 (the OPT RR)
+	})
+
+	// Question section.
+	hdr.addBytes(question)
+
+	// OPT RR (11 bytes): no options, RDLENGTH 0.
+	udpHi, udpLo := be16(dnsOptUDPSize)
+	opt := []byte{
+		0x00,       // NAME: root label (OPT must use the root name)
+		0x00, 0x29, // TYPE = OPT (41)
+		udpHi, udpLo, // CLASS = requestor UDP size (1232)
+		0x00, 0x00, 0x00, 0x00, // TTL: ext-RCODE 0, EDNS version 0, flags 0 (DO=0)
+		0x00, 0x00, // RDLENGTH = 0 (no options)
+	}
+	hdr.addBytes(opt)
+
+	return hdr.String(), nil
+}
+
+// encodeDNSName encodes an LDH hostname into DNS wire format (length-prefixed
+// labels terminated by a root label). The domain is already validated by
+// validateMasqueDomain, so every label is 1..63 bytes of LDH+underscore; this
+// re-checks the bound defensively (a label length must fit one byte).
+func encodeDNSName(domain string) ([]byte, error) {
+	name := strings.TrimSuffix(domain, ".")
+	labels := strings.Split(name, ".")
+	out := make([]byte, 0, len(name)+2)
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return nil, E.New("amneziawg: cannot encode DNS label ", strconv.Quote(label))
+		}
+		out = append(out, byte(len(label)))
+		out = append(out, label...)
+	}
+	out = append(out, 0x00) // root label terminator
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// STUN — magic cookie constant (the Binding Request generator lives in
+// stun_request_awg.go; the old Binding Success Response decoy was replaced — a
+// response sent as the client's first packet is a wrong-direction anomaly).
+// ---------------------------------------------------------------------------
+
+// stunMagicCookie is the RFC 5389 magic cookie.
+const stunMagicCookie uint32 = 0x2112A442
+
+// be16 splits a uint16 into big-endian (hi, lo) bytes. Used so multi-byte
+// header fields can be written into a []byte literal without per-field
+// constant-overflow conversions.
+func be16(v uint16) (hi, lo byte) {
+	return byte(v >> 8), byte(v & 0xFF)
+}
+
+// ---------------------------------------------------------------------------
+// SIP — the INVITE request generator lives in sip_invite_awg.go (a `200 OK`
+// response sent as the client's first packet was a wrong-direction anomaly,
+// like the old STUN/DNS profiles; an INVITE is what a client sends first).
+// ---------------------------------------------------------------------------
