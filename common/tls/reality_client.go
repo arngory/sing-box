@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -52,6 +53,10 @@ type RealityClientConfig struct {
 	publicKey []byte
 	shortID   [8]byte
 	keyShare  string
+	// neko: for the default key_share, set after a verification failed with the hybrid share and
+	// cleared after one failed without it. Shared by clones: one per outbound.
+	classicalFallback *atomic.Bool
+	logger            logger.ContextLogger
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -93,7 +98,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, " (expected \"hybrid\" or \"classical\")")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare}
+	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare, new(atomic.Bool), logger}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -163,8 +168,16 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	// (XTLS/REALITY@8cdf7bf) rejects a ClientHello without the hybrid share by silently proxying
 	// to the dest ("reality verification failed"). metacubex/utls >= 1.8 keeps them apart, so the
 	// fingerprint's own shares go out unless key_share asks for the classical ClientHello.
-	switch e.keyShare {
-	case C.RealityKeyShareClassical:
+	// neko: servers on older Xray or sagernet/reality can not take the hybrid share once the dest
+	// picks it, which is why upstream stripped it. With the default key_share a failed
+	// verification switches this outbound to the other ClientHello for the next handshakes.
+	classical := e.keyShare == C.RealityKeyShareClassical
+	switchable := e.keyShare == C.RealityKeyShareDefault && realityHelloCarriesHybridShare(uConn)
+	if switchable {
+		classical = e.classicalFallback.Load()
+	}
+	switch {
+	case classical:
 		for _, extension := range uConn.Extensions {
 			if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
 				ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
@@ -181,7 +194,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		if err != nil {
 			return nil, err
 		}
-	case C.RealityKeyShareHybrid:
+	case e.keyShare == C.RealityKeyShareHybrid:
 		if !realityHelloCarriesHybridShare(uConn) {
 			return nil, E.New("reality key_share \"hybrid\": fingerprint ", e.uClient.id.Client, " ", e.uClient.id.Version, " carries no X25519MLKEM768 key share")
 		}
@@ -266,6 +279,13 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	if !verifier.verified {
+		if switchable && e.classicalFallback.CompareAndSwap(classical, !classical) && e.logger != nil {
+			if classical {
+				e.logger.WarnContext(ctx, "reality verification failed with the classical key share, next handshakes offer X25519MLKEM768 again")
+			} else {
+				e.logger.WarnContext(ctx, "reality verification failed with the X25519MLKEM768 key share, next handshakes use classical X25519 (set key_share to pin one)")
+			}
+		}
 		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
 		return nil, E.New("reality verification failed")
 	}
@@ -312,6 +332,8 @@ func (e *RealityClientConfig) Clone() Config {
 		e.publicKey,
 		e.shortID,
 		e.keyShare,
+		e.classicalFallback,
+		e.logger,
 	}
 }
 

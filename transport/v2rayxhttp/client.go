@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
@@ -185,7 +186,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		tlsDialer := tls.NewDialer(dialer, tlsConfig)
 		newConn = func() xmuxConn {
 			return &http2XmuxConn{transport: &http2.Transport{
-				ReadIdleTimeout: xmuxConfig.keepAlivePeriod,
+				ReadIdleTimeout: http2KeepAlivePeriod(xmuxConfig.keepAlivePeriod),
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
 					return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
 				},
@@ -431,3 +432,20 @@ func drainAndClose(body interface {
 	buf.Put(buffer)
 	_ = body.Close()
 }
+
+// http2KeepAlivePeriod maps xmux.h_keep_alive_period to http2.Transport.ReadIdleTimeout: 0 is
+// Xray's ChromeH2KeepAlivePeriod, a negative value turns the health check pings off. neko: without
+// pings a pooled connection a NAT dropped silently stays in xmux until h_max_reusable_secs.
+func http2KeepAlivePeriod(period time.Duration) time.Duration {
+	switch {
+	case period == 0:
+		return http2DefaultKeepAlivePeriod
+	case period < 0:
+		return 0
+	default:
+		return period
+	}
+}
+
+// http2DefaultKeepAlivePeriod is Xray's ChromeH2KeepAlivePeriod.
+const http2DefaultKeepAlivePeriod = 45 * time.Second
