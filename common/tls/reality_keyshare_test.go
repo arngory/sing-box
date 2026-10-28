@@ -38,3 +38,15 @@ func TestRealityChromeKeyShares(t *testing.T) {
 		t.Fatal("classical filter left the hybrid share")
 	}
 }
+
+// The learned ClientHello must survive a new outbound to the same server (latency tests, restarts).
+func TestRealityClassicalFallbackShared(t *testing.T) {
+	first := realityClassicalFallback("example.com", []byte{1, 2})
+	first.Store(true)
+	if !realityClassicalFallback("example.com", []byte{1, 2}).Load() {
+		t.Fatal("fallback not shared for the same server and key")
+	}
+	if realityClassicalFallback("example.com", []byte{1, 3}).Load() {
+		t.Fatal("fallback shared across keys")
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -54,7 +55,7 @@ type RealityClientConfig struct {
 	shortID   [8]byte
 	keyShare  string
 	// neko: for the default key_share, set after a verification failed with the hybrid share and
-	// cleared after one failed without it. Shared by clones: one per outbound.
+	// cleared after one failed without it. One per server and key, see realityClassicalFallbacks.
 	classicalFallback *atomic.Bool
 	logger            logger.ContextLogger
 }
@@ -98,7 +99,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, " (expected \"hybrid\" or \"classical\")")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare, new(atomic.Bool), logger}
+	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare, realityClassicalFallback(serverAddress, publicKey), logger}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -407,6 +408,16 @@ func (c *realityClientConnWrapper) ReaderReplaceable() bool {
 
 func (c *realityClientConnWrapper) WriterReplaceable() bool {
 	return false
+}
+
+// realityClassicalFallbacks keeps the learned ClientHello per server address and public key for
+// the life of the process: a latency test or restart builds a new box and outbound, and would
+// otherwise fail its first handshake to the same server again.
+var realityClassicalFallbacks sync.Map
+
+func realityClassicalFallback(serverAddress string, publicKey []byte) *atomic.Bool {
+	value, _ := realityClassicalFallbacks.LoadOrStore(serverAddress+"/"+hex.EncodeToString(publicKey), new(atomic.Bool))
+	return value.(*atomic.Bool)
 }
 
 // realityHelloCarriesHybridShare reports whether the built ClientHello offers an
