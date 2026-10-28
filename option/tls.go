@@ -253,4 +253,8 @@ type OutboundRealityOptions struct {
 	Enabled   bool   `json:"enabled,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
 	ShortID   string `json:"short_id,omitempty"`
+	// KeyShare: "" = as the fingerprint carries it (Chrome: X25519MLKEM768 and X25519),
+	// "hybrid" = X25519MLKEM768 required, "classical" = X25519MLKEM768 stripped (a smaller
+	// ClientHello, accepted only by Xray older than v26.9.8). From sing-box-lx (SPEC 089).
+	KeyShare string `json:"key_share,omitempty"`
 }
