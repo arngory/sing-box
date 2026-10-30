@@ -12,6 +12,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/vless/encryption"
 	"github.com/sagernet/sing-box/transport/v2ray"
 	"github.com/sagernet/sing-vmess/packetaddr"
 	"github.com/sagernet/sing-vmess/vless"
@@ -34,6 +35,9 @@ var (
 )
 
 type Outbound struct {
+	// the VLESS post-quantum encryption layer (from sing-box-lx), nil unless
+	// `encryption` is set; it wraps the dialed conn beneath the vless client
+	encryption *encryption.ClientInstance
 	outbound.Adapter
 	logger          logger.ContextLogger
 	dialer          N.Dialer
@@ -71,7 +75,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if err != nil {
 			return nil, err
 		}
-		outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
+		// "tls": {"enabled": false} gives a nil config; wrapping it crashed the
+		// first handshake (from sing-box-lx)
+		if outbound.tlsConfig != nil {
+			outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
+		}
 	}
 	if options.Transport != nil {
 		outbound.transport, err = v2ray.NewClientTransport(ctx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
@@ -90,6 +98,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			outbound.xudp = true
 		default:
 			return nil, E.New("unknown packet encoding: ", *options.PacketEncoding)
+		}
+	}
+	if options.Encryption != "" && options.Encryption != "none" {
+		encryptionConfig, err := parseClientEncryption(options.Encryption)
+		if err != nil {
+			return nil, E.Cause(err, "parse encryption")
+		}
+		outbound.encryption = &encryption.ClientInstance{}
+		err = outbound.encryption.Init(encryptionConfig.keys, encryptionConfig.xorMode, encryptionConfig.seconds, encryptionConfig.padding)
+		if err != nil {
+			return nil, E.Cause(err, "initialize encryption")
 		}
 	}
 	outbound.client, err = vless.NewClient(options.UUID, options.Flow, logger)
@@ -201,6 +220,10 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	if err != nil {
 		return nil, err
 	}
+	conn, err = h.wrapEncryption(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
@@ -242,6 +265,10 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	}
 	if err != nil {
 		common.Close(conn)
+		return nil, err
+	}
+	conn, err = h.wrapEncryption(ctx, conn)
+	if err != nil {
 		return nil, err
 	}
 	if h.xudp {
