@@ -103,6 +103,7 @@ func OutboundRegistry() *outbound.Registry {
 
 	registerQUICOutbounds(registry)
 	registerDNSTTOutbound(registry)
+	registerMasterDNSVPNOutbound(registry)
 	registerStubForRemovedOutbounds(registry)
 
 	return registry

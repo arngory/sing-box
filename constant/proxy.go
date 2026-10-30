@@ -23,6 +23,7 @@ const (
 	TypeShadowTLS          = "shadowtls"
 	TypeAnyTLS             = "anytls"
 	TypeDNSTT              = "dnstt"
+	TypeMasterDNSVPN       = "masterdnsvpn"
 	TypeShadowsocksR       = "shadowsocksr"
 	TypeVLESS              = "vless"
 	TypeTUIC               = "tuic"
@@ -105,6 +106,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "AnyTLS"
 	case TypeDNSTT:
 		return "DNSTT"
+	case TypeMasterDNSVPN:
+		return "MasterDnsVPN"
 	case TypeOpenConnect:
 		return "OpenConnect"
 	case TypeOpenVPNClient:

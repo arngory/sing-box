@@ -86,6 +86,8 @@ require (
 	www.bamsoftware.com/git/dnstt.git v1.20260501.0
 )
 
+require github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	filippo.io/hpke v0.4.0 // indirect
@@ -204,9 +206,12 @@ require (
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	masterdnsvpn-go v0.0.0
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
 
 replace github.com/sagernet/sing-quic => ./third_party/sing-quic
 
 replace github.com/sagernet/wireguard-go => ./third_party/wireguard-go
+
+replace masterdnsvpn-go => ./third_party/masterdnsvpn
