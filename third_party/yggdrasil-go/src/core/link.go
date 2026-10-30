@@ -726,6 +726,12 @@ func (l *links) findSuitableIP(url *url.URL, fn func(hostname string, ip net.IP,
 	if err != nil {
 		return nil, err
 	}
+	// neko: a LinkDialer resolves names itself, with the embedding program's DNS and
+	// dialer instead of the system resolver; ip is nil then. QUIC needs an address here.
+	if l.core.config.linkDialer.DialContext != nil && net.ParseIP(host) == nil &&
+		url.Scheme != "quic" && l.core.config.peerFilter == nil {
+		return fn(host, nil, port)
+	}
 	resp, err := net.LookupIP(host)
 	if err != nil {
 		return nil, err
@@ -791,4 +797,12 @@ func (c *linkConn) Write(p []byte) (n int, err error) {
 	n, err = c.Conn.Write(p)
 	atomic.AddUint64(&c.tx, uint64(n))
 	return
+}
+
+// hookTarget is where a LinkDialer dials: the name when findSuitableIP left it unresolved (neko).
+func hookTarget(hostname string, ip net.IP, port int) string {
+	if ip == nil {
+		return net.JoinHostPort(hostname, strconv.Itoa(port))
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(port))
 }

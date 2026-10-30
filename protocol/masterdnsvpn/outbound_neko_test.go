@@ -12,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 // The client runs in process against a resolver that never answers, and Close stops it.
@@ -46,8 +47,15 @@ func TestNekoMasterDNSVPNLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(500 * time.Millisecond)
-	if _, err = outbound.(*Outbound).DialContext(context.Background(), "udp", outbound.(*Outbound).localAddr); err == nil {
+	if _, err = outbound.(*Outbound).DialContext(context.Background(), "udp", M.ParseSocksaddr("1.1.1.1:53")); err == nil {
 		t.Fatal("UDP accepted")
+	}
+	// no session yet: a dial gives up with its context instead of hanging
+	dialCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	_, err = outbound.(*Outbound).DialContext(dialCtx, "tcp", M.ParseSocksaddr("example.com:443"))
+	cancel()
+	if err == nil {
+		t.Fatal("dial without a session succeeded")
 	}
 	start := time.Now()
 	outbound.(*Outbound).Close()

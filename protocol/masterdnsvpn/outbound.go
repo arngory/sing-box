@@ -4,8 +4,6 @@ package masterdnsvpn
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"net"
 	"os"
 	"strings"
@@ -22,6 +20,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/protocol/socks"
+	"github.com/sagernet/sing/protocol/socks/socks5"
 
 	"masterdnsvpn-go/embed"
 )
@@ -32,16 +31,15 @@ func RegisterOutbound(registry *outbound.Registry) {
 
 var _ adapter.Outbound = (*Outbound)(nil)
 
-// Outbound runs the MasterDnsVPN client in process on a loopback port with random
-// SOCKS5 credentials and dials through it.
+// Outbound runs the MasterDnsVPN client in process and hands it connections through
+// in-memory pipes: no loopback port another app could use or take over.
 type Outbound struct {
 	outbound.Adapter
-	ctx       context.Context
-	logger    logger.ContextLogger
-	options   embed.Options
-	tcpMode   bool
-	socks     *socks.Client
-	localAddr M.Socksaddr
+	ctx     context.Context
+	logger  logger.ContextLogger
+	options embed.Options
+	tcpMode bool
+	conns   chan net.Conn
 
 	access sync.Mutex
 	cancel context.CancelFunc
@@ -75,50 +73,30 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if _, set := config["LOG_LEVEL"]; !set {
 		config["LOG_LEVEL"] = "WARN"
 	}
-	user, pass := randomHex(8), randomHex(16)
 	workDir, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
+	conns := make(chan net.Conn)
 	return &Outbound{
 		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeMasterDNSVPN, tag, []string{N.NetworkTCP}, options.DialerOptions),
 		ctx:     ctx,
 		logger:  logger,
 		tcpMode: mode == "TCP",
+		conns:   conns,
 		options: embed.Options{
 			Config:      config,
 			Resolvers:   options.Resolvers,
 			WorkDir:     workDir,
-			SOCKSUser:   user,
-			SOCKSPass:   pass,
+			Conns:       conns,
 			ProtectPath: options.ProtectPath,
 		},
 	}, nil
 }
 
-func randomHex(n int) string {
-	buf := make([]byte, n)
-	rand.Read(buf)
-	return hex.EncodeToString(buf)
-}
-
 func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
-	}
-	// a free loopback port for the client's listener
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	h.options.ListenPort = port
-	h.localAddr = M.ParseSocksaddrHostPort("127.0.0.1", uint16(port))
-	if !h.tcpMode {
-		h.socks = socks.NewClient(N.SystemDialer, h.localAddr, socks.Version5, h.options.SOCKSUser, h.options.SOCKSPass)
-	} else {
-		h.options.SOCKSUser, h.options.SOCKSPass = "", ""
 	}
 	ctx, cancel := context.WithCancel(h.ctx)
 	done := make(chan struct{})
@@ -164,12 +142,33 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		return nil, E.New("masterdnsvpn client stopped, see the log")
 	default:
 	}
+	local, remote := net.Pipe()
+	select {
+	case h.conns <- remote:
+	case <-done:
+		local.Close()
+		remote.Close()
+		return nil, E.New("masterdnsvpn client stopped, see the log")
+	case <-ctx.Done():
+		local.Close()
+		remote.Close()
+		return nil, ctx.Err()
+	}
 	if h.tcpMode {
 		h.logger.InfoContext(ctx, "outbound connection through the masterdnsvpn upstream (requested ", destination, ")")
-		return N.SystemDialer.DialContext(ctx, N.NetworkTCP, h.localAddr)
+		return local, nil
 	}
 	h.logger.InfoContext(ctx, "outbound connection to ", destination)
-	return h.socks.DialContext(ctx, N.NetworkTCP, destination)
+	if deadline, ok := ctx.Deadline(); ok {
+		local.SetDeadline(deadline)
+	}
+	_, err := socks.ClientHandshake5(local, socks5.CommandConnect, destination, "", "")
+	local.SetDeadline(time.Time{})
+	if err != nil {
+		local.Close()
+		return nil, E.Cause(err, "masterdnsvpn SOCKS5 handshake")
+	}
+	return local, nil
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

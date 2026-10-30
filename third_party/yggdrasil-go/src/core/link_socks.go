@@ -32,7 +32,7 @@ func (l *linkSOCKS) dial(_ context.Context, url *url.URL, info linkInfo, options
 	}
 	tlsconfig := l.tls.config.Clone()
 	return l.findSuitableIP(url, func(hostname string, ip net.IP, port int) (net.Conn, error) {
-		hostport := net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
+		hostport := hookTarget(hostname, ip, port)
 		var forward proxy.Dialer
 		if hook := l.core.config.linkDialer.DialContext; hook != nil && !ip.IsLinkLocalUnicast() {
 			forward = hookDialer(hook)

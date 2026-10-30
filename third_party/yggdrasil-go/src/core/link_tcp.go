@@ -34,7 +34,7 @@ func (l *linkTCP) dial(ctx context.Context, url *url.URL, info linkInfo, options
 			Port: port,
 		}
 		if hook := l.core.config.linkDialer.DialContext; hook != nil && !ip.IsLinkLocalUnicast() {
-			return hook(ctx, "tcp", addr.String())
+			return hook(ctx, "tcp", hookTarget(hostname, ip, port))
 		}
 		dialer, err := l.tcp.dialerFor(addr, info.sintf)
 		if err != nil {

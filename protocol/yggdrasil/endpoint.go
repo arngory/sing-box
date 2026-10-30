@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"net/url"
 	"sync/atomic"
 	"time"
 
@@ -64,6 +65,7 @@ type Endpoint struct {
 	started   atomic.Bool
 	closed    chan struct{}
 	dnsRouter adapter.DNSRouter
+	peers     []*url.URL
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.YggdrasilEndpointOptions) (adapter.Endpoint, error) {
@@ -108,8 +110,15 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	for _, listen := range options.Listen {
 		setup = append(setup, core.ListenAddress(listen))
 	}
+	// peers are added in Start: the core dials them at once, and resolving a peer name
+	// needs the DNS router, which is not running yet here
+	peers := make([]*url.URL, 0, len(options.Peers))
 	for _, peer := range options.Peers {
-		setup = append(setup, core.Peer{URI: peer})
+		peerURL, err := url.Parse(peer)
+		if err != nil {
+			return nil, E.Cause(err, "parse peer ", peer)
+		}
+		peers = append(peers, peerURL)
 	}
 	yggCore, err := core.New(certificate, &coreLogger{logger}, setup...)
 	if err != nil {
@@ -127,6 +136,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		address:   address,
 		closed:    make(chan struct{}),
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
+		peers:     peers,
 	}
 	udpTimeout := time.Duration(options.UDPTimeout)
 	if udpTimeout == 0 {
@@ -196,6 +206,11 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	go e.pumpOut()
 	go e.pumpIn()
 	e.started.Store(true)
+	for _, peer := range e.peers {
+		if err := e.core.AddPeer(peer, ""); err != nil {
+			e.logger.Warn("yggdrasil: add peer ", peer.Redacted(), ": ", err)
+		}
+	}
 	return nil
 }
 

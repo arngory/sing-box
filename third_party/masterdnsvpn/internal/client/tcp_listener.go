@@ -36,6 +36,14 @@ func NewTCPListener(c *Client, protocolType string) *TCPListener {
 }
 
 func (l *TCPListener) Start(ctx context.Context, ip string, port int) error {
+	if l.client != nil && l.client.listenerFactory != nil {
+		// neko: an in-process listener, no port to bind
+		listener, err := l.client.listenerFactory()
+		if err != nil {
+			return err
+		}
+		return l.serve(ctx, []net.Listener{listener}, ip, port)
+	}
 	addrs := listenerAddressesForBind(ip, port)
 	if len(addrs) == 0 {
 		return fmt.Errorf("invalid listener address")
@@ -63,7 +71,10 @@ func (l *TCPListener) Start(ctx context.Context, ip string, port int) error {
 	if len(listeners) == 0 {
 		return fmt.Errorf("failed to bind any proxy listener")
 	}
+	return l.serve(ctx, listeners, ip, port)
+}
 
+func (l *TCPListener) serve(ctx context.Context, listeners []net.Listener, ip string, port int) error {
 	l.listeners = listeners
 	for _, listener := range listeners {
 		if l.client != nil && l.client.log != nil {

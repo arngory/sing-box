@@ -103,6 +103,8 @@ type Client struct {
 
 	// Local Proxy Daemons
 	tcpListener *TCPListener
+	// neko: when set, the proxy listener comes from the embedding program instead of a port
+	listenerFactory func() (net.Listener, error)
 	dnsListener *DNSListener
 
 	// Stream Management
@@ -558,4 +560,10 @@ func (c *Client) HandleErrorDrop(packet VpnProto.Packet) error {
 
 func (c *Client) HandleMTUResponse(packet VpnProto.Packet) error {
 	return nil
+}
+
+// SetListenerFactory makes the client take its proxy listener from the embedding program
+// (neko addition), called again whenever the runtime restarts the listener.
+func (c *Client) SetListenerFactory(factory func() (net.Listener, error)) {
+	c.listenerFactory = factory
 }

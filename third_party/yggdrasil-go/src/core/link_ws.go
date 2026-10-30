@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -108,7 +107,7 @@ func wsAcceptOptions(url *url.URL) *websocket.AcceptOptions {
 func (l *linkWS) dial(ctx context.Context, url *url.URL, info linkInfo, options linkOptions) (net.Conn, error) {
 	return l.findSuitableIP(url, func(hostname string, ip net.IP, port int) (net.Conn, error) {
 		u := *url
-		u.Host = net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
+		u.Host = hookTarget(hostname, ip, port)
 		addr := &net.TCPAddr{
 			IP:   ip,
 			Port: port,
