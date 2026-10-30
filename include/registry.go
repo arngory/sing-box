@@ -102,6 +102,7 @@ func OutboundRegistry() *outbound.Registry {
 	anytls.RegisterOutbound(registry)
 
 	registerQUICOutbounds(registry)
+	registerDNSTTOutbound(registry)
 	registerStubForRemovedOutbounds(registry)
 
 	return registry
