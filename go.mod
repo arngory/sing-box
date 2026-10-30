@@ -8,7 +8,7 @@ require (
 	github.com/anytls/sing-anytls v0.0.11
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6
 	github.com/caddyserver/zerossl v0.1.5
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/cretz/bine v0.2.0
 	github.com/database64128/tfo-go/v2 v2.3.2
@@ -86,7 +86,15 @@ require (
 	www.bamsoftware.com/git/dnstt.git v1.20260501.0
 )
 
-require github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
+require (
+	github.com/Arceliar/ironwood v0.0.0-20260613025018-d50055b11f5e // indirect
+	github.com/Arceliar/phony v0.0.0-20220903101357-530938a4b13d // indirect
+	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
+	github.com/bits-and-blooms/bitset v1.24.5 // indirect
+	github.com/bits-and-blooms/bloom/v3 v3.7.1 // indirect
+	github.com/gologme/log v1.3.0 // indirect
+	github.com/quic-go/quic-go v0.60.0 // indirect
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -100,7 +108,7 @@ require (
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
-	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6 // indirect
 	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
 	github.com/database64128/netx-go v0.1.1 // indirect
@@ -194,6 +202,7 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	github.com/yggdrasil-network/yggdrasil-go v0.5.14
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
@@ -203,7 +212,7 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
+	golang.zx2c4.com/wireguard/windows v1.0.1 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	masterdnsvpn-go v0.0.0
@@ -215,3 +224,5 @@ replace github.com/sagernet/sing-quic => ./third_party/sing-quic
 replace github.com/sagernet/wireguard-go => ./third_party/wireguard-go
 
 replace masterdnsvpn-go => ./third_party/masterdnsvpn
+
+replace github.com/yggdrasil-network/yggdrasil-go => ./third_party/yggdrasil-go
