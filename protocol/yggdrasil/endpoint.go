@@ -14,6 +14,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -114,9 +115,9 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	// needs the DNS router, which is not running yet here
 	peers := make([]*url.URL, 0, len(options.Peers))
 	for _, peer := range options.Peers {
-		peerURL, err := url.Parse(peer)
+		peerURL, err := parsePeer(peer)
 		if err != nil {
-			return nil, E.Cause(err, "parse peer ", peer)
+			return nil, err
 		}
 		peers = append(peers, peerURL)
 	}
@@ -207,11 +208,34 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	go e.pumpIn()
 	e.started.Store(true)
 	for _, peer := range e.peers {
-		if err := e.core.AddPeer(peer, ""); err != nil {
-			e.logger.Warn("yggdrasil: add peer ", peer.Redacted(), ": ", err)
+		err := e.core.AddPeer(peer, "")
+		if err != nil && !errors.Is(err, core.ErrLinkAlreadyConfigured) {
+			return E.Cause(err, "add peer ", peer.Redacted())
 		}
 	}
 	return nil
+}
+
+// parsePeer checks a peer URI before the start, where the core would only refuse it later.
+func parsePeer(raw string) (*url.URL, error) {
+	peerURL, err := url.Parse(raw)
+	if err != nil {
+		return nil, E.Cause(err, "parse peer ", raw)
+	}
+	switch peerURL.Scheme {
+	case "tcp", "tls", "quic", "ws", "wss", "socks", "sockstls":
+	default:
+		return nil, E.New("peer ", raw, ": unsupported scheme ", peerURL.Scheme)
+	}
+	if peerURL.Host == "" {
+		return nil, E.New("peer ", raw, ": missing host:port")
+	}
+	for _, key := range peerURL.Query()["key"] {
+		if decoded, err := hex.DecodeString(key); err != nil || len(decoded) != ed25519.PublicKeySize {
+			return nil, E.New("peer ", raw, ": key must be 64 hex digits")
+		}
+	}
+	return peerURL, nil
 }
 
 // pumpOut moves the stack's outgoing packets into the mesh.

@@ -142,6 +142,13 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		return nil, E.New("masterdnsvpn client stopped, see the log")
 	default:
 	}
+	// the client accepts only once its session is up; a detour or the router dial
+	// without a deadline, which would wait here for as long as that takes
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, C.TCPTimeout)
+		defer cancel()
+	}
 	local, remote := net.Pipe()
 	select {
 	case h.conns <- remote:

@@ -51,3 +51,17 @@ func TestNekoYggdrasilKey(t *testing.T) {
 		t.Fatalf("address %s outside 200::/7", ip)
 	}
 }
+
+func TestNekoYggdrasilPeers(t *testing.T) {
+	for _, good := range []string{"tls://1.2.3.4:443", "tcp://peer.example:1234", "quic://[2001:db8::1]:443",
+		"tls://peer.example:443?key=" + strings.Repeat("ab", 32)} {
+		if _, err := parsePeer(good); err != nil {
+			t.Fatalf("%s: %v", good, err)
+		}
+	}
+	for _, bad := range []string{"http://peer.example:80", "tls://", "tls://peer.example:443?key=abc", "peer.example:443"} {
+		if _, err := parsePeer(bad); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+}
