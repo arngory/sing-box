@@ -257,4 +257,6 @@ type OutboundRealityOptions struct {
 	// "hybrid" = X25519MLKEM768 required, "classical" = X25519MLKEM768 stripped (a smaller
 	// ClientHello, accepted only by Xray older than v26.9.8). From sing-box-lx (SPEC 089).
 	KeyShare string `json:"key_share,omitempty"`
+	// neko: the server's ML-DSA-65 public key, base64 (Xray mldsa65Verify)
+	Mldsa65Verify string `json:"mldsa65_verify,omitempty"`
 }
