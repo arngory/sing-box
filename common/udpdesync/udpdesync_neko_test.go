@@ -171,3 +171,13 @@ func TestNekoQUICHandshakeThroughDesync(t *testing.T) {
 		t.Fatal("the post-quantum ClientHello did not take two Initials, nothing was reordered")
 	}
 }
+
+func TestNekoSocketTuned(t *testing.T) {
+	r := newRecorder(t)
+	c := dial(t, r, Options{Prelude: 1})
+	raw, err := c.Conn.(*net.UDPConn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Control(func(fd uintptr) { checkTuned(t, fd) })
+}

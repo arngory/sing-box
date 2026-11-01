@@ -56,7 +56,10 @@ type Conn struct {
 	reordered atomic.Bool
 }
 
+// NewConn wraps a connected UDP socket. quic-go cannot tune a socket it does not
+// see, so the wrapper gives it the buffers and DF quic-go would set.
 func NewConn(conn net.Conn, options Options, logger logger.Logger) *Conn {
+	tuneSocket(conn)
 	return &Conn{Conn: conn, options: options, logger: logger, reorderDone: !options.ReorderInitial}
 }
 

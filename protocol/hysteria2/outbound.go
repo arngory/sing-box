@@ -131,6 +131,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
+	if desyncOptions.ReorderInitial && options.Obfs != nil && options.Obfs.Type != "" {
+		// obfs wraps the socket above the desync layer: it never sees a QUIC Initial
+		logger.Warn("udp_desync: reorder_initial has no effect with obfs, ignored (the prelude still applies)")
+		desyncOptions.ReorderInitial = false
+	}
 	client, err := hysteria2.NewClient(hysteria2.ClientOptions{
 		Context:            ctx,
 		Dialer:             udpdesync.WrapDialer(outboundDialer, desyncOptions, logger),
