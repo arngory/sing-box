@@ -221,6 +221,8 @@ type Hysteria2OutboundOptions struct {
 	BrutalDebug         bool            `json:"brutal_debug,omitempty"`
 	DisableChromeParrot bool            `json:"disable_chrome_parrot,omitempty"`
 	Realm               *Hysteria2Realm `json:"realm,omitempty"`
+	// neko: common/udpdesync
+	UDPDesync *UDPDesyncOptions `json:"udp_desync,omitempty"`
 }
 
 type HysteriaRealmUser struct {

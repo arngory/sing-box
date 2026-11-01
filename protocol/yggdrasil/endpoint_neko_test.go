@@ -84,14 +84,16 @@ func TestNekoYggdrasilPeerSNI(t *testing.T) {
 	}
 	defer listener.Close()
 	serverName := make(chan string, 1)
+	hello := make(chan *tls.ClientHelloInfo, 1)
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
 		defer conn.Close()
-		tls.Server(conn, &tls.Config{GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			serverName <- hello.ServerName
+		tls.Server(conn, &tls.Config{GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+			serverName <- info.ServerName
+			hello <- info
 			return nil, errors.New("captured")
 		}}).Handshake()
 	}()
@@ -103,7 +105,10 @@ func TestNekoYggdrasilPeerSNI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.New(certificate, &coreLogger{log.NewNOPFactory().Logger()})
+	node, err := core.New(certificate, &coreLogger{log.NewNOPFactory().Logger()}, core.LinkDialer{
+		DialContext: (&net.Dialer{}).DialContext,
+		TLSClient:   chromeTLSClient,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +125,64 @@ func TestNekoYggdrasilPeerSNI(t *testing.T) {
 		if name != "y.example.com" {
 			t.Fatalf("SNI %q, want y.example.com", name)
 		}
+		// a browser ClientHello: GREASE cipher suites and the hybrid group, not crypto/tls
+		info := <-hello
+		grease, hybrid := false, false
+		for _, suite := range info.CipherSuites {
+			grease = grease || suite&0x0f0f == 0x0a0a
+		}
+		for _, curve := range info.SupportedCurves {
+			hybrid = hybrid || curve == tls.X25519MLKEM768
+		}
+		if !grease || !hybrid {
+			t.Fatalf("not a Chrome ClientHello: grease %v, X25519MLKEM768 %v", grease, hybrid)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("no ClientHello")
 	}
+}
+
+// Two nodes peer over a tls:// link with the Chrome ClientHello (ed25519 node certificates).
+func TestNekoYggdrasilChromeLink(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := probe.Addr().String()
+	probe.Close()
+	newNode := func(seed string, setup ...core.SetupOption) *core.Core {
+		privateKey, err := parsePrivateKey(strings.Repeat(seed, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		certificate, err := selfSignedCertificate(privateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		node, err := core.New(certificate, &coreLogger{log.NewNOPFactory().Logger()}, setup...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(node.Stop)
+		return node
+	}
+	newNode("a1", core.ListenAddress("tls://"+address))
+	client := newNode("b2", core.LinkDialer{DialContext: (&net.Dialer{}).DialContext, TLSClient: chromeTLSClient})
+	peer, err := parsePeer("tls://" + address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = client.AddPeer(peer, ""); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, info := range client.GetPeers() {
+			if info.Up {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no link up: %+v", client.GetPeers())
 }

@@ -32,4 +32,6 @@ type TUICOutboundOptions struct {
 	Network           NetworkList        `json:"network,omitempty"`
 	OutboundTLSOptionsContainer
 	QUICOptions
+	// neko: common/udpdesync
+	UDPDesync *UDPDesyncOptions `json:"udp_desync,omitempty"`
 }

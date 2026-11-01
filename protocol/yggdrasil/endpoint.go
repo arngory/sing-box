@@ -86,6 +86,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
+	tlsClient, err := linkTLSClient(options.TLSFingerprint)
+	if err != nil {
+		return nil, err
+	}
 	setup := []core.SetupOption{
 		// before the peers: their links dial through it
 		core.LinkDialer{
@@ -95,6 +99,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			ListenPacket: func(ctx context.Context, network, address string) (net.PacketConn, error) {
 				return peerDialer.ListenPacket(ctx, M.ParseSocksaddr(address))
 			},
+			TLSClient: tlsClient,
 		},
 		core.NodeInfoPrivacy(options.NodeInfoPrivacy),
 	}

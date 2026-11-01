@@ -49,6 +49,14 @@ func (l *linkTLS) dial(ctx context.Context, url *url.URL, info linkInfo, options
 			if err != nil {
 				return nil, err
 			}
+			if client := l.core.config.linkDialer.TLSClient; client != nil {
+				tlsConn, err := client(ctx, conn, tlsconfig)
+				if err != nil {
+					conn.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			}
 			tlsConn := tls.Client(conn, tlsconfig)
 			if err = tlsConn.HandshakeContext(ctx); err != nil {
 				conn.Close()

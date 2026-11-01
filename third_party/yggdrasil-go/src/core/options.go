@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
@@ -65,6 +66,9 @@ type GroupPassword string
 type LinkDialer struct {
 	DialContext  func(ctx context.Context, network, address string) (net.Conn, error)
 	ListenPacket func(ctx context.Context, network, address string) (net.PacketConn, error)
+	// TLSClient, if set, runs the client handshake of tls:// links dialled through
+	// DialContext (neko: a browser ClientHello); nil uses crypto/tls.
+	TLSClient func(ctx context.Context, conn net.Conn, config *tls.Config) (net.Conn, error)
 }
 
 func (a ListenAddress) isSetupOption()    {}

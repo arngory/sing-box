@@ -17,4 +17,7 @@ type YggdrasilEndpointOptions struct {
 	NodeInfo          map[string]any     `json:"node_info,omitempty"`
 	NodeInfoPrivacy   bool               `json:"node_info_privacy,omitempty"`
 	UDPTimeout        badoption.Duration `json:"udp_timeout,omitempty"`
+	// TLSFingerprint is the ClientHello of outgoing tls:// links: "" or "chrome" (uTLS, a browser
+	// ClientHello), "go" (crypto/tls, as yggdrasil-go sends it)
+	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
 }
