@@ -385,6 +385,8 @@ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChain
 					return nil
 				}
 			}
+			// the REALITY key matched: this is the server, its ML-DSA-65 key is not the one given
+			return E.New("reality: the server's ML-DSA-65 signature does not match mldsa65_verify")
 		}
 	}
 	opts := x509.VerifyOptions{
