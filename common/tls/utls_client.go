@@ -39,6 +39,8 @@ type UTLSClientConfig struct {
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+	// neko: curve_preferences narrows the fingerprint's groups (uTLS ignored it before)
+	curves []utls.CurveID
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -90,7 +92,7 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos}, nil
+	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos, c.curves}, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
@@ -111,6 +113,7 @@ func (c *UTLSClientConfig) Clone() Config {
 		recordFragment:        c.recordFragment,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
+		curves:                c.curves,
 	}
 	cloned.SetServerName(cloned.serverName)
 	return cloned
@@ -162,9 +165,51 @@ func (c *utlsConnWrapper) WriterReplaceable() bool {
 type utlsALPNWrapper struct {
 	utlsConnWrapper
 	nextProtocols []string
+	curves        []utls.CurveID
+}
+
+// isGREASECurve matches the GREASE values a fingerprint adds (0x?a?a, both bytes equal).
+func isGREASECurve(curve utls.CurveID) bool {
+	return curve&0x0f0f == 0x0a0a && curve>>8 == curve&0xff
+}
+
+// restrictCurves keeps only the allowed groups (and GREASE) in the fingerprint's
+// supported_groups and key_share, and fails when no key share is left.
+func restrictCurves(uConn *utls.UConn, allowed []utls.CurveID) error {
+	keep := func(curve utls.CurveID) bool {
+		return isGREASECurve(curve) || common.Contains(allowed, curve)
+	}
+	shares := 0
+	for _, extension := range uConn.Extensions {
+		switch e := extension.(type) {
+		case *utls.SupportedCurvesExtension:
+			e.Curves = common.Filter(e.Curves, keep)
+		case *utls.KeyShareExtension:
+			e.KeyShares = common.Filter(e.KeyShares, func(share utls.KeyShare) bool { return keep(share.Group) })
+			for _, share := range e.KeyShares {
+				if !isGREASECurve(share.Group) {
+					shares++
+				}
+			}
+		}
+	}
+	if shares == 0 {
+		return E.New("uTLS fingerprint ", uConn.ClientHelloID.Client, " ", uConn.ClientHelloID.Version, " has no key share among curve_preferences")
+	}
+	return uConn.BuildHandshakeState()
 }
 
 func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
+	if len(c.curves) > 0 {
+		err := c.BuildHandshakeState()
+		if err != nil {
+			return err
+		}
+		err = restrictCurves(c.UConn, c.curves)
+		if err != nil {
+			return err
+		}
+	}
 	if len(c.nextProtocols) > 0 {
 		err := c.BuildHandshakeState()
 		if err != nil {
@@ -320,6 +365,9 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		recordFragment:        options.RecordFragment,
 		spoof:                 spoof,
 		spoofMethod:           spoofMethod,
+	}
+	for _, curve := range options.CurvePreferences {
+		config.(*UTLSClientConfig).curves = append(config.(*UTLSClientConfig).curves, utls.CurveID(curve))
 	}
 	config.SetServerName(serverName)
 	if options.ECH != nil && options.ECH.Enabled {
