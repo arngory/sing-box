@@ -95,3 +95,22 @@ func containsCurve(curves []tls.CurveID, want tls.CurveID) bool {
 	}
 	return false
 }
+
+// XHTTP over HTTP/3 builds its ClientHello with crypto/tls from the uTLS config: the curves carry over.
+func TestNekoUTLSCurvePreferencesSTD(t *testing.T) {
+	config, err := NewUTLSClient(context.Background(), nil, "example.com", option.OutboundTLSOptions{
+		Enabled: true, ServerName: "example.com",
+		UTLS:             &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"},
+		CurvePreferences: []option.CurvePreference{option.CurvePreference(option.X25519MLKEM768)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	std, err := config.(*UTLSClientConfig).lxSTDConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(std.CurvePreferences) != 1 || std.CurvePreferences[0] != tls.X25519MLKEM768 {
+		t.Fatalf("curves %v, want [X25519MLKEM768]", std.CurvePreferences)
+	}
+}

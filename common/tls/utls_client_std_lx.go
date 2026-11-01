@@ -27,6 +27,10 @@ func (c *UTLSClientConfig) lxSTDConfig() (*STDConfig, error) {
 		CipherSuites:          slices.Clone(config.CipherSuites),
 		ServerName:            config.ServerName,
 	}
+	// neko: curve_preferences (raycontrol nodes: X25519MLKEM768 only) holds here too
+	for _, curve := range c.curves {
+		stdConfig.CurvePreferences = append(stdConfig.CurvePreferences, tls.CurveID(curve))
+	}
 	for _, certificate := range config.Certificates {
 		stdConfig.Certificates = append(stdConfig.Certificates, tls.Certificate{
 			Certificate:                 certificate.Certificate,
