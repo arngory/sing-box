@@ -82,11 +82,46 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 	server.SetStreamDialer(func(_, _ string, timeout time.Duration) (net.Conn, error) {
 		return options.Dial(timeout)
 	})
+	// DNS queries through the tunnel get REFUSED: the node resolves nothing itself
+	// (the client resolves inside the inner stage); without this the server would
+	// ask 1.1.1.1 straight from the node
+	server.SetDNSResolver(RefuseQuery)
 	err = server.Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
+}
+
+// RefuseQuery answers a DNS query with REFUSED: same ID, opcode and RD, the question echoed.
+func RefuseQuery(query []byte) ([]byte, error) {
+	if len(query) < 12 || query[2]&0x80 != 0 {
+		return nil, errors.New("masterdnsvpn: not a DNS query")
+	}
+	end := 12
+	if query[4] != 0 || query[5] != 0 {
+		for end < len(query) && query[end] != 0 {
+			if query[end]&0xc0 != 0 {
+				return nil, errors.New("masterdnsvpn: compressed question")
+			}
+			end += int(query[end]) + 1
+		}
+		end += 1 + 4
+		if end > len(query) {
+			return nil, errors.New("masterdnsvpn: short question")
+		}
+	}
+	answer := make([]byte, end)
+	copy(answer, query[:end])
+	answer[2] = 0x80 | query[2]&0x79
+	answer[3] = 5
+	if end > 12 {
+		answer[4], answer[5] = 0, 1
+	}
+	for i := 6; i < 12; i++ {
+		answer[i] = 0
+	}
+	return answer, nil
 }
 
 // readKey reads the key as the server would, but fails instead of writing a new one.

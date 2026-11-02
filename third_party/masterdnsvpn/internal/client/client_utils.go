@@ -177,7 +177,7 @@ func (c *Client) IsSessionReady() bool {
 }
 
 func (c *Client) ResponseMode() uint8 {
-	return c.responseMode
+	return uint8(c.responseMode.Load())
 }
 
 func (c *Client) NotifyPacket(packetType uint8, isInbound bool) {

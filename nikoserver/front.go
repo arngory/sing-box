@@ -18,22 +18,7 @@ func RunFront(ctx context.Context, c *FrontConfig, log *Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	links := make(map[string]*backendLink)
-	for name, ref := range c.Backends {
-		link := &backendLink{name: name, ref: ref, log: log, out: make(chan []byte, 1024)}
-		links[name] = link
-		go link.run(ctx)
-	}
-
-	zones := make([]string, 0, len(c.DNS.Zones))
-	zoneBackend := make(map[string]*backendLink)
-	for _, z := range c.DNS.Zones {
-		zone := strings.ToLower(strings.TrimSuffix(z.Zone, "."))
-		zones = append(zones, zone)
-		zoneBackend[zone] = links[z.Backend]
-	}
-
-	front := &dnsFront{log: log, zones: zones, zoneBackend: zoneBackend, sockets: make(map[netip.AddrPort]*net.UDPConn)}
+	front := &dnsFront{log: log, zoneBackend: make(map[string]*backendLink), sockets: make(map[netip.AddrPort]*net.UDPConn)}
 	for _, listen := range c.DNS.Listen {
 		addr := netip.MustParseAddrPort(listen)
 		network := "udp6"
@@ -50,9 +35,21 @@ func RunFront(ctx context.Context, c *FrontConfig, log *Logger) error {
 		conn.SetWriteBuffer(4 << 20)
 		front.sockets[addr] = conn
 	}
-	for _, link := range links {
-		link.answer = front.answer
+
+	// the links answer through the front's sockets: built complete before they run
+	links := make(map[string]*backendLink)
+	for name, ref := range c.Backends {
+		links[name] = &backendLink{name: name, ref: ref, log: log, out: make(chan []byte, 1024), answer: front.answer}
 	}
+	for _, z := range c.DNS.Zones {
+		zone := strings.ToLower(strings.TrimSuffix(z.Zone, "."))
+		front.zones = append(front.zones, zone)
+		front.zoneBackend[zone] = links[z.Backend]
+	}
+	for _, link := range links {
+		go link.run(ctx)
+	}
+	zones := front.zones
 	log.Infof("DNS front on %s, zones %s", strings.Join(c.DNS.Listen, ", "), strings.Join(zones, ", "))
 
 	errCh := make(chan error, len(front.sockets))

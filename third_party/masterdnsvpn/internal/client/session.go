@@ -163,7 +163,7 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
 
 		c.sessionID = sessionAccept.SessionID
 		c.sessionCookie = sessionAccept.SessionCookie
-		c.responseMode = initPayload[0]
+		c.responseMode.Store(uint32(initPayload[0]))
 		c.uploadCompression, c.downloadCompression = compression.SplitPair(sessionAccept.CompressionPair)
 		if sessionAccept.HasClientPolicySync {
 			c.applySessionClientPolicy(sessionAccept.ClientPolicy)

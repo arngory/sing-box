@@ -27,3 +27,10 @@ func (s *Server) SetListener(conn UDPConn) {
 func (s *Server) SetStreamDialer(dial func(network, address string, timeout time.Duration) (net.Conn, error)) {
 	s.dialStreamUpstreamFn = dial
 }
+
+// SetDNSResolver replaces how the server answers the DNS queries clients send
+// through the tunnel (neko: niko-server refuses them, the node resolves nothing
+// outside the inner stage).
+func (s *Server) SetDNSResolver(resolve func(query []byte) ([]byte, error)) {
+	s.resolveDNSQueryFn = resolve
+}

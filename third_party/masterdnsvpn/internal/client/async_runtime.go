@@ -243,7 +243,7 @@ func (c *Client) resetSessionState(resetSessionCookie bool) {
 	if resetSessionCookie {
 		c.sessionCookie = 0
 	}
-	c.responseMode = 0
+	c.responseMode.Store(0)
 	c.clearSessionInitBusyUntil()
 	c.resetSessionInitState()
 }
@@ -879,7 +879,7 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 	// c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
 
 	// 1. Extract VPN Packet from DNS Response
-	vpnPacket, err := DnsParser.ExtractVPNResponse(data, c.responseMode == mtuProbeBase64Reply)
+	vpnPacket, err := DnsParser.ExtractVPNResponse(data, uint8(c.responseMode.Load()) == mtuProbeBase64Reply)
 	if err != nil {
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()

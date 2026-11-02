@@ -72,9 +72,10 @@ type Client struct {
 	streamResolverFailoverCooldown        time.Duration
 
 	// Session States
-	sessionID             uint8
-	sessionCookie         uint8
-	responseMode          uint8
+	sessionID     uint8
+	sessionCookie uint8
+	// neko: atomic, the session init writes it while racing requests still read it
+	responseMode          atomic.Uint32
 	sessionReady          bool
 	initStateMu           sync.Mutex
 	sessionInitReady      bool
@@ -105,7 +106,7 @@ type Client struct {
 	tcpListener *TCPListener
 	// neko: when set, the proxy listener comes from the embedding program instead of a port
 	listenerFactory func() (net.Listener, error)
-	dnsListener *DNSListener
+	dnsListener     *DNSListener
 
 	// Stream Management
 	streamsMu             sync.RWMutex
@@ -255,7 +256,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		downloadCompression: uint8(cfg.DownloadCompressionType),
 		mtuCryptoOverhead:   mtuCryptoOverhead(cfg.DataEncryptionMethod),
 		maxPackedBlocks:     1,
-		responseMode:        responseMode,
 		udpBufferPool: sync.Pool{
 			New: func() any {
 				return make([]byte, RuntimeUDPReadBufferSize)
@@ -327,6 +327,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	})
 
 	c.pingManager = newPingManager(c)
+	c.responseMode.Store(uint32(responseMode))
 	return c
 }
 
