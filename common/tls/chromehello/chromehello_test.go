@@ -71,6 +71,23 @@ func TestPerConnection(t *testing.T) {
 	if len(orders) < 10 || len(sigGREASE) < 3 || len(keys) != 20 {
 		t.Fatalf("per connection: %d orders, %d signature GREASE values, %d key shares of 20", len(orders), len(sigGREASE), len(keys))
 	}
+	// GREASE ECH (when the capture has it): new bytes per connection, the capture's length
+	raw, _ := Raw()
+	captured, _ := Parse(raw)
+	if echCaptured, ok := captured.Data[extECH]; ok {
+		seen := map[string]bool{}
+		for range 5 {
+			h, _ := Parse(coreHello(t, "www.example.com"))
+			ech := h.Data[extECH]
+			if len(ech) != len(echCaptured) {
+				t.Fatalf("GREASE ECH of %d bytes, the capture's has %d", len(ech), len(echCaptured))
+			}
+			seen[string(ech)] = true
+		}
+		if len(seen) != 5 {
+			t.Fatal("GREASE ECH repeats between connections")
+		}
+	}
 }
 
 // TestNoSNIForAddress: like Chrome, no server_name for an IP address; and never the capture's name.
