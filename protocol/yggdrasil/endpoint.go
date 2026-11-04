@@ -282,6 +282,12 @@ func (e *Endpoint) pumpIn() {
 	}
 }
 
+// Peers is the state of the node's peer links (neko): the configured peers with whether each is up, its latency and
+// its last error, and the inbound ones. A client checks public peers with a node of its own before it takes them.
+func (e *Endpoint) Peers() []core.PeerInfo {
+	return e.core.GetPeers()
+}
+
 func (e *Endpoint) Close() error {
 	select {
 	case <-e.closed:
