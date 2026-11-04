@@ -44,15 +44,17 @@ type dnsPacketConn struct {
 	pollChan  chan struct{}
 	transport net.PacketConn
 	logger    logger.ContextLogger
+	authKey   []byte // dnsauth-v1, nil without
 	done      chan struct{}
 	closeOnce sync.Once
 	*turbotunnel.QueuePacketConn
 }
 
-func newDNSPacketConn(transport net.PacketConn, addr net.Addr, domain dns.Name, logger logger.ContextLogger) *dnsPacketConn {
+func newDNSPacketConn(transport net.PacketConn, addr net.Addr, domain dns.Name, logger logger.ContextLogger, authKey []byte) *dnsPacketConn {
 	clientID := turbotunnel.NewClientID()
 	c := &dnsPacketConn{
 		clientID:        clientID,
+		authKey:         authKey,
 		domain:          domain,
 		pollChan:        make(chan struct{}, pollLimit),
 		transport:       transport,
@@ -179,8 +181,13 @@ func (c *dnsPacketConn) send(p []byte, addr net.Addr) error {
 		decoded.WriteByte(byte(len(p)))
 		decoded.Write(p)
 	}
-	encoded := make([]byte, base32Encoding.EncodedLen(decoded.Len()))
-	base32Encoding.Encode(encoded, decoded.Bytes())
+	payload := decoded.Bytes()
+	if c.authKey != nil {
+		// dnsauth-v1: tag (8) || ClientID || padding and packets
+		payload = append(authTag(c.authKey, payload, time.Now()), payload...)
+	}
+	encoded := make([]byte, base32Encoding.EncodedLen(len(payload)))
+	base32Encoding.Encode(encoded, payload)
 	labels := append(chunks(bytes.ToLower(encoded), 63), c.domain...)
 	name, err := dns.NewName(labels)
 	if err != nil {

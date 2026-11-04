@@ -175,9 +175,12 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	if e.uClient.fragment || e.uClient.recordFragment {
 		conn = tf.NewConn(conn, ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
 	}
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
+	uConn, err := newUClient(conn, uConfig, e.uClient.id)
+	if err != nil {
+		return nil, err
+	}
 	verifier.UConn = uConn
-	err := uConn.BuildHandshakeState()
+	err = uConn.BuildHandshakeState()
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/sagernet/sing/service/filemanager"
 
 	utls "github.com/metacubex/utls"
+	"github.com/sagernet/sing-box/common/tls/chromehello"
 	"golang.org/x/net/http2"
 )
 
@@ -92,7 +93,31 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos, c.curves}, nil
+	uConn, err := newUClient(conn, c.config.Clone(), c.id)
+	if err != nil {
+		return nil, err
+	}
+	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos, c.curves}, nil
+}
+
+// helloChromeReference stands for the "chrome" fingerprint: the ClientHello captured from a real Chrome
+// (common/tls/chromehello), not uTLS's hand-written HelloChrome preset, which lags the browser (neko).
+var helloChromeReference = utls.ClientHelloID{Client: "Chrome", Version: "reference"}
+
+// newUClient makes the uTLS connection for a fingerprint; the Chrome reference is applied as a custom spec.
+func newUClient(conn net.Conn, config *utls.Config, id utls.ClientHelloID) (*utls.UConn, error) {
+	if id != helloChromeReference {
+		return utls.UClient(conn, config, id), nil
+	}
+	spec, err := chromehello.Spec()
+	if err != nil {
+		return nil, E.Cause(err, "Chrome reference ClientHello")
+	}
+	uConn := utls.UClient(conn, config, utls.HelloCustom)
+	if err = uConn.ApplyPreset(spec); err != nil {
+		return nil, E.Cause(err, "Chrome reference ClientHello")
+	}
+	return uConn, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
@@ -400,7 +425,7 @@ var (
 
 func init() {
 	modernFingerprints := []utls.ClientHelloID{
-		utls.HelloChrome_Auto,
+		helloChromeReference,
 		utls.HelloFirefox_Auto,
 		utls.HelloEdge_Auto,
 		utls.HelloSafari_Auto,
@@ -421,7 +446,7 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
 		fallthrough
 	case "chrome", "":
-		return utls.HelloChrome_Auto, nil
+		return helloChromeReference, nil
 	case "firefox":
 		return utls.HelloFirefox_Auto, nil
 	case "edge":

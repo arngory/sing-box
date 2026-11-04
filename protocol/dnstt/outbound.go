@@ -61,6 +61,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			tlsConfig.SetNextProtos([]string{"http/1.1"})
 		}
 	}
+	var authKey []byte
+	if options.Auth != nil {
+		deviceKey, err := dnstt.ResolveDeviceKey(options.Auth.DeviceKey, options.Auth.DeviceKeyRef)
+		if err != nil {
+			return nil, err
+		}
+		authKey, err = dnstt.AuthKey(deviceKey, options.Auth.NodeID, options.Auth.ServiceID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	client, err := dnstt.NewClient(dnstt.ClientOptions{
 		Context:   ctx,
 		Logger:    logger,
@@ -69,6 +80,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		PubKey:    options.PublicKey,
 		Resolver:  resolver,
 		TLSConfig: tlsConfig,
+		AuthKey:   authKey,
 	})
 	if err != nil {
 		return nil, err

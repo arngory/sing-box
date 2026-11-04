@@ -10,6 +10,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 
 	utls "github.com/metacubex/utls"
+	"github.com/sagernet/sing-box/common/tls/chromehello"
 )
 
 // linkTLSClient returns the client handshake of tls:// links. crypto/tls has a
@@ -28,7 +29,8 @@ func linkTLSClient(fingerprint string) (func(ctx context.Context, conn net.Conn,
 }
 
 func chromeTLSClient(ctx context.Context, conn net.Conn, config *tls.Config) (net.Conn, error) {
-	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+	// the ClientHello of a real Chrome, as the core's "chrome" fingerprint (common/tls/chromehello)
+	spec, err := chromehello.Spec()
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +45,7 @@ func chromeTLSClient(ctx context.Context, conn net.Conn, config *tls.Config) (ne
 		InsecureSkipVerify: true,
 		MinVersion:         utls.VersionTLS13,
 	}, utls.HelloCustom)
-	if err = uConn.ApplyPreset(&spec); err != nil {
+	if err = uConn.ApplyPreset(spec); err != nil {
 		return nil, err
 	}
 	if err = uConn.HandshakeContext(ctx); err != nil {

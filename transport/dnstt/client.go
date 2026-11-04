@@ -89,6 +89,8 @@ type ClientOptions struct {
 	Resolver Resolver
 	// TLS for DoH and DoT; nil uses the resolver host as server name
 	TLSConfig tls.Config
+	// raycontrol dnsauth-v1 tag key (AuthKey); nil sends queries without a tag
+	AuthKey []byte
 }
 
 type Client struct {
@@ -100,6 +102,7 @@ type Client struct {
 	resolver Resolver
 	tls      tls.Config
 	mtu      int
+	authKey  []byte
 
 	access  sync.Mutex
 	session *session
@@ -126,8 +129,11 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, E.Cause(err, "parse public key")
 	}
-	// clientid + padding length prefix + padding + data length prefix
+	// clientid + padding length prefix + padding + data length prefix (+ the dnsauth tag)
 	mtu := dnsNameCapacity(domain) - 8 - 1 - numPadding - 1
+	if options.AuthKey != nil {
+		mtu -= authTagLen
+	}
 	if mtu < 80 {
 		return nil, E.New("domain ", options.Domain, " leaves only ", mtu, " bytes for the payload")
 	}
@@ -140,6 +146,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		resolver: options.Resolver,
 		tls:      options.TLSConfig,
 		mtu:      mtu,
+		authKey:  options.AuthKey,
 	}, nil
 }
 
@@ -201,7 +208,7 @@ func (c *Client) newSession(ctx context.Context) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	packetConn := newDNSPacketConn(transport, remoteAddr, c.domain, c.logger)
+	packetConn := newDNSPacketConn(transport, remoteAddr, c.domain, c.logger, c.authKey)
 	kcpConn, err := kcp.NewConn2(remoteAddr, nil, 0, 0, packetConn)
 	if err != nil {
 		packetConn.Close()
