@@ -266,17 +266,19 @@ func (e *Endpoint) pumpOut() {
 	}
 }
 
-// pumpIn hands packets from the mesh to the stack.
+// pumpIn hands packets from the mesh to the stack. One buffer for all of them (neko): the device takes a packet
+// before Write returns (gVisor's stack copies it into its own buffer, a system tun writes it out), so a copy per
+// packet would only cost the allocation.
 func (e *Endpoint) pumpIn() {
 	buf := make([]byte, e.rwc.MTU())
+	packets := [][]byte{nil}
 	for {
 		n, err := e.rwc.Read(buf)
 		if err != nil {
 			return
 		}
-		packet := make([]byte, n)
-		copy(packet, buf[:n])
-		if _, err = e.device.Write([][]byte{packet}, 0); err != nil {
+		packets[0] = buf[:n]
+		if _, err = e.device.Write(packets, 0); err != nil {
 			e.logger.Debug("yggdrasil: deliver: ", err)
 		}
 	}
