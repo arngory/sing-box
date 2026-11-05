@@ -9,7 +9,8 @@ import (
 )
 
 // TestNekoDNSAuthVector: K and the tag of dnsauth-v1 (raycontrol docs/spec/dnsauth-v1.md §2-§3), against values
-// computed independently from the spec (Python hmac/hashlib); K also as raycontrol internal/spa DNSAuthKey.
+// computed independently from the spec (Python hmac/hashlib) and confirmed by raycontrol (TestDerivedKeyVectors)
+// and niko-server (TestTagVector); the second, the spec's own.
 func TestNekoDNSAuthVector(t *testing.T) {
 	key, err := AuthKey(bytes.Repeat([]byte{0x11}, 32), strings.Repeat("33", 16), 3)
 	if err != nil {
@@ -29,6 +30,18 @@ func TestNekoDNSAuthVector(t *testing.T) {
 	if !bytes.Equal(authTag(key, payload, time.Unix(1767268800+599, 0)), authTag(key, payload, time.Unix(1767268800, 0))) ||
 		bytes.Equal(authTag(key, payload, time.Unix(1767268800+600, 0)), authTag(key, payload, time.Unix(1767268800, 0))) {
 		t.Fatal("epoch")
+	}
+	// the spec's own vector (dnsauth-v1 §2), as raycontrol TestDerivedKeyVectors: key 00..1f, node a0..af, svc 3
+	ordered := make([]byte, 32)
+	for i := range ordered {
+		ordered[i] = byte(i)
+	}
+	key2, err := AuthKey(ordered, "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(key2); got != "0b485b425e8b19e0ec7c0362d55fdc34338147f984b87ee005455c8f5fc68b1c" {
+		t.Fatalf("K of the spec's vector %s", got)
 	}
 	if _, err = AuthKey(make([]byte, 31), strings.Repeat("33", 16), 3); err == nil {
 		t.Fatal("short device key accepted")
