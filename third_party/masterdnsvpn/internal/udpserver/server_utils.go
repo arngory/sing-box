@@ -110,17 +110,6 @@ func buildCompressionMask(values []int) uint8 {
 	return mask
 }
 
-func parseMTUProbeBaseEncoding(mode uint8) (bool, bool) {
-	switch mode {
-	case mtuProbeModeRaw:
-		return false, true
-	case mtuProbeModeBase64:
-		return true, true
-	default:
-		return false, false
-	}
-}
-
 func buildMTUProbeMetaPayload(probeCode []byte, payloadLen int) [mtuProbeMetaLength]byte {
 	var payload [mtuProbeMetaLength]byte
 	copy(payload[:mtuProbeCodeLength], probeCode)

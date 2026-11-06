@@ -21,6 +21,7 @@ import (
 	"masterdnsvpn-go/internal/compression"
 	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
+	"masterdnsvpn-go/internal/mdseal"
 	"masterdnsvpn-go/internal/mlq"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -358,14 +359,12 @@ func (c *Client) buildSessionInitPayload() ([]byte, bool, [4]byte, error) {
 	copy(verifyCode[:], randomPart)
 
 	payload := make([]byte, sessionInitPayloadSize)
-	if c.cfg.BaseEncodeData {
-		payload[0] = mtuProbeBase64Reply
-	}
+	payload[0] = c.configuredResponseMode()
 	payload[1] = compression.PackPair(c.uploadCompression, c.downloadCompression)
 	binary.BigEndian.PutUint16(payload[2:4], uint16(c.syncedUploadMTU))
 	binary.BigEndian.PutUint16(payload[4:6], uint16(c.syncedDownloadMTU))
 	copy(payload[6:10], verifyCode[:])
-	return payload, payload[0] == mtuProbeBase64Reply, verifyCode, nil
+	return payload, payload[0]&^mdseal.ModeBit == mtuProbeBase64Reply, verifyCode, nil
 }
 
 func (c *Client) nextSessionInitAttempt() (Connection, []byte, [4]byte, error) {

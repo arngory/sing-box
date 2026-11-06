@@ -36,6 +36,9 @@ type ServerOptions struct {
 	// MaxDownloadMTU is the most a session's answers carry and its MTU probes ask
 	// (MAX_ALLOWED_CLIENT_DOWNLOAD_MTU); 0 is DefaultMaxDownloadMTU
 	MaxDownloadMTU int
+	// Seal is mdseal-v1's mode: "" or "off", "optional", "required" (raycontrol docs/spec/mdseal-v1.md §5); the key
+	// is the text of KeyFile, and a seal needs one (Method 1-5)
+	Seal string
 	// Log receives the server log (nil: discarded)
 	Log io.Writer
 }
@@ -56,9 +59,16 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 	if err != nil {
 		return err
 	}
+	seal, err := udpserver.ParseSealMode(options.Seal)
+	if err != nil {
+		return err
+	}
 	key, err := readKey(options.KeyFile, options.Method)
 	if err != nil {
 		return err
+	}
+	if seal != 0 && key == "" {
+		return errors.New("masterdnsvpn: a seal needs the key (DATA_ENCRYPTION_METHOD 1-5)")
 	}
 	codec, err := security.NewCodecFromConfig(cfg, key)
 	if err != nil {
@@ -71,6 +81,9 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 		log = logger.NewWithWriter("MasterDnsVPN Server", cfg.LogLevel, io.Discard)
 	}
 	server := udpserver.New(cfg, log, codec)
+	if err := server.SetSeal(seal, key); err != nil {
+		return fmt.Errorf("masterdnsvpn: seal: %w", err)
+	}
 	server.SetListener(options.Conn)
 	server.SetStreamDialer(func(_, _ string, timeout time.Duration) (net.Conn, error) {
 		return options.Dial(timeout)

@@ -41,17 +41,59 @@ func TestNekoMasterDNSVPNEcho(t *testing.T) {
 		{"resolver of 1232, client of 1200", 1232, map[string]any{"max_download_mtu": 1200}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			nekoEcho(t, c.resolver, c.extra, c.cut)
+			nekoEcho(t, nekoEchoCase{resolver: c.resolver, extra: c.extra, mustCut: c.cut, session: true})
 		})
 	}
 }
 
-func nekoEcho(t *testing.T, resolverSize uint16, extra map[string]any, mustCut bool) {
+// mdseal-v1: sealed sessions through a resolver; a client that seals and a node that does not (or the other way round
+// in required) get no session, the node answering bit 7 or its absence as an unknown mode.
+func TestNekoMasterDNSVPNSealed(t *testing.T) {
+	for _, c := range []struct {
+		name, server, client string
+		resolver             uint16
+		session              bool
+	}{
+		{"optional", "optional", "optional", 0, true},
+		{"required, resolver of 1232", "required", "required", 1232, true},
+		{"required, resolver of 700", "required", "required", 700, true},
+		{"optional node, open client", "optional", "", 1232, true},
+		{"base64 sealed", "required", "required", 1232, true},
+		{"node off, sealed client", "", "optional", 0, false},
+		{"required node, open client", "required", "", 0, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			extra := map[string]any{}
+			if c.client != "" {
+				extra["niko_mdseal"] = c.client
+			}
+			if c.name == "base64 sealed" {
+				extra["base_encode_data"] = true
+			}
+			nekoEcho(t, nekoEchoCase{resolver: c.resolver, extra: extra, seal: c.server, session: c.session})
+		})
+	}
+}
+
+type nekoEchoCase struct {
+	resolver uint16 // 0: directly
+	extra    map[string]any
+	mustCut  bool   // the probes must meet the size
+	seal     string // the node's mdseal mode
+	session  bool   // a session must come up (else: must not, within a short wait)
+}
+
+func nekoEcho(t *testing.T, c nekoEchoCase) {
+	resolverSize, extra, mustCut := c.resolver, c.extra, c.mustCut
 	workDir := t.TempDir()
 	oldDir, _ := os.Getwd()
 	os.Chdir(workDir)
 	defer os.Chdir(oldDir)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	timeout := 60 * time.Second
+	if !c.session {
+		timeout = 12 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
@@ -87,6 +129,7 @@ func nekoEcho(t *testing.T, resolverSize uint16, extra map[string]any, mustCut b
 			Domains: []string{"v.example.com"},
 			Method:  5,
 			KeyFile: keyFile,
+			Seal:    c.seal,
 			Conn:    serverConn,
 			Dial: func(timeout time.Duration) (net.Conn, error) {
 				return net.DialTimeout("tcp", echo.Addr().String(), timeout)
@@ -127,10 +170,22 @@ func nekoEcho(t *testing.T, resolverSize uint16, extra map[string]any, mustCut b
 		conn, err = outbound.(*Outbound).DialContext(dialCtx, "tcp", M.ParseSocksaddr("example.com:443"))
 		dialCancel()
 		if err != nil && ctx.Err() != nil {
+			if !c.session {
+				return
+			}
 			t.Fatal("no session: ", err)
 		}
 	}
 	defer conn.Close()
+	if !c.session {
+		// a stream is set up lazily: what must not come is its data back
+		conn.SetDeadline(time.Now().Add(8 * time.Second))
+		conn.Write([]byte("ping"))
+		if n, _ := conn.Read(make([]byte, 4)); n > 0 {
+			t.Fatal("a session came up the seal modes do not allow")
+		}
+		return
+	}
 	if through != nil {
 		through.sessionUp.Store(true)
 	}
@@ -238,4 +293,135 @@ func nekoWithSize(query []byte, size uint16) []byte {
 	out := append([]byte(nil), query...)
 	binary.BigEndian.PutUint16(out[end:end+2], size)
 	return out
+}
+
+// A node that restarts mid-session knows the session no longer: its ERROR_DROP (raw, whatever the session's encoding)
+// makes the client set up a new one, and the client reads the new SESSION_ACCEPT in its own encoding. Upstream's
+// client reset its mode to raw there, so a base64 client never got a new session; its node alternated the
+// ERROR_DROP's encoding.
+func TestNekoMasterDNSVPNNodeRestart(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		seal  string
+		extra map[string]any
+	}{
+		{"raw", "", nil},
+		{"base64", "", map[string]any{"base_encode_data": true}},
+		{"base64 sealed", "required", map[string]any{"base_encode_data": true, "niko_mdseal": "required"}},
+		{"sealed optional", "optional", map[string]any{"niko_mdseal": "optional"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			nekoNodeRestart(t, c.seal, c.extra)
+		})
+	}
+}
+
+func nekoNodeRestart(t *testing.T, seal string, extra map[string]any) {
+	workDir := t.TempDir()
+	oldDir, _ := os.Getwd()
+	os.Chdir(workDir)
+	defer os.Chdir(oldDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				io.Copy(conn, conn)
+			}()
+		}
+	}()
+	key := strings.Repeat("k", 32)
+	keyFile := filepath.Join(workDir, "key")
+	if err = os.WriteFile(keyFile, []byte(key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	serverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := serverConn.LocalAddr().(*net.UDPAddr)
+	run := func(ctx context.Context, conn *net.UDPConn) chan error {
+		done := make(chan error, 1)
+		go func() {
+			done <- embed.RunServer(ctx, embed.ServerOptions{
+				Domains: []string{"v.example.com"}, Method: 5, KeyFile: keyFile, Seal: seal, Conn: conn,
+				Dial: func(timeout time.Duration) (net.Conn, error) {
+					return net.DialTimeout("tcp", echo.Addr().String(), timeout)
+				},
+			})
+		}()
+		return done
+	}
+	firstCtx, stopFirst := context.WithCancel(ctx)
+	firstDone := run(firstCtx, serverConn)
+
+	options := map[string]any{"mtu_test_timeout": 1.0}
+	for key, value := range extra {
+		options[key] = value
+	}
+	outbound, err := NewOutbound(ctx, nil, log.NewNOPFactory().Logger(), "mdv", option.MasterDNSVPNOutboundOptions{
+		Domains: []string{"v.example.com"}, Resolvers: []string{address.String()}, Mode: "tcp",
+		EncryptionMethod: 5, EncryptionKey: key, Extra: options,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := adapter.NewScope(ctx, log.NewNOPFactory().Logger())
+	if err = outbound.(*Outbound).Start(adapter.StartStateStart, scope); err != nil {
+		t.Fatal(err)
+	}
+	defer outbound.(*Outbound).Close()
+
+	roundTrip := func(stage string) {
+		deadline := time.Now().Add(40 * time.Second)
+		for {
+			dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
+			conn, err := outbound.(*Outbound).DialContext(dialCtx, "tcp", M.ParseSocksaddr("example.com:443"))
+			dialCancel()
+			if err == nil {
+				data := make([]byte, 4<<10)
+				rand.Read(data)
+				conn.SetDeadline(time.Now().Add(10 * time.Second))
+				go conn.Write(data)
+				got := make([]byte, len(data))
+				_, err = io.ReadFull(conn, got)
+				conn.Close()
+				if err == nil && bytes.Equal(got, data) {
+					return
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: no echo: %v", stage, err)
+			}
+		}
+	}
+	roundTrip("first node")
+
+	// the node restarts on the same address: its sessions are gone
+	stopFirst()
+	<-firstDone
+	serverConn.Close()
+	var secondConn *net.UDPConn
+	for i := 0; i < 50 && secondConn == nil; i++ {
+		secondConn, err = net.ListenUDP("udp", address)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if secondConn == nil {
+		t.Fatal(err)
+	}
+	run(ctx, secondConn)
+	roundTrip("after the node's restart")
 }

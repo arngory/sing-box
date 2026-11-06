@@ -23,6 +23,7 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mdseal"
 	"masterdnsvpn-go/internal/mlq"
 	"masterdnsvpn-go/internal/security"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
@@ -70,6 +71,10 @@ type Client struct {
 	mtuReactiveAddedServerLogFormat       string
 	streamResolverFailoverResendThreshold int
 	streamResolverFailoverCooldown        time.Duration
+
+	// neko: mdseal-v1 (initSeal)
+	sealKeys     *mdseal.Keys
+	sealRequired bool
 
 	// Session States
 	sessionID     uint8
@@ -242,11 +247,6 @@ func BootstrapLoadedConfig(cfg config.ClientConfig, logPath string) (*Client, er
 }
 
 func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Client {
-	var responseMode uint8
-	if cfg.BaseEncodeData {
-		responseMode = mtuProbeBase64Reply
-	}
-
 	c := &Client{
 		cfg:                 cfg,
 		log:                 log,
@@ -327,7 +327,8 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	})
 
 	c.pingManager = newPingManager(c)
-	c.responseMode.Store(uint32(responseMode))
+	c.initSeal()
+	c.responseMode.Store(uint32(c.configuredResponseMode()))
 	return c
 }
 
@@ -555,6 +556,10 @@ func (c *Client) HandleSessionBusy() error {
 }
 
 func (c *Client) HandleErrorDrop(packet VpnProto.Packet) error {
+	// neko: only about this client's session; one about another (an old session's, after a restart) restarts nothing
+	if c.SessionReady() && packet.SessionID != c.SessionID() {
+		return nil
+	}
 	c.requestSessionRestart("error drop received")
 	return nil
 }

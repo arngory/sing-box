@@ -257,8 +257,9 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	return response, nil
 }
 
-func BuildVPNResponsePacket(questionPacket []byte, answerName string, packet VpnProto.Packet, baseEncode bool) ([]byte, error) {
-	rawFrame, err := VpnProto.BuildRawAuto(VpnProto.BuildOptions{
+// buildResponseFrame is the frame an answer carries for packet (neko: shared with the sealed answers)
+func buildResponseFrame(packet VpnProto.Packet) ([]byte, error) {
+	return VpnProto.BuildRawAuto(VpnProto.BuildOptions{
 		SessionID:       packet.SessionID,
 		PacketType:      packet.PacketType,
 		SessionCookie:   packet.SessionCookie,
@@ -269,7 +270,10 @@ func BuildVPNResponsePacket(questionPacket []byte, answerName string, packet Vpn
 		CompressionType: packet.CompressionType,
 		Payload:         packet.Payload,
 	}, compression.DefaultMinSize)
+}
 
+func BuildVPNResponsePacket(questionPacket []byte, answerName string, packet VpnProto.Packet, baseEncode bool) ([]byte, error) {
+	rawFrame, err := buildResponseFrame(packet)
 	if err != nil {
 		return nil, err
 	}

@@ -21,6 +21,7 @@ import (
 
 	"masterdnsvpn-go/internal/arq"
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/mdseal"
 	"masterdnsvpn-go/internal/mlq"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -77,6 +78,9 @@ type sessionRecord struct {
 	MaxActiveStreamsPerSession      int
 	closedFlag                      uint32
 	streamCleanup                   func(uint8, uint16)
+
+	// SealCap is the most S a sealed answer in the session takes (neko: mdseal-v1, sessionSealCap)
+	SealCap int
 }
 
 type recentlyClosedStreamRecord struct {
@@ -151,10 +155,10 @@ type sessionRuntimeView struct {
 	ID                  uint8
 	Cookie              uint8
 	ResponseMode        uint8
-	ResponseBase64      bool
 	DownloadCompression uint8
 	DownloadMTU         uint16
 	DownloadMTUBytes    int
+	SealCap             int
 	MaxPackedBlocks     int
 }
 
@@ -608,8 +612,9 @@ func clampMTU(value uint16) uint16 {
 	return value
 }
 
+// isValidSessionResponseMode is a known encoding, sealed or not (the server checks the seal against its mode first)
 func isValidSessionResponseMode(value uint8) bool {
-	return value <= mtuProbeModeBase64
+	return value&^mdseal.ModeBit <= mtuProbeModeBase64
 }
 
 func (r *sessionRecord) setLastActivity(now time.Time) {
@@ -692,6 +697,7 @@ func (r *sessionRecord) applyMTUFromSessionInit(
 	r.UploadMTU = clampMTUToLimit(uploadMTU, effectiveUploadMax)
 	r.DownloadMTU = clampMTUToLimit(downloadMTU, effectiveDownloadMax)
 	r.DownloadMTUBytes = int(r.DownloadMTU)
+	r.SealCap = sessionSealCap(r.DownloadMTUBytes)
 	r.MaxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(r.DownloadMTUBytes, 80, maxPacketsPerBatch)
 }
 
@@ -718,7 +724,7 @@ func (r *sessionRecord) runtimeView() sessionRuntimeView {
 		ID:                  r.ID,
 		Cookie:              r.Cookie,
 		ResponseMode:        r.ResponseMode,
-		ResponseBase64:      r.ResponseMode == mtuProbeModeBase64,
+		SealCap:             r.SealCap,
 		DownloadCompression: r.DownloadCompression,
 		DownloadMTU:         r.DownloadMTU,
 		DownloadMTUBytes:    r.DownloadMTUBytes,

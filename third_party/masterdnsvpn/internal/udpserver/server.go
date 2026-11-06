@@ -23,6 +23,7 @@ import (
 	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mdseal"
 	"masterdnsvpn-go/internal/security"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -88,9 +89,10 @@ type Server struct {
 	lastDropLogUnix          atomic.Int64
 	deferredDroppedPackets   atomic.Uint64
 	lastDeferredDropLogUnix  atomic.Int64
-	pongNonce                atomic.Uint32
-	invalidDropMode          atomic.Uint32
-	fallback                 *udpFallbackManager
+	// neko: mdseal-v1, SetSeal
+	sealMode uint8
+	sealKeys *mdseal.Keys
+	fallback *udpFallbackManager
 }
 
 type request struct {

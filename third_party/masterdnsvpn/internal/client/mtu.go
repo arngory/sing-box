@@ -22,6 +22,7 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mdseal"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -1140,7 +1141,7 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeT
 		conn.ResolverLabel,
 	)
 
-	payload, code, useBase64, err := c.buildMTUProbePayload(mtuSize)
+	payload, code, _, err := c.buildMTUProbePayload(mtuSize)
 	if err != nil {
 		return false, 0, err
 	}
@@ -1165,7 +1166,7 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeT
 	}
 	rtt := time.Since(startedAt)
 
-	packet, err := DnsParser.ExtractVPNResponse(response, useBase64)
+	packet, err := c.extractResponse(response, payload[0])
 	if err != nil {
 		c.logMTUProbe(
 			options.IsRetry,
@@ -1258,7 +1259,7 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, prob
 	// neko: the probe's query as long as the session's longest, an upload MTU of data under the largest header: the
 	// answer carries its question, and probes 7 bytes shorter found a download MTU too large for the data's answers
 	requestLen := max(1+mtuProbeCodeLength+2, uploadMTU+mtuDownQueryPad)
-	payload, code, useBase64, err := c.buildMTUProbePayload(requestLen)
+	payload, code, _, err := c.buildMTUProbePayload(requestLen)
 	if err != nil {
 		return false, 0, err
 	}
@@ -1286,7 +1287,7 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, prob
 
 	rtt := time.Since(startedAt)
 
-	packet, err := DnsParser.ExtractVPNResponse(response, useBase64)
+	packet, err := c.extractResponse(response, payload[0])
 	if err != nil {
 		c.logMTUProbe(
 			options.IsRetry,
@@ -1440,16 +1441,12 @@ func (c *Client) buildMTUProbePayload(length int) ([]byte, uint32, bool, error) 
 	}
 
 	payload := make([]byte, length)
-	useBase64 := c != nil && c.cfg.BaseEncodeData
-	payload[0] = mtuProbeRawResponse
-	if useBase64 {
-		payload[0] = mtuProbeBase64Reply
-	}
+	payload[0] = c.configuredResponseMode()
 
 	code := c.mtuProbeCounter.Add(1)
 	binary.BigEndian.PutUint32(payload[1:1+mtuProbeCodeLength], code)
 
-	return payload, code, useBase64, nil
+	return payload, code, payload[0]&^mdseal.ModeBit == mtuProbeBase64Reply, nil
 }
 
 func averageMTUProbeRTT(values ...time.Duration) time.Duration {

@@ -18,7 +18,6 @@ import (
 	"net"
 	"time"
 
-	"masterdnsvpn-go/internal/dnsparser"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -285,7 +284,7 @@ func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeou
 
 	c.putUDPConn(conn.ResolverLabel, udpConn)
 
-	packet, err := dnsparser.ExtractVPNResponse(response, uint8(c.responseMode.Load()) == mtuProbeBase64Reply)
+	packet, err := c.extractResponse(response, uint8(c.responseMode.Load()))
 	if err != nil {
 		return VpnProto.Packet{}, err
 	}

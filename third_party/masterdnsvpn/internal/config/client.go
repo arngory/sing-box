@@ -117,6 +117,10 @@ type ClientConfig struct {
 	ARQTerminalAckWaitTimeoutSec          float64           `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
 	Resolvers                             []ResolverAddress `toml:"-"`
 	ResolverMap                           map[string]int    `toml:"-"`
+
+	// NikoSeal is mdseal-v1 (neko): "" off, "optional" or "required" as the node's link gives it; the key is
+	// ENCRYPTION_KEY's text
+	NikoSeal string `toml:"NIKO_MDSEAL"`
 }
 
 type ClientConfigOverrides struct {
@@ -473,6 +477,16 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.EncryptionKey = strings.TrimSpace(cfg.EncryptionKey)
 	if cfg.DataEncryptionMethod != 0 && cfg.EncryptionKey == "" {
 		return cfg, fmt.Errorf("ENCRYPTION_KEY is required when DATA_ENCRYPTION_METHOD is not 0 (None)")
+	}
+	switch cfg.NikoSeal = strings.ToLower(strings.TrimSpace(cfg.NikoSeal)); cfg.NikoSeal {
+	case "", "off":
+		cfg.NikoSeal = ""
+	case "optional", "required":
+		if cfg.DataEncryptionMethod == 0 || cfg.EncryptionKey == "" {
+			return cfg, fmt.Errorf("NIKO_MDSEAL needs ENCRYPTION_KEY and DATA_ENCRYPTION_METHOD 1-5")
+		}
+	default:
+		return cfg, fmt.Errorf("NIKO_MDSEAL %q: off, optional or required", cfg.NikoSeal)
 	}
 
 	cfg.Domains = normalizeClientDomains(cfg.Domains)

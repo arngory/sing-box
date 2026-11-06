@@ -243,7 +243,8 @@ func (c *Client) resetSessionState(resetSessionCookie bool) {
 	if resetSessionCookie {
 		c.sessionCookie = 0
 	}
-	c.responseMode.Store(0)
+	// neko: the mode the next SESSION_INIT asks for (upstream stored raw, which a base64 client then misread)
+	c.responseMode.Store(uint32(c.configuredResponseMode()))
 	c.clearSessionInitBusyUntil()
 	c.resetSessionInitState()
 }
@@ -879,7 +880,7 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 	// c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
 
 	// 1. Extract VPN Packet from DNS Response
-	vpnPacket, err := DnsParser.ExtractVPNResponse(data, uint8(c.responseMode.Load()) == mtuProbeBase64Reply)
+	vpnPacket, err := c.extractResponse(data, uint8(c.responseMode.Load()))
 	if err != nil {
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
