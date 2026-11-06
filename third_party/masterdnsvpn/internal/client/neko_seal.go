@@ -81,21 +81,26 @@ func (c *Client) extractResponse(data []byte, mode uint8) (VpnProto.Packet, erro
 	return packet, err
 }
 
-// ErrNotOurs is a sealed answer whose question is no query this client sent lately, or one already answered: an
-// answer seen on the path and sent again as it was (its question and seal with it), dropped as lost.
+// ErrNotOurs is a sealed answer whose question is no query this client sent lately: an answer seen on the path and
+// sent again as it was (its question and seal with it), dropped as lost.
 var ErrNotOurs = errors.New("masterdnsvpn: an answer to no query of ours")
 
-// answerToOurs is packet when q is a query this client sent lately and not answered yet (the name taken), else
-// ErrNotOurs. The seal binds an answer to its question; this binds the question to a query of this client's.
+// answerToOurs is packet when q is a query this client sent lately, else ErrNotOurs (mdseal-v1 §3, the reader). The
+// seal binds an answer to its question; this binds the question to a query of this client's. A second answer to a
+// query still waiting is a resolver's repeat, taken: the node answers each copy with what it has queued. An ERROR_DROP
+// answers its query for good, so its repeat restarts nothing more.
 func (c *Client) answerToOurs(packet VpnProto.Packet, q string) (VpnProto.Packet, error) {
-	if q == "" || !c.sentQueries.take(q, time.Now()) {
+	if q == "" || !c.sentQueries.has(q, time.Now()) {
 		return VpnProto.Packet{}, ErrNotOurs
+	}
+	if packet.PacketType == Enums.PACKET_ERROR_DROP {
+		c.sentQueries.forget(q)
 	}
 	return packet, nil
 }
 
-// noteSentQuery keeps the name of a query this client sends, when it seals: its answer is taken once, within
-// sentQueryWindow to sentQueryWindow*2.
+// noteSentQuery keeps the name of a query this client sends, when it seals: its answers are taken for sentQueryWindow
+// to sentQueryWindow*2.
 func (c *Client) noteSentQuery(query []byte) {
 	if c.sealKeys == nil {
 		return
@@ -136,20 +141,24 @@ func (s *sentQueries) note(q string, now time.Time) {
 	s.current[q] = struct{}{}
 }
 
-// take is whether q was sent lately and not answered yet; it answers it
-func (s *sentQueries) take(q string, now time.Time) bool {
+// has is whether q was sent lately
+func (s *sentQueries) has(q string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.turnLocked(now)
 	if _, ok := s.current[q]; ok {
-		delete(s.current, q)
 		return true
 	}
-	if _, ok := s.previous[q]; ok {
-		delete(s.previous, q)
-		return true
-	}
-	return false
+	_, ok := s.previous[q]
+	return ok
+}
+
+// forget answers q for good
+func (s *sentQueries) forget(q string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.current, q)
+	delete(s.previous, q)
 }
 
 // openErrorDrop is an open ERROR_DROP in data, read in the encoding given first, then in the other

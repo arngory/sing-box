@@ -11,6 +11,7 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
@@ -330,6 +331,10 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	c.pingManager = newPingManager(c)
 	c.initSeal()
 	c.responseMode.Store(uint32(c.configuredResponseMode()))
+	// neko: the probes' codes from a random start, not 1 in every process: an old probe's answer matches no new one
+	if start, err := randomBytes(4); err == nil {
+		c.mtuProbeCounter.Store(binary.BigEndian.Uint32(start))
+	}
 	return c
 }
 

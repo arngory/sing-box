@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,86 +263,104 @@ func TestNekoAuthSessionsPerDevice(t *testing.T) {
 	}
 }
 
-// neko: §3.6: a query before a session is served up to 3 times in 30 s, by its decoded bytes; only one whose tag held
-// is noted
+// nekoSee takes a sight of nonce for device as a query whose tag holds: whether it was served
+func nekoSee(memory *nonceMemory, device string, nonce []byte, at time.Time) bool {
+	sight, ok := memory.reserve(nonce, at)
+	if !ok {
+		return false
+	}
+	kept, _ := memory.keep(sight, device, at)
+	return kept
+}
+
+// neko: §3.6: a query before a session is served up to 3 times in 30 s, by its decoded bytes
 func TestNekoAuthNonceRepeats(t *testing.T) {
 	memory := newNonceMemory()
 	nonce := []byte("twelve bytes")
 	now := time.Now()
 	for i := 1; i <= nonceRepeats; i++ {
-		at := now.Add(time.Duration(i) * time.Second)
-		if !memory.servable(nonce, at) {
+		if !nekoSee(memory, "phone", nonce, now.Add(time.Duration(i)*time.Second)) {
 			t.Fatalf("sight %d refused", i)
 		}
-		memory.note("phone", nonce, at)
 	}
-	if memory.servable(nonce, now.Add(5*time.Second)) {
+	if nekoSee(memory, "phone", nonce, now.Add(5*time.Second)) {
 		t.Fatal("a fourth sight served")
 	}
 	other := []byte("other twelve")
-	memory.note("phone", other, now)
-	if memory.servable(other, now.Add(31*time.Second)) {
+	nekoSee(memory, "phone", other, now)
+	if nekoSee(memory, "phone", other, now.Add(31*time.Second)) {
 		t.Fatal("a repeat after 30 s served")
 	}
 	// kept longer than a tag holds (its epoch and one next to it, the client's clock 10 minutes off): through the
-	// first turn of the generations, gone after the second
+	// first turn of the generations
 	late := []byte("late twelve.")
-	memory.note("phone", late, now)
+	nekoSee(memory, "phone", late, now)
 	for _, after := range []time.Duration{15*time.Minute + time.Second, 31 * time.Minute, 59 * time.Minute} {
-		if memory.servable(late, now.Add(after)) {
+		if _, ok := memory.reserve(late, now.Add(after)); ok {
 			t.Fatalf("a nonce forgotten after %v", after)
 		}
 	}
-	if memory.servable([]byte("short"), now) {
+	if _, ok := memory.reserve([]byte("short"), now); ok {
 		t.Fatal("a nonce of another length")
 	}
 }
 
-// neko: the review's flush: queries whose tag does not hold (junk with the service's key, or past the budget) note
-// nothing, so they never wash a noted nonce out; a generation full refuses new nonces rather than forget old ones
+// neko: the reviews' flush and lockout: a query whose tag does not hold leaves nothing; one device's flood of tags that
+// hold stops at its quota, refusing its own queries only; the whole generation full turns early, saying so
 func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	memory := newNonceMemory()
 	now := time.Now()
 	victim := []byte("victim probe")
-	memory.note("victim", victim, now)
+	nekoSee(memory, "victim", victim, now)
 	junk := make([]byte, nonceKeyLen)
 	for i := 0; i < 3*nonceGenerationCap; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
-		memory.servable(junk, now) // a scan that fails: nothing noted
+		if sight, ok := memory.reserve(junk, now); ok {
+			memory.undo(sight) // a scan that fails
+		}
 	}
-	if len(memory.current) != 1 || memory.servable(victim, now.Add(time.Minute)) {
+	if len(memory.current) != 1 || nekoSee(memory, "victim", victim, now.Add(time.Minute)) {
 		t.Fatalf("%d noted, the victim's nonce served again", len(memory.current))
 	}
-	// one device's flood of tags that hold: past its quota its own queries are refused, the others' noted as before,
-	// the victim's nonce still remembered
 	for i := 0; i < nonceDeviceQuota; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
-		if noted, _ := memory.note("stolen", junk, now); !noted {
+		if !nekoSee(memory, "stolen", junk, now) {
 			t.Fatalf("refused within the quota at %d", i)
 		}
 	}
 	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceQuota))
-	if noted, _ := memory.note("stolen", junk, now); noted {
-		t.Fatal("a device past its quota noted")
+	sight, _ := memory.reserve(junk, now)
+	if kept, event := memory.keep(sight, "stolen", now); kept || event != nonceQuotaReached {
+		t.Fatalf("past the quota: kept %v, event %d", kept, event)
 	}
-	if noted, _ := memory.note("tablet", []byte("tablet probe"), now); !noted {
+	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceQuota+1))
+	sight, _ = memory.reserve(junk, now)
+	if kept, event := memory.keep(sight, "stolen", now); kept || event != nonceKept {
+		t.Fatalf("past the quota again: kept %v, event %d (logged once)", kept, event)
+	}
+	if _, ok := memory.current[[nonceKeyLen]byte(junk)]; ok {
+		t.Fatal("a refused sight left in the memory")
+	}
+	if !nekoSee(memory, "tablet", []byte("tablet probe"), now) {
 		t.Fatal("another device refused for one's flood")
 	}
-	if memory.servable(victim, now.Add(time.Minute)) {
+	if nekoSee(memory, "victim", victim, now.Add(time.Minute)) {
 		t.Fatal("the victim's nonce served again after the flood")
 	}
-	// the whole generation full (many devices at their quota): it turns early, and says so
+	// the whole generation full, many devices at their quota: the next turns it early
 	full := newNonceMemory()
-	for i := 0; len(full.current) < nonceGenerationCap; i++ {
+	for i := 0; i < nonceGenerationCap; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
-		full.note(fmt.Sprintf("device %d", i/nonceDeviceQuota), junk, now)
+		nekoSee(full, fmt.Sprintf("device %d", i/nonceDeviceQuota), junk, now)
 	}
-	if noted, turned := full.note("one more", []byte("one more ..."), now); !noted || !turned {
-		t.Fatalf("the full generation: noted %v, turned %v", noted, turned)
+	sight, _ = full.reserve([]byte("one more ..."), now)
+	if kept, event := full.keep(sight, "one more", now); !kept || event != nonceTurnedEarly || len(full.current) != 1 {
+		t.Fatalf("the full generation: kept %v, event %d, %d in the new one", kept, event, len(full.current))
 	}
 
-	// through the server: probes of an unknown key, then the device's probe four times
+	// through the server: an attacking device floods to its quota, the victim's probes and INIT still answered
 	server, auth := nekoAuthServer(t, authRequired)
+	attacker := nekoDevice(t, auth.keys["tablet"])
 	stranger := nekoDevice(t, []byte("not a device of this node ......"))
 	for i := 0; i < 20; i++ {
 		if nekoProbeAnswered(t, server, stranger) {
@@ -349,14 +368,44 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 		}
 	}
 	if n := len(server.authNonces.current); n != 0 {
-		t.Fatalf("%d nonces noted for tags that did not hold", n)
+		t.Fatalf("%d nonces kept for tags that did not hold", n)
 	}
-	query := nekoProbe(t, nekoDevice(t, auth.keys["phone"]), mtuProbeModeRaw, 300)
-	for i := 1; i <= nonceRepeats+1; i++ {
-		_, err := DnsParser.ExtractVPNResponse(server.handlePacket(query), false)
-		if (err == nil) != (i <= nonceRepeats) {
-			t.Fatalf("copy %d: %v", i, err)
+	for i := 0; i < nonceDeviceQuota+50; i++ {
+		server.handlePacket(nekoProbe(t, attacker, mtuProbeModeRaw, 300))
+	}
+	if nekoProbeAnswered(t, server, attacker) {
+		t.Fatal("the attacker past its quota answered")
+	}
+	victimCodec := nekoDevice(t, auth.keys["phone"])
+	for i := 0; i < 20; i++ {
+		if !nekoProbeAnswered(t, server, victimCodec) {
+			t.Fatalf("the victim's probe %d refused after another's flood", i)
 		}
+	}
+	if _, _, ok := nekoInit(t, server, victimCodec, 42); !ok {
+		t.Fatal("the victim's INIT refused after another's flood")
+	}
+}
+
+// neko: the review: copies of one seen probe at the same time count against one another: 3 at most are served
+func TestNekoAuthNonceConcurrentCopies(t *testing.T) {
+	server, auth := nekoAuthServer(t, authRequired)
+	captured := nekoProbe(t, nekoDevice(t, auth.keys["phone"]), mtuProbeModeRaw, 300)
+	var answered atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			packet, err := DnsParser.ExtractVPNResponse(server.handlePacket(captured), false)
+			if err == nil && packet.PacketType == Enums.PACKET_MTU_DOWN_RES {
+				answered.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := answered.Load(); n < 1 || n > nonceRepeats {
+		t.Fatalf("%d of 32 copies served", n)
 	}
 }
 

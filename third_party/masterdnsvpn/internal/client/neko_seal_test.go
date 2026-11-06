@@ -128,7 +128,7 @@ func TestNekoSealedReplay(t *testing.T) {
 		if packet, err := client.extractResponse(sealed, 0x80); err != nil || packet.PacketType != Enums.PACKET_ERROR_DROP {
 			t.Fatalf("required %v: the answer to the query sent: %v", required, err)
 		}
-		// the same answer again, as it was: its query is answered
+		// the same ERROR_DROP again, as it was: its query is answered for good
 		if _, err := client.extractResponse(sealed, 0x80); !errors.Is(err, ErrNotOurs) {
 			t.Fatalf("required %v: a verbatim replay taken: %v", required, err)
 		}
@@ -142,17 +142,39 @@ func TestNekoSealedReplay(t *testing.T) {
 	if _, err := client.extractResponse(open, 0x80); !errors.Is(err, ErrNotOurs) {
 		t.Fatalf("an open ERROR_DROP to a query never sent: %v", err)
 	}
+	// data: a resolver's repeat of the answer to a query still waiting is taken (the node answers each copy with what it
+	// has queued), an answer to a query never sent is not
+	data := VpnProto.Packet{SessionID: 3, SessionCookie: 7, PacketType: Enums.PACKET_STREAM_DATA, StreamID: 1, SequenceNum: 2, Payload: []byte("data")}
+	sealedData, _ := DnsParser.BuildSealedVPNResponsePacket(query, "abcdefgh.v.example.com", data, false, keys, 0)
+	repeats := &Client{sealKeys: keys, sealRequired: true}
+	repeats.noteSentQuery(query)
+	for i := 0; i < 2; i++ {
+		if packet, err := repeats.extractResponse(sealedData, 0x80); err != nil || packet.PacketType != Enums.PACKET_STREAM_DATA {
+			t.Fatalf("copy %d of the answer to a waiting query: %v", i, err)
+		}
+	}
+	// the reviewer's case: an ERROR_DROP to an old query of another process, the session of the same ID
+	oldName := "0k3xq9z7w2l5m8n1b4v6c0x9z8y7.old.t.example.com"
+	oldQuery, _ := DnsParser.BuildTXTQuestionPacket(oldName, Enums.DNS_RECORD_TYPE_TXT, 1232)
+	captured, _ := DnsParser.BuildSealedVPNResponsePacket(oldQuery, oldName, drop, false, keys, 0)
+	victim := &Client{sealKeys: keys, sealRequired: true, sessionReady: true, sessionID: 3, sessionCookie: 200}
+	if packet, err := victim.extractResponse(captured, mtuProbeBase64Reply|mdseal.ModeBit); err == nil {
+		_ = victim.HandleErrorDrop(packet)
+	}
+	if victim.runtimeResetPending.Load() {
+		t.Fatal("a captured ERROR_DROP of an old query restarted the session")
+	}
 	// a query sent too long ago: past both generations
 	var sent sentQueries
 	now := time.Now()
 	sent.note("abcdefgh.v.example.com", now)
-	if !sent.take("abcdefgh.v.example.com", now.Add(sentQueryWindow+time.Second)) {
+	if !sent.has("abcdefgh.v.example.com", now.Add(sentQueryWindow+time.Second)) {
 		t.Fatal("an answer within the second generation lost")
 	}
 	var old sentQueries
 	old.note("abcdefgh.v.example.com", now)
-	old.take("x", now.Add(sentQueryWindow))
-	if old.take("abcdefgh.v.example.com", now.Add(2*sentQueryWindow+time.Second)) {
+	old.has("x", now.Add(sentQueryWindow))
+	if old.has("abcdefgh.v.example.com", now.Add(2*sentQueryWindow+time.Second)) {
 		t.Fatal("an answer past both generations taken")
 	}
 }

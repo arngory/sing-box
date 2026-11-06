@@ -124,9 +124,11 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 	msg := make([]byte, 0, len(nonce)+len(frameBytes))
 	msg = append(append(msg, nonce...), frameBytes...)
 	if isPreSessionRequestType(frame.PacketType) {
-		// a query seen too often is refused before the scan; only one whose tag holds is noted, so junk with the
-		// service's key never washes the memory out (dnsauth-masterdns §3.6)
-		if !s.authNonces.servable(nonce, now) {
+		// a query seen too often is refused before the scan; its sight is taken at once (copies at the same time count
+		// against one another) and given back when the tag does not hold, so junk with the service's key never stays
+		// in the memory (dnsauth-masterdns §3.6)
+		sight, ok := s.authNonces.reserve(nonce, now)
+		if !ok {
 			return "", false
 		}
 		kind := ScanProbe
@@ -135,14 +137,20 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 		}
 		device, ok := s.auth.Scan(kind, tag, msg)
 		if !ok || device == "" {
+			s.authNonces.undo(sight)
 			return "", false
 		}
-		noted, turnedEarly := s.authNonces.note(device, nonce, now)
-		if turnedEarly && s.log != nil {
-			s.log.Warnf("dnsauth: the nonce memory filled before its time (%d of the devices' queries in a generation), turned early: replays of the oldest become possible", nonceGenerationCap)
+		kept, event := s.authNonces.keep(sight, device, now)
+		if s.log != nil {
+			switch event {
+			case nonceQuotaReached:
+				s.log.Warnf("dnsauth: device %s reached its quota of %d queries before a session in a generation: its new ones refused until it turns", device, nonceDeviceQuota)
+			case nonceTurnedEarly:
+				s.log.Warnf("dnsauth: the nonce memory filled before its time (%d queries of many devices), turned early: replays of the oldest become possible", nonceGenerationCap)
+			}
 		}
-		if !noted {
-			// a device over its quota: its own queries refused, the others' as they are
+		if !kept {
+			// a device past its quota: its own queries refused, the others' as they are
 			return "", false
 		}
 		return device, true
@@ -185,8 +193,9 @@ const (
 	nonceRepeatWindow  = 30 * time.Second
 	nonceRepeats       = 3
 	nonceGenerationCap = 1 << 17
-	// Niko's probes and SESSION_INITs of a start on many resolvers, on many networks in a half hour, many times over
-	nonceDeviceQuota = 8192
+	// a start of Niko probes the MTU up and down on each resolver, about 35 probes on each, about 300 on its most
+	// resolvers: some 13 starts in the half hour (dnsauth-masterdns §3.6)
+	nonceDeviceQuota = 4096
 )
 
 func newNonceMemory() *nonceMemory {
@@ -196,53 +205,91 @@ func newNonceMemory() *nonceMemory {
 	}
 }
 
-// servable is whether a query of this nonce may be served now: unseen, or seen fewer than 3 times in the 30 s since
-// its first sight. It notes nothing: note does, once the tag holds.
-func (m *nonceMemory) servable(nonce []byte, now time.Time) bool {
-	if len(nonce) != nonceKeyLen {
-		return false
-	}
-	key := [nonceKeyLen]byte(nonce)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.turnLocked(now)
-	seen, ok := m.current[key]
-	if !ok {
-		seen, ok = m.previous[key]
-	}
-	if !ok {
-		return true
-	}
-	return seen.count < nonceRepeats && now.UnixNano()-seen.first <= int64(nonceRepeatWindow)
+// nonceSight is a sight of a nonce taken by reserve: undone when the query's tag does not hold, kept when it does
+type nonceSight struct {
+	key   [nonceKeyLen]byte
+	fresh bool // the nonce was unseen
 }
 
-// note counts a sight of a nonce whose query's tag held, device's: false when a new nonce would take the device past
-// its quota (the query is refused); turnedEarly when the generation was full and turned before its time
-func (m *nonceMemory) note(device string, nonce []byte, now time.Time) (noted, turnedEarly bool) {
+// what keep reports for the log
+const (
+	nonceKept = iota
+	nonceQuotaReached
+	nonceTurnedEarly
+)
+
+// reserve takes a sight of nonce for a query about to be checked, under the one lock: false when the nonce was seen 3
+// times, or first more than 30 s ago (a replay). An unseen one is taken in, to be undone or kept.
+func (m *nonceMemory) reserve(nonce []byte, now time.Time) (nonceSight, bool) {
 	if len(nonce) != nonceKeyLen {
-		return false, false
+		return nonceSight{}, false
 	}
 	key := [nonceKeyLen]byte(nonce)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.turnLocked(now)
-	seen, ok := m.current[key]
-	if !ok {
-		if seen, ok = m.previous[key]; !ok {
-			if m.perDevice[device] >= nonceDeviceQuota {
-				return false, false
+	for _, generation := range []map[[nonceKeyLen]byte]nonceSeen{m.current, m.previous} {
+		if seen, ok := generation[key]; ok {
+			if seen.count >= nonceRepeats || now.UnixNano()-seen.first > int64(nonceRepeatWindow) {
+				return nonceSight{}, false
 			}
-			if len(m.current) >= nonceGenerationCap {
-				m.turnNowLocked(now)
-				turnedEarly = true
-			}
-			m.perDevice[device]++
-			seen = nonceSeen{first: now.UnixNano()}
+			seen.count++
+			generation[key] = seen
+			return nonceSight{key: key}, true
 		}
 	}
-	seen.count++
-	m.current[key] = seen
-	return true, turnedEarly
+	m.current[key] = nonceSeen{count: 1, first: now.UnixNano()}
+	return nonceSight{key: key, fresh: true}, true
+}
+
+// undo gives a sight back: its tag did not hold (or the scan's budget was spent); an unseen nonce leaves no trace
+func (m *nonceMemory) undo(sight nonceSight) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, generation := range []map[[nonceKeyLen]byte]nonceSeen{m.current, m.previous} {
+		if seen, ok := generation[sight.key]; ok {
+			if seen.count--; seen.count == 0 {
+				delete(generation, sight.key)
+			} else {
+				generation[sight.key] = seen
+			}
+			return
+		}
+	}
+}
+
+// keep keeps a sight whose tag held, device's: false when an unseen nonce takes the device past its quota (undone,
+// the query refused); the event to log, the quota's once a generation for each device
+func (m *nonceMemory) keep(sight nonceSight, device string, now time.Time) (bool, int) {
+	if !sight.fresh {
+		return true, nonceKept
+	}
+	m.mu.Lock()
+	if m.perDevice[device] >= nonceDeviceQuota {
+		first := m.perDevice[device] == nonceDeviceQuota
+		m.perDevice[device]++ // counted once past the quota: logged once a generation
+		m.mu.Unlock()
+		m.undo(sight)
+		if first {
+			return false, nonceQuotaReached
+		}
+		return false, nonceKept
+	}
+	m.perDevice[device]++
+	event := nonceKept
+	// the whole generation full, of many devices at their quota: it turns early, the sight going on into the new one
+	if len(m.current) > nonceGenerationCap {
+		seen, ok := m.current[sight.key]
+		m.turnNowLocked(now)
+		if ok {
+			delete(m.previous, sight.key)
+			m.current[sight.key] = seen
+		}
+		m.perDevice[device] = 1
+		event = nonceTurnedEarly
+	}
+	m.mu.Unlock()
+	return true, event
 }
 
 // turnLocked starts a new generation every nonceGeneration, the one before kept
