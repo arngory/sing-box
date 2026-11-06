@@ -109,7 +109,7 @@ func (s *Server) openQuery(labels string, now time.Time) (VpnProto.Packet, strin
 		if frame, err := VpnProto.Parse(frameBytes); err == nil {
 			var tag [security.AuthTagLen]byte
 			copy(tag[:], plain)
-			if device, ok := s.checkTag(tag, nonce, frameBytes, frame, now); ok {
+			if device, ok := s.checkTag(tag, nonce, frameBytes, frame, key, now); ok {
 				packet, err := VpnProto.InflatePayload(frame)
 				return packet, device, key, err == nil
 			}
@@ -135,14 +135,14 @@ func (s *Server) openQuery(labels string, now time.Time) (VpnProto.Packet, strin
 // checkTag is the device whose tag a query bears (§3): before a session, by a scan, a request seen too often refused
 // first; in a live session, its device's key alone; to a session no longer live, its closed record's device, else a
 // scan. A live session of no device (an old client's) takes no tag.
-func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byte, frame VpnProto.Packet, now time.Time) (string, bool) {
+func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byte, frame VpnProto.Packet, key *serviceKey, now time.Time) (string, bool) {
 	msg := make([]byte, 0, len(nonce)+len(frameBytes))
 	msg = append(append(msg, nonce...), frameBytes...)
 	if isPreSessionRequestType(frame.PacketType) {
 		// a query seen too often is refused before the scan; its sight is taken at once (copies at the same time count
 		// against one another) and given back when the tag does not hold, so junk with the service's key never stays
 		// in the memory (dnsauth-masterdns §3.6)
-		sight, ok := s.authNonces.reserve(nonce, now)
+		sight, ok := s.authNonces.reserve(nonce, key, now)
 		if !ok {
 			return "", false
 		}
@@ -211,11 +211,14 @@ type nonceBucket struct {
 	spent  bool
 }
 
-// nonceSeen is a nonce's sights: how many, the first's time (the memory's), and whether a device's bucket paid for it
+// nonceSeen is a nonce's sights: how many, the first's time (the memory's), whether a device's bucket paid for it,
+// and the service key its query opened with (neko: key rotation; the tag covers nonce || frame, not the key, so the
+// same INIT sealed anew under the other key would otherwise pass as a copy)
 type nonceSeen struct {
 	count   uint8
 	charged bool
 	first   int64
+	key     *serviceKey
 }
 
 const (
@@ -247,6 +250,8 @@ func (m *nonceMemory) mono(now time.Time) int64 {
 // nonceSight is a sight of a nonce taken by reserve: undone when the query's tag does not hold, kept when it does
 type nonceSight struct {
 	key [nonceKeyLen]byte
+	// the service key its query opened with (neko: key rotation)
+	service *serviceKey
 }
 
 // what keep reports for the log
@@ -280,29 +285,30 @@ func (e nonceEvent) topText() string {
 	return strings.Join(parts, ", ")
 }
 
-// reserve takes a sight of nonce for a query about to be checked, under the one lock: false when the nonce was seen 3
-// times, or first more than 30 s ago (a replay). An unseen one is taken in, to be undone or kept.
-func (m *nonceMemory) reserve(nonce []byte, now time.Time) (nonceSight, bool) {
+// reserve takes a sight of nonce for a query about to be checked, opened with key, under the one lock: false when the
+// nonce was seen 3 times, first more than 30 s ago (a replay), or under another service key (a copy sealed anew by
+// someone who has both keys: a resolver's copy is the same bytes). An unseen one is taken in, to be undone or kept.
+func (m *nonceMemory) reserve(nonce []byte, key *serviceKey, now time.Time) (nonceSight, bool) {
 	if len(nonce) != nonceKeyLen {
 		return nonceSight{}, false
 	}
-	key := [nonceKeyLen]byte(nonce)
+	nonceKey := [nonceKeyLen]byte(nonce)
 	at := m.mono(now)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.turnLocked(now)
 	for _, generation := range []map[[nonceKeyLen]byte]nonceSeen{m.current, m.previous} {
-		if seen, ok := generation[key]; ok {
-			if seen.count >= nonceRepeats || at-seen.first > int64(nonceRepeatWindow) {
+		if seen, ok := generation[nonceKey]; ok {
+			if seen.count >= nonceRepeats || at-seen.first > int64(nonceRepeatWindow) || seen.key != key {
 				return nonceSight{}, false
 			}
 			seen.count++
-			generation[key] = seen
-			return nonceSight{key: key}, true
+			generation[nonceKey] = seen
+			return nonceSight{key: nonceKey, service: key}, true
 		}
 	}
-	m.current[key] = nonceSeen{count: 1, first: at}
-	return nonceSight{key: key}, true
+	m.current[nonceKey] = nonceSeen{count: 1, first: at, key: key}
+	return nonceSight{key: nonceKey, service: key}, true
 }
 
 // undo gives a sight back: its tag did not hold (or the scan's budget was spent); an unseen nonce leaves no trace
@@ -371,7 +377,7 @@ func (m *nonceMemory) keep(sight nonceSight, device string, now time.Time) (bool
 	seen.charged = true
 	if !found {
 		// both generations turned since its sight (early, under a flood): it goes into the new one
-		generation, seen = m.current, nonceSeen{count: 1, charged: true, first: at}
+		generation, seen = m.current, nonceSeen{count: 1, charged: true, first: at, key: sight.service}
 	}
 	generation[sight.key] = seen
 	// the whole generation full, of many devices at their burst: it turns early, the sight going on into the new one

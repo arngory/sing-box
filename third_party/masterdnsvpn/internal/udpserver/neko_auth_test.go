@@ -265,7 +265,7 @@ func TestNekoAuthSessionsPerDevice(t *testing.T) {
 
 // nekoSee takes a sight of nonce for device as a query whose tag holds: whether it was served
 func nekoSee(memory *nonceMemory, device string, nonce []byte, at time.Time) bool {
-	sight, ok := memory.reserve(nonce, at)
+	sight, ok := memory.reserve(nonce, nil, at)
 	if !ok {
 		return false
 	}
@@ -296,11 +296,11 @@ func TestNekoAuthNonceRepeats(t *testing.T) {
 	late := []byte("late twelve.")
 	nekoSee(memory, "phone", late, now)
 	for _, after := range []time.Duration{15*time.Minute + time.Second, 31 * time.Minute, 59 * time.Minute} {
-		if _, ok := memory.reserve(late, now.Add(after)); ok {
+		if _, ok := memory.reserve(late, nil, now.Add(after)); ok {
 			t.Fatalf("a nonce forgotten after %v", after)
 		}
 	}
-	if _, ok := memory.reserve([]byte("short"), now); ok {
+	if _, ok := memory.reserve([]byte("short"), nil, now); ok {
 		t.Fatal("a nonce of another length")
 	}
 }
@@ -315,7 +315,7 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	junk := make([]byte, nonceKeyLen)
 	for i := 0; i < 3*nonceGenerationCap; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
-		if sight, ok := memory.reserve(junk, now); ok {
+		if sight, ok := memory.reserve(junk, nil, now); ok {
 			memory.undo(sight) // a scan that fails
 		}
 	}
@@ -329,12 +329,12 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 		}
 	}
 	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceBurst))
-	sight, _ := memory.reserve(junk, now)
+	sight, _ := memory.reserve(junk, nil, now)
 	if kept, event := memory.keep(sight, "stolen", now); kept || event.kind != nonceQuotaReached {
 		t.Fatalf("past the burst: kept %v, event %d", kept, event.kind)
 	}
 	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceBurst+1))
-	sight, _ = memory.reserve(junk, now)
+	sight, _ = memory.reserve(junk, nil, now)
 	if kept, event := memory.keep(sight, "stolen", now); kept || event.kind != nonceKept {
 		t.Fatalf("past the burst again: kept %v, event %d (logged once)", kept, event.kind)
 	}
@@ -385,7 +385,7 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 		fill(fmt.Sprintf("device %02d", k), nonceDeviceBurst-short)
 	}
 	fill("rest", nonceGenerationCap-filled)
-	sight, _ = full.reserve([]byte("one more ..."), now)
+	sight, _ = full.reserve([]byte("one more ..."), nil, now)
 	kept, event := full.keep(sight, "one more", now)
 	if !kept || event.kind != nonceTurnedEarly || len(full.current) != 1 {
 		t.Fatalf("the full generation: kept %v, event %d, %d in the new one", kept, event.kind, len(full.current))
@@ -444,8 +444,8 @@ func TestNekoAuthNonceCopiesPayOnce(t *testing.T) {
 	now := time.Now()
 	nonce := []byte("twelve bytes")
 	memory.perDevice["attacker"] = nonceBucket{tokens: 0, at: memory.mono(now), spent: true}
-	a, _ := memory.reserve(nonce, now)
-	b, _ := memory.reserve(nonce, now)
+	a, _ := memory.reserve(nonce, nil, now)
+	b, _ := memory.reserve(nonce, nil, now)
 	if kept, _ := memory.keep(a, "attacker", now); kept {
 		t.Fatal("the first copy kept, the bucket empty")
 	}
@@ -458,7 +458,7 @@ func TestNekoAuthNonceCopiesPayOnce(t *testing.T) {
 	memory.perDevice["attacker"] = nonceBucket{tokens: 1, at: memory.mono(now)}
 	sights := make([]nonceSight, nonceRepeats)
 	for i := range sights {
-		sights[i], _ = memory.reserve(nonce, now)
+		sights[i], _ = memory.reserve(nonce, nil, now)
 	}
 	for i := len(sights) - 1; i >= 0; i-- {
 		if kept, _ := memory.keep(sights[i], "attacker", now); !kept {
@@ -474,8 +474,8 @@ func TestNekoAuthNonceCopiesPayOnce(t *testing.T) {
 	// a copy refused for its scan gives its sight back, the nonce stays paid for
 	other := []byte("other twelve")
 	memory.perDevice["phone"] = nonceBucket{tokens: 1, at: memory.mono(now)}
-	first, _ := memory.reserve(other, now)
-	junk, _ := memory.reserve(other, now)
+	first, _ := memory.reserve(other, nil, now)
+	junk, _ := memory.reserve(other, nil, now)
 	memory.keep(first, "phone", now)
 	memory.undo(junk)
 	if seen := memory.current[[nonceKeyLen]byte(other)]; seen.count != 1 || !seen.charged {

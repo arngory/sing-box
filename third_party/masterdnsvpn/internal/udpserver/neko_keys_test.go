@@ -255,3 +255,78 @@ func TestNekoKeysInitOnAKeyTakenOut(t *testing.T) {
 		t.Fatal("the kept key's session is gone")
 	}
 }
+
+// neko: the server's review: the tag covers nonce || frame, not the service key, so a SESSION_INIT sealed anew under
+// the other key with its nonce would pass as a copy and open the device a second session. A nonce's sights are its
+// key's: a copy under the same key passes (a resolver's is the same bytes), one under the other key is refused
+func TestNekoKeysNonceUnderAnotherKey(t *testing.T) {
+	server, _ := nekoTestServer(t, nil)
+	nekoSetKeys(t, server, nekoNewKey, nekoOldKey)
+	keys := server.currentKeys()
+	memory := newNonceMemory()
+	now := time.Now()
+	nonce := []byte("twelve bytes")
+	first, ok := memory.reserve(nonce, keys[0], now)
+	if !ok {
+		t.Fatal("the first sight refused")
+	}
+	if kept, _ := memory.keep(first, "phone", now); !kept {
+		t.Fatal("the first sight not kept")
+	}
+	if _, ok := memory.reserve(nonce, keys[1], now); ok {
+		t.Fatal("the nonce taken under the other service key")
+	}
+	copySight, ok := memory.reserve(nonce, keys[0], now)
+	if !ok {
+		t.Fatal("a copy under the same key refused")
+	}
+	if kept, _ := memory.keep(copySight, "phone", now); !kept {
+		t.Fatal("a copy under the same key not kept")
+	}
+	// a sight whose generations turned meanwhile keeps its key in the new one
+	turned, _ := memory.reserve([]byte("other twelve"), keys[1], now)
+	memory.mu.Lock()
+	memory.turnNowLocked(now)
+	memory.turnNowLocked(now)
+	memory.mu.Unlock()
+	if kept, _ := memory.keep(turned, "phone", now); !kept {
+		t.Fatal("the turned sight not kept")
+	}
+	if _, ok := memory.reserve([]byte("other twelve"), keys[1], now); !ok {
+		t.Fatal("a copy of the turned sight under its key refused")
+	}
+	if _, ok := memory.reserve([]byte("other twelve"), keys[0], now); ok {
+		t.Fatal("the turned sight's nonce taken under the other key")
+	}
+}
+
+// neko: the server's review: copies of one SESSION_INIT handled at once wrote the session's streamCleanup with no lock
+// (-race); findOrCreate sets it under the store's lock now
+func TestNekoInitCopiesAtOnce(t *testing.T) {
+	server, codec := nekoTestServer(t, nil)
+	payload := make([]byte, sessionInitDataSize)
+	payload[2], payload[3], payload[4], payload[5] = 0, 150, 1, 144
+	payload[6], payload[7], payload[8], payload[9] = 7, 1, 2, 3
+	query := nekoQuery(t, codec, VpnProto.BuildOptions{PacketType: Enums.PACKET_SESSION_INIT, Payload: payload})
+	done := make(chan []byte, 8)
+	for i := 0; i < 8; i++ {
+		go func() { done <- server.handlePacket(query) }()
+	}
+	ids := map[uint8]bool{}
+	for i := 0; i < 8; i++ {
+		packet, err := DnsParser.ExtractVPNResponse(<-done, false)
+		if err != nil || packet.PacketType != Enums.PACKET_SESSION_ACCEPT {
+			t.Fatalf("a copy not accepted: %v", err)
+		}
+		accept, _ := VpnProto.DecodeSessionAcceptPayload(packet.Payload)
+		ids[accept.SessionID] = true
+	}
+	if len(ids) != 1 {
+		t.Fatalf("copies of one INIT made %d sessions", len(ids))
+	}
+	for id := range ids {
+		if server.sessions.byID[id].streamCleanup == nil {
+			t.Fatal("the session has no stream cleanup")
+		}
+	}
+}

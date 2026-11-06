@@ -231,7 +231,10 @@ type sessionStore struct {
 	mu sync.RWMutex
 	// keyListed is whether a service key is still the server's (neko: key rotation): a SESSION_INIT opened with a
 	// key taken out meanwhile sets nothing up. Asked under mu, as closeKeysNotIn closes under it
-	keyListed              func(*serviceKey) bool
+	keyListed func(*serviceKey) bool
+	// streamCleanup goes into each new session under mu (neko: set after findOrCreate, two copies of an INIT handled
+	// at once wrote it without a lock)
+	streamCleanup          func(uint8, uint16)
 	nextID                 uint16
 	activeCount            uint16
 	nextReuseSweepUnixNano int64
@@ -381,6 +384,7 @@ func (s *sessionStore) findOrCreate(
 	record.Cookie = s.randomCookieLocked()
 	record.Device = device
 	record.Key = key
+	record.streamCleanup = s.streamCleanup
 
 	s.byID[slot] = record
 	s.activeCount++
