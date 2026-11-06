@@ -4,7 +4,9 @@ package dnstt
 
 import (
 	"context"
+	"encoding/base64"
 	"net"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -72,6 +74,13 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, err
 		}
 	}
+	var sealKey []byte
+	if options.Seal != nil {
+		sealKey, err = base64.RawURLEncoding.DecodeString(strings.TrimRight(options.Seal.Key, "="))
+		if err != nil || len(sealKey) != 32 {
+			return nil, E.New("dnsseal: the key is 32 bytes in base64url")
+		}
+	}
 	client, err := dnstt.NewClient(dnstt.ClientOptions{
 		Context:   ctx,
 		Logger:    logger,
@@ -81,6 +90,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		Resolver:  resolver,
 		TLSConfig: tlsConfig,
 		AuthKey:   authKey,
+		SealKey:   sealKey,
 	})
 	if err != nil {
 		return nil, err

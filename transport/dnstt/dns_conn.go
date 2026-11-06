@@ -45,16 +45,21 @@ type dnsPacketConn struct {
 	transport net.PacketConn
 	logger    logger.ContextLogger
 	authKey   []byte // dnsauth-v1, nil without
+	// dnsseal-v1, nil without; capacity: the bytes a sealed query's name carries for certain
+	seal      *sealer
+	capacity  int
 	done      chan struct{}
 	closeOnce sync.Once
 	*turbotunnel.QueuePacketConn
 }
 
-func newDNSPacketConn(transport net.PacketConn, addr net.Addr, domain dns.Name, logger logger.ContextLogger, authKey []byte) *dnsPacketConn {
+func newDNSPacketConn(transport net.PacketConn, addr net.Addr, domain dns.Name, logger logger.ContextLogger, authKey []byte, seal *sealer) *dnsPacketConn {
 	clientID := turbotunnel.NewClientID()
 	c := &dnsPacketConn{
 		clientID:        clientID,
 		authKey:         authKey,
+		seal:            seal,
+		capacity:        dnsNameCapacitySealed(domain),
 		domain:          domain,
 		pollChan:        make(chan struct{}, pollLimit),
 		transport:       transport,
@@ -134,11 +139,22 @@ func (c *dnsPacketConn) recvLoop() error {
 		if err != nil {
 			continue
 		}
-		r := bytes.NewReader(dnsResponsePayload(&resp, c.domain))
+		payload := dnsResponsePayload(&resp, c.domain)
+		if c.seal != nil {
+			var ok bool
+			if payload, ok = c.seal.openResponse(payload); !ok {
+				continue
+			}
+		}
+		r := bytes.NewReader(payload)
 		received := false
 		for {
 			p, err := nextPacket(r)
 			if err != nil {
+				break
+			}
+			// a sealed response ends its packets with a length of 0, its padding after it
+			if c.seal != nil && len(p) == 0 {
 				break
 			}
 			received = true
@@ -171,24 +187,44 @@ func (c *dnsPacketConn) send(p []byte, addr net.Addr) error {
 	}
 	var decoded bytes.Buffer
 	decoded.Write(c.clientID[:])
-	n := numPadding
-	if len(p) == 0 {
-		n = numPaddingForPoll
+	if c.seal == nil {
+		// random padding first, so equal payloads do not repeat on the wire
+		n := numPadding
+		if len(p) == 0 {
+			n = numPaddingForPoll
+		}
+		decoded.WriteByte(byte(224 + n))
+		io.CopyN(&decoded, rand.Reader, int64(n))
 	}
-	decoded.WriteByte(byte(224 + n))
-	io.CopyN(&decoded, rand.Reader, int64(n))
 	if len(p) > 0 {
 		decoded.WriteByte(byte(len(p)))
 		decoded.Write(p)
+	}
+	if c.seal != nil {
+		// dnsseal-v1 §3: N makes the name unique; a padding frame of random length, as much as fits, varies it
+		used := sealOverhead + decoded.Len()
+		if c.authKey != nil {
+			used += authTagLen
+		}
+		decoded.Write(sealPadding(c.capacity - used))
 	}
 	payload := decoded.Bytes()
 	if c.authKey != nil {
 		// dnsauth-v1: tag (8) || ClientID || padding and packets
 		payload = append(authTag(c.authKey, payload, time.Now()), payload...)
 	}
+	if c.seal != nil {
+		payload = c.seal.sealQuery(payload)
+	}
 	encoded := make([]byte, base32Encoding.EncodedLen(len(payload)))
 	base32Encoding.Encode(encoded, payload)
-	labels := append(chunks(bytes.ToLower(encoded), 63), c.domain...)
+	var labels [][]byte
+	if c.seal != nil {
+		labels = sealLabels(bytes.ToLower(encoded))
+	} else {
+		labels = chunks(bytes.ToLower(encoded), 63)
+	}
+	labels = append(labels, c.domain...)
 	name, err := dns.NewName(labels)
 	if err != nil {
 		return err

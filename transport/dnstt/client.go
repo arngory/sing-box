@@ -95,6 +95,8 @@ type ClientOptions struct {
 	TLSConfig tls.Config
 	// raycontrol dnsauth-v1 tag key (AuthKey); nil sends queries without a tag
 	AuthKey []byte
+	// raycontrol dnsseal-v1: the zone's key K (32 bytes) to seal the framing with; nil sends it open
+	SealKey []byte
 }
 
 type Client struct {
@@ -107,6 +109,7 @@ type Client struct {
 	tls      tls.Config
 	mtu      int
 	authKey  []byte
+	seal     *sealer
 
 	access  sync.Mutex
 	session *session
@@ -133,8 +136,17 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, E.Cause(err, "parse public key")
 	}
-	// clientid + padding length prefix + padding + data length prefix (+ the dnsauth tag)
+	// clientid + padding length prefix + padding + data length prefix (+ the dnsauth tag); sealed (dnsseal-v1): N and
+	// the key check + clientid + data length prefix in a name whose labels may be at their shortest, the padding frame
+	// only where it fits
 	mtu := dnsNameCapacity(domain) - 8 - 1 - numPadding - 1
+	var seal *sealer
+	if options.SealKey != nil {
+		if seal, err = newSealer(options.SealKey); err != nil {
+			return nil, err
+		}
+		mtu = dnsNameCapacitySealed(domain) - sealOverhead - 8 - 1
+	}
 	if options.AuthKey != nil {
 		mtu -= authTagLen
 	}
@@ -151,6 +163,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		tls:      options.TLSConfig,
 		mtu:      mtu,
 		authKey:  options.AuthKey,
+		seal:     seal,
 	}, nil
 }
 
@@ -212,7 +225,7 @@ func (c *Client) newSession(ctx context.Context) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	packetConn := newDNSPacketConn(transport, remoteAddr, c.domain, c.logger, c.authKey)
+	packetConn := newDNSPacketConn(transport, remoteAddr, c.domain, c.logger, c.authKey, c.seal)
 	kcpConn, err := kcp.NewConn2(remoteAddr, nil, 0, 0, packetConn)
 	if err != nil {
 		packetConn.Close()

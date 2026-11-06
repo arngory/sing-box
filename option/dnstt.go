@@ -14,6 +14,15 @@ type DNSTTOutboundOptions struct {
 	TLS *OutboundTLSOptions `json:"tls,omitempty"`
 	// raycontrol dnsauth-v1: every query carries a tag of the device's key (neko)
 	Auth *DNSTTAuthOptions `json:"auth,omitempty"`
+	// raycontrol dnsseal-v1: the framing sealed with the zone's key (neko)
+	Seal *DNSTTSealOptions `json:"seal,omitempty"`
+}
+
+// DNSTTSealOptions is raycontrol dnsseal-v1 (docs/spec/dnsseal-v1.md): queries and responses sealed with the zone's
+// key K, from the link's niko-dnsseal.
+type DNSTTSealOptions struct {
+	// K, 32 bytes, base64url without padding
+	Key string `json:"key"`
 }
 
 // DNSTTAuthOptions is raycontrol dnsauth-v1 (docs/spec/dnsauth-v1.md): the tag key is derived from the device's

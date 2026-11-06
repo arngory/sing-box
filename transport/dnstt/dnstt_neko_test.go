@@ -3,8 +3,11 @@ package dnstt
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"net"
 	"testing"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
+	"golang.org/x/crypto/chacha20"
 	"www.bamsoftware.com/git/dnstt.git/dns"
 	"www.bamsoftware.com/git/dnstt.git/noise"
 	"www.bamsoftware.com/git/dnstt.git/turbotunnel"
@@ -28,9 +32,17 @@ type testServer struct {
 	conn    net.PacketConn
 	tunnel  *turbotunnel.QueuePacketConn
 	privkey []byte
+	// dnsseal-v1 as the node does it (Ku, Kd from K), nil: open dnstt
+	sealUp, sealDown []byte
 }
 
 func startTestServer(t *testing.T, domain string) (*testServer, string) {
+	return startTestServerSealed(t, domain, nil)
+}
+
+// startTestServerSealed is the test server taking and giving sealed dnstt (dnsseal-v1) with K = sealKey, written from
+// the spec apart from the client's code.
+func startTestServerSealed(t *testing.T, domain string, sealKey []byte) (*testServer, string) {
 	privkey, err := noise.GeneratePrivkey()
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +60,9 @@ func startTestServer(t *testing.T, domain string) (*testServer, string) {
 		conn:    conn,
 		tunnel:  turbotunnel.NewQueuePacketConn(turbotunnel.DummyAddr{}, 0),
 		privkey: privkey,
+	}
+	if sealKey != nil {
+		server.sealUp, server.sealDown = testSealKey(sealKey, "dnsseal-v1 up"), testSealKey(sealKey, "dnsseal-v1 down")
 	}
 	listener, err := kcp.ServeConn(nil, 0, 0, server.tunnel)
 	if err != nil {
@@ -85,6 +100,17 @@ func (s *testServer) serveDNS() {
 			continue
 		}
 		payload = payload[:n]
+		if s.sealUp != nil {
+			// N || ChaCha20(Ku, N || 0^4)(00 00 00 00 || ClientID || frames)
+			if len(payload) < 12+8 {
+				continue
+			}
+			plain := testChaCha(s.sealUp, payload[:8], payload[8:])
+			if !bytes.Equal(plain[:4], []byte{0, 0, 0, 0}) {
+				continue
+			}
+			payload = plain[4:]
+		}
 		var clientID turbotunnel.ClientID
 		copy(clientID[:], payload[:8])
 		r := bytes.NewReader(payload[8:])
@@ -124,6 +150,15 @@ func (s *testServer) respond(query dns.Message, clientID turbotunnel.ClientID, a
 		}
 		break
 	}
+	data := body.Bytes()
+	if s.sealDown != nil {
+		// R || ChaCha20(Kd, R || 0^4)(packets || 00 00 || zeros to a multiple of 64 with R)
+		frames := append(data, 0, 0)
+		frames = append(frames, make([]byte, (64-(8+len(frames))%64)%64)...)
+		r := make([]byte, 8)
+		rand.Read(r)
+		data = append(r, testChaCha(s.sealDown, r, frames)...)
+	}
 	response := &dns.Message{
 		ID:       query.ID,
 		Flags:    0x8400, // QR, AA, NOERROR
@@ -133,7 +168,7 @@ func (s *testServer) respond(query dns.Message, clientID turbotunnel.ClientID, a
 			Type:  dns.RRTypeTXT,
 			Class: dns.ClassIN,
 			TTL:   60,
-			Data:  dns.EncodeRDataTXT(body.Bytes()),
+			Data:  dns.EncodeRDataTXT(data),
 		}},
 	}
 	wire, err := response.WireFormat()
@@ -193,7 +228,16 @@ var _ N.Dialer = udpDialer{}
 // Streams through the client reach the server's upstream and back, over plain UDP DNS.
 func TestNekoDNSTTEcho(t *testing.T) {
 	server, pubkey := startTestServer(t, "t.example.com")
-	echoThrough(t, "udp://"+server.conn.LocalAddr().String(), pubkey)
+	echoThrough(t, "udp://"+server.conn.LocalAddr().String(), pubkey, nil)
+}
+
+// The same sealed (dnsseal-v1): the client seals its queries and opens the answers of a server that does it as the
+// spec says.
+func TestNekoDNSTTEchoSealed(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	server, pubkey := startTestServerSealed(t, "t.example.com", key)
+	echoThrough(t, "udp://"+server.conn.LocalAddr().String(), pubkey, key)
 }
 
 // The same over DNS over TCP (RFC 7766): a resolver that takes length-prefixed messages on TCP and asks the server
@@ -214,7 +258,7 @@ func TestNekoDNSTTEchoTCP(t *testing.T) {
 			go tcpToUDP(conn, server.conn.LocalAddr())
 		}
 	}()
-	echoThrough(t, "tcp://"+listener.Addr().String(), pubkey)
+	echoThrough(t, "tcp://"+listener.Addr().String(), pubkey, nil)
 }
 
 // tcpToUDP relays one TCP DNS connection to a UDP DNS server and its answers back, framed by their length.
@@ -250,7 +294,7 @@ func tcpToUDP(conn net.Conn, server net.Addr) {
 	}
 }
 
-func echoThrough(t *testing.T, resolverURL, pubkey string) {
+func echoThrough(t *testing.T, resolverURL, pubkey string, sealKey []byte) {
 	resolver, err := ParseResolver(resolverURL)
 	if err != nil {
 		t.Fatal(err)
@@ -262,6 +306,7 @@ func echoThrough(t *testing.T, resolverURL, pubkey string) {
 		Domain:   "t.example.com",
 		PubKey:   pubkey,
 		Resolver: resolver,
+		SealKey:  sealKey,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -310,5 +355,77 @@ func TestNekoDNSTTParseResolver(t *testing.T) {
 	}
 	if _, err := ParseResolver("ftp://x"); err == nil {
 		t.Fatal("accepted ftp")
+	}
+}
+
+func testSealKey(key []byte, label string) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(label))
+	return mac.Sum(nil)
+}
+
+func testChaCha(key, prefix, data []byte) []byte {
+	stream, err := chacha20.NewUnauthenticatedCipher(key, append(append([]byte{}, prefix...), 0, 0, 0, 0))
+	if err != nil {
+		panic(err)
+	}
+	out := make([]byte, len(data))
+	stream.XORKeyStream(out, data)
+	return out
+}
+
+// dnsseal-v1 §9 vectors (niko-server TestSealVectors, checked in Python apart from its code).
+func TestNekoSealVectors(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	seal, err := newSealer(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := []byte{0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0x01, 0xff}
+	query := seal.sealQueryWith([8]byte{0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7}, inner)
+	if got := hex.EncodeToString(query); got != "a0a1a2a3a4a5a6a751843fdcf8328cbad3f8132199b4" {
+		t.Fatalf("query %s", got)
+	}
+	answer, _ := hex.DecodeString("b0b1b2b3b4b5b6b7f77002e5cc82e741ca69b3f568b5facff046fa764c1646d7395735e3f34ca5e0f2082aeae570f04304a4571256c325042f0d9dd5cec5c254")
+	frames, ok := seal.openResponse(answer)
+	if !ok {
+		t.Fatal("answer too short")
+	}
+	r := bytes.NewReader(frames)
+	if p, err := nextPacket(r); err != nil || !bytes.Equal(p, []byte{0xaa, 0xbb}) {
+		t.Fatalf("first packet %x %v", p, err)
+	}
+	if p, err := nextPacket(r); err != nil || len(p) != 0 {
+		t.Fatalf("the end of the packets: %x %v", p, err)
+	}
+}
+
+// A sealed query at its largest fits its name whatever the labels' lengths (32-63, drawn at random).
+func TestNekoSealedNameFits(t *testing.T) {
+	domain, _ := dns.ParseName("a-rather-long-tunnel-zone.subdomain.example.com")
+	seal, _ := newSealer(make([]byte, 32))
+	inner := make([]byte, dnsNameCapacitySealed(domain)-sealOverhead)
+	for i := 0; i < 500; i++ {
+		encoded := make([]byte, base32Encoding.EncodedLen(len(inner)+sealOverhead))
+		base32Encoding.Encode(encoded, seal.sealQuery(inner))
+		labels := sealLabels(bytes.ToLower(encoded))
+		for j, label := range labels {
+			if len(label) > sealLabelMax || (j < len(labels)-1 && len(label) < sealLabelMin) {
+				t.Fatalf("label of %d", len(label))
+			}
+		}
+		if _, err := dns.NewName(append(labels, domain...)); err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+	}
+	// the padding frame never takes more than the room left, nor more than 31 bytes
+	for room := 0; room < 40; room++ {
+		frame := sealPadding(room)
+		if len(frame) > room || (len(frame) > 0 && (int(frame[0])-224 != len(frame)-1 || len(frame)-1 > sealMaxPadding)) {
+			t.Fatalf("room %d: frame of %d", room, len(frame))
+		}
 	}
 }
