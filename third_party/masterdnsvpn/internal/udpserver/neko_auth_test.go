@@ -322,24 +322,40 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	if len(memory.current) != 1 || nekoSee(memory, "victim", victim, now.Add(time.Minute)) {
 		t.Fatalf("%d noted, the victim's nonce served again", len(memory.current))
 	}
-	for i := 0; i < nonceDeviceQuota; i++ {
+	for i := 0; i < nonceDeviceBurst; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
 		if !nekoSee(memory, "stolen", junk, now) {
-			t.Fatalf("refused within the quota at %d", i)
+			t.Fatalf("refused within the burst at %d", i)
 		}
 	}
-	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceQuota))
+	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceBurst))
 	sight, _ := memory.reserve(junk, now)
 	if kept, event := memory.keep(sight, "stolen", now); kept || event != nonceQuotaReached {
-		t.Fatalf("past the quota: kept %v, event %d", kept, event)
+		t.Fatalf("past the burst: kept %v, event %d", kept, event)
 	}
-	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceQuota+1))
+	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceBurst+1))
 	sight, _ = memory.reserve(junk, now)
 	if kept, event := memory.keep(sight, "stolen", now); kept || event != nonceKept {
-		t.Fatalf("past the quota again: kept %v, event %d (logged once)", kept, event)
+		t.Fatalf("past the burst again: kept %v, event %d (logged once)", kept, event)
 	}
 	if _, ok := memory.current[[nonceKeyLen]byte(junk)]; ok {
 		t.Fatal("a refused sight left in the memory")
+	}
+	// the bucket fills again: a second later about nonceDeviceRate more, a refill later the burst whole
+	served := 0
+	for i := 0; i < 100; i++ {
+		binary.BigEndian.PutUint64(junk, uint64(nonceDeviceBurst+10+i))
+		if nekoSee(memory, "stolen", junk, now.Add(time.Second)) {
+			served++
+		}
+	}
+	rate := nonceDeviceRate
+	if served < int(rate)-1 || served > int(rate)+1 {
+		t.Fatalf("%d served a second after the burst, the rate %.1f", served, rate)
+	}
+	binary.BigEndian.PutUint64(junk, uint64(3*nonceDeviceBurst))
+	if !nekoSee(memory, "stolen", junk, now.Add(nonceDeviceRefill+time.Second)) {
+		t.Fatal("the bucket did not fill again")
 	}
 	if !nekoSee(memory, "tablet", []byte("tablet probe"), now) {
 		t.Fatal("another device refused for one's flood")
@@ -347,11 +363,11 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	if nekoSee(memory, "victim", victim, now.Add(time.Minute)) {
 		t.Fatal("the victim's nonce served again after the flood")
 	}
-	// the whole generation full, many devices at their quota: the next turns it early
+	// the whole generation full, many devices at their burst: the next turns it early
 	full := newNonceMemory()
 	for i := 0; i < nonceGenerationCap; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
-		nekoSee(full, fmt.Sprintf("device %d", i/nonceDeviceQuota), junk, now)
+		nekoSee(full, fmt.Sprintf("device %d", i/nonceDeviceBurst), junk, now)
 	}
 	sight, _ = full.reserve([]byte("one more ..."), now)
 	if kept, event := full.keep(sight, "one more", now); !kept || event != nonceTurnedEarly || len(full.current) != 1 {
@@ -370,11 +386,12 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	if n := len(server.authNonces.current); n != 0 {
 		t.Fatalf("%d nonces kept for tags that did not hold", n)
 	}
-	for i := 0; i < nonceDeviceQuota+50; i++ {
-		server.handlePacket(nekoProbe(t, attacker, mtuProbeModeRaw, 300))
-	}
+	// the attacker's bucket spent at once (the clock does not move enough here to fill it)
+	server.authNonces.mu.Lock()
+	server.authNonces.perDevice["tablet"] = nonceBucket{tokens: 0, at: time.Now().Add(time.Hour).UnixNano()}
+	server.authNonces.mu.Unlock()
 	if nekoProbeAnswered(t, server, attacker) {
-		t.Fatal("the attacker past its quota answered")
+		t.Fatal("the attacker with its bucket spent answered")
 	}
 	victimCodec := nekoDevice(t, auth.keys["phone"])
 	for i := 0; i < 20; i++ {

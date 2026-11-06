@@ -144,7 +144,7 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 		if s.log != nil {
 			switch event {
 			case nonceQuotaReached:
-				s.log.Warnf("dnsauth: device %s reached its quota of %d queries before a session in a generation: its new ones refused until it turns", device, nonceDeviceQuota)
+				s.log.Warnf("dnsauth: device %s spent its %d queries before a session: its new ones go at %.0f a second until it rests", device, nonceDeviceBurst, nonceDeviceRate)
 			case nonceTurnedEarly:
 				s.log.Warnf("dnsauth: the nonce memory filled before its time (%d queries of many devices), turned early: replays of the oldest become possible", nonceGenerationCap)
 			}
@@ -171,15 +171,23 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 // than a tag holds: its epoch of 600 s and one next to it, a client's clock off by up to 10 minutes), by the decoded
 // bytes (base36 lets different names give the same bytes, §3.6). The same query is served up to 3 times in 30 s from
 // its first sight (a client sends a SESSION_INIT to several resolvers in the same bytes, a resolver repeats one);
-// past that, or later, it is someone's replay. Each device notes at most nonceDeviceQuota new nonces in a generation:
-// past it, its own queries are refused, so one device (a stolen key) neither locks the others out nor washes the
-// memory; the whole generation full (that many devices at their quota) turns early, logged.
+// past that, or later, it is someone's replay. Each device's new nonces go through a bucket of nonceDeviceBurst that
+// fills again in nonceDeviceRefill: a device that spends it (a stolen key's flood, or a start on a list of resolvers
+// by the hundred) goes on at nonceDeviceRate a second, its queries past that refused, so one device neither locks
+// the others out nor itself for long; the whole generation full (many devices at once) turns early, logged.
 type nonceMemory struct {
 	mu                sync.Mutex
 	current, previous map[[nonceKeyLen]byte]nonceSeen
-	// the new nonces each device noted in the current generation
-	perDevice map[string]int
+	// each device's bucket of new nonces
+	perDevice map[string]nonceBucket
 	rotatedAt time.Time
+}
+
+// nonceBucket is a device's allowance of new nonces: tokens at time at (unix ns); spent marks it logged as empty
+type nonceBucket struct {
+	tokens float64
+	at     int64
+	spent  bool
 }
 
 type nonceSeen struct {
@@ -193,15 +201,17 @@ const (
 	nonceRepeatWindow  = 30 * time.Second
 	nonceRepeats       = 3
 	nonceGenerationCap = 1 << 17
-	// a start of Niko probes the MTU up and down on each resolver, about 35 probes on each, about 300 on its most
-	// resolvers: some 13 starts in the half hour (dnsauth-masterdns §3.6)
-	nonceDeviceQuota = 4096
+	// a start of Niko probes the MTU up and down on each resolver, about 35 probes on each: some 300 on its own list,
+	// a start on a /24 of resolvers about 9000, the bucket's burst most of it and its rate the rest in minutes
+	nonceDeviceBurst  = 8192
+	nonceDeviceRefill = 15 * time.Minute
+	nonceDeviceRate   = float64(nonceDeviceBurst) / (float64(nonceDeviceRefill) / float64(time.Second))
 )
 
 func newNonceMemory() *nonceMemory {
 	return &nonceMemory{
 		current: make(map[[nonceKeyLen]byte]nonceSeen), previous: make(map[[nonceKeyLen]byte]nonceSeen),
-		perDevice: make(map[string]int), rotatedAt: time.Now(),
+		perDevice: make(map[string]nonceBucket), rotatedAt: time.Now(),
 	}
 }
 
@@ -258,24 +268,36 @@ func (m *nonceMemory) undo(sight nonceSight) {
 	}
 }
 
-// keep keeps a sight whose tag held, device's: false when an unseen nonce takes the device past its quota (undone,
-// the query refused); the event to log, the quota's once a generation for each device
+// keep keeps a sight whose tag held, device's: false when an unseen nonce finds the device's bucket empty (undone,
+// the query refused); the event to log, a bucket's emptying once until it fills up again
 func (m *nonceMemory) keep(sight nonceSight, device string, now time.Time) (bool, int) {
 	if !sight.fresh {
 		return true, nonceKept
 	}
 	m.mu.Lock()
-	if m.perDevice[device] >= nonceDeviceQuota {
-		first := m.perDevice[device] == nonceDeviceQuota
-		m.perDevice[device]++ // counted once past the quota: logged once a generation
+	bucket, ok := m.perDevice[device]
+	if !ok {
+		bucket = nonceBucket{tokens: nonceDeviceBurst, at: now.UnixNano()}
+	}
+	if elapsed := now.UnixNano() - bucket.at; elapsed > 0 {
+		bucket.tokens = min(nonceDeviceBurst, bucket.tokens+nonceDeviceRate*float64(elapsed)/float64(time.Second))
+		bucket.at = now.UnixNano()
+	}
+	if bucket.tokens >= nonceDeviceBurst/2 {
+		bucket.spent = false
+	}
+	if bucket.tokens < 1 {
+		event := nonceKept
+		if !bucket.spent {
+			bucket.spent, event = true, nonceQuotaReached
+		}
+		m.perDevice[device] = bucket
 		m.mu.Unlock()
 		m.undo(sight)
-		if first {
-			return false, nonceQuotaReached
-		}
-		return false, nonceKept
+		return false, event
 	}
-	m.perDevice[device]++
+	bucket.tokens--
+	m.perDevice[device] = bucket
 	event := nonceKept
 	// the whole generation full, of many devices at their quota: it turns early, the sight going on into the new one
 	if len(m.current) > nonceGenerationCap {
@@ -285,7 +307,6 @@ func (m *nonceMemory) keep(sight nonceSight, device string, now time.Time) (bool
 			delete(m.previous, sight.key)
 			m.current[sight.key] = seen
 		}
-		m.perDevice[device] = 1
 		event = nonceTurnedEarly
 	}
 	m.mu.Unlock()
@@ -301,7 +322,12 @@ func (m *nonceMemory) turnLocked(now time.Time) {
 
 func (m *nonceMemory) turnNowLocked(now time.Time) {
 	m.previous, m.current, m.rotatedAt = m.current, make(map[[nonceKeyLen]byte]nonceSeen), now
-	m.perDevice = make(map[string]int)
+	// the buckets full again by now leave the map: it holds the devices of the last half hour
+	for device, bucket := range m.perDevice {
+		if bucket.tokens+nonceDeviceRate*float64(now.UnixNano()-bucket.at)/float64(time.Second) >= nonceDeviceBurst {
+			delete(m.perDevice, device)
+		}
+	}
 }
 
 // deviceOf is the device of the session id with cookie: a live one (live true) or its closed record; "" when the

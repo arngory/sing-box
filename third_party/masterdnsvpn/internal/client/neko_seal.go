@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/sha256"
 	"errors"
 	"sync"
 	"time"
@@ -110,55 +111,67 @@ func (c *Client) noteSentQuery(query []byte) {
 	}
 }
 
-// sentQueries are the names of the queries a sealing client sent lately, in two generations of sentQueryWindow. The
-// client alone writes them, so their bound only keeps memory: a generation full turns early.
+// sentQueries are the queries a sealing client sent lately, by a hash of their names (16 bytes each, not names of up
+// to 253), in two generations of sentQueryWindow. The client alone writes them, so their bound only keeps memory: a
+// generation full turns early.
 type sentQueries struct {
 	mu                sync.Mutex
-	current, previous map[string]struct{}
+	current, previous map[sentQueryKey]struct{}
 	turnedAt          time.Time
 }
+
+type sentQueryKey [16]byte
 
 const (
 	// longer than any answer worth taking takes to come (a resolver's own timeout is seconds)
 	sentQueryWindow = 30 * time.Second
-	sentQueryCap    = 1 << 16
+	// a DNS tunnel's queries in 30 s many times over; at most about 2 MB with the maps' own
+	sentQueryCap = 1 << 15
 )
+
+func sentQueryKeyOf(q string) sentQueryKey {
+	sum := sha256.Sum256([]byte(q))
+	return sentQueryKey(sum[:16])
+}
 
 func (s *sentQueries) turnLocked(now time.Time) {
 	if s.current == nil {
-		s.current, s.previous, s.turnedAt = make(map[string]struct{}), make(map[string]struct{}), now
+		s.current, s.previous, s.turnedAt = make(map[sentQueryKey]struct{}), make(map[sentQueryKey]struct{}), now
 		return
 	}
 	if now.Sub(s.turnedAt) >= sentQueryWindow || len(s.current) >= sentQueryCap {
-		s.previous, s.current, s.turnedAt = s.current, make(map[string]struct{}), now
+		s.previous, s.current, s.turnedAt = s.current, make(map[sentQueryKey]struct{}), now
 	}
 }
 
 func (s *sentQueries) note(q string, now time.Time) {
+	key := sentQueryKeyOf(q)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.turnLocked(now)
-	s.current[q] = struct{}{}
+	s.current[key] = struct{}{}
 }
 
 // has is whether q was sent lately
 func (s *sentQueries) has(q string, now time.Time) bool {
+	key := sentQueryKeyOf(q)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.turnLocked(now)
-	if _, ok := s.current[q]; ok {
+	if _, ok := s.current[key]; ok {
 		return true
 	}
-	_, ok := s.previous[q]
+	_, ok := s.previous[key]
 	return ok
 }
 
 // forget answers q for good
 func (s *sentQueries) forget(q string) {
+	key := sentQueryKeyOf(q)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.current, q)
-	delete(s.previous, q)
+	delete(s.current, key)
+	delete(s.previous, key)
 }
 
 // openErrorDrop is an open ERROR_DROP in data, read in the encoding given first, then in the other
