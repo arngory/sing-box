@@ -14,16 +14,19 @@ import (
 // raycontrol dnsseal-v1 (docs/spec/dnsseal-v1.md): the framing of dnstt sealed with the zone's key K, so a DPI that
 // knows dnstt no longer reads the ClientID, the padding byte, the packets' lengths or KCP's headers.
 //
-//	query:    N (8) || ChaCha20(Ku, N || 0^4)(00 00 00 00 || [dnsauth tag] || ClientID || frames)
-//	response: R (8) || ChaCha20(Kd, R || 0^4)(uint16 length || packet, ... || 00 00 || zeros)
+//	query:    N (8) || T (4) || C, C = ChaCha20(Ku, N || 0^4)([dnsauth tag] || ClientID || frames)
+//	response: R (8) || T (4) || C, C = ChaCha20(Kd, R || 0^4)(uint16 length || packet, ... || 00 00 || zeros)
+//	T = HMAC-SHA256(Kut or Kdt, N or R || C)[:4]  (encrypt-then-MAC)
 //
-// Ku = HMAC-SHA256(K, "dnsseal-v1 up"), Kd = HMAC-SHA256(K, "dnsseal-v1 down"). A query's frames are dnstt's: a
-// byte b, a packet of b bytes when b < 224, b-224 bytes of padding otherwise.
+// Ku, Kd, Kut, Kdt = HMAC-SHA256(K, "dnsseal-v1 up", "… down", "… up tag", "… down tag"): one key for the cipher,
+// another for the tag. A query's frames are dnstt's: a byte b, a packet of b bytes when b < 224, b-224 bytes of
+// padding otherwise. A response whose tag does not hold is dropped.
 
 const (
 	sealKeyLen = 32
-	// N and the key check of a query
+	// N (or R) and the tag
 	sealOverhead = 8 + 4
+	sealTagLen   = 4
 	// a query's padding frame is 0-31 bytes long, as much as fits
 	sealMaxPadding = 31
 	// the labels of a sealed query are 32-63 characters long, the last one shorter
@@ -32,7 +35,7 @@ const (
 )
 
 type sealer struct {
-	up, down []byte
+	up, down, upTag, downTag []byte
 }
 
 func newSealer(key []byte) (*sealer, error) {
@@ -44,7 +47,17 @@ func newSealer(key []byte) (*sealer, error) {
 		mac.Write([]byte(label))
 		return mac.Sum(nil)
 	}
-	return &sealer{up: derive("dnsseal-v1 up"), down: derive("dnsseal-v1 down")}, nil
+	return &sealer{
+		up: derive("dnsseal-v1 up"), down: derive("dnsseal-v1 down"),
+		upTag: derive("dnsseal-v1 up tag"), downTag: derive("dnsseal-v1 down tag"),
+	}, nil
+}
+
+func sealTag(key, prefix, ciphertext []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(prefix)
+	mac.Write(ciphertext)
+	return mac.Sum(nil)[:sealTagLen]
 }
 
 func sealNonce(prefix []byte) []byte {
@@ -59,28 +72,33 @@ func (s *sealer) sealQuery(inner []byte) []byte {
 }
 
 func (s *sealer) sealQueryWith(n [8]byte, inner []byte) []byte {
-	plain := append(make([]byte, 4, 4+len(inner)), inner...)
 	stream, err := chacha20.NewUnauthenticatedCipher(s.up, sealNonce(n[:]))
 	if err != nil {
 		panic(err) // the key and the nonce have their sizes
 	}
-	out := append(make([]byte, 0, 8+len(plain)), n[:]...)
-	out = append(out, make([]byte, len(plain))...)
-	stream.XORKeyStream(out[8:], plain)
-	return out
+	ciphertext := make([]byte, len(inner))
+	stream.XORKeyStream(ciphertext, inner)
+	out := append(make([]byte, 0, sealOverhead+len(inner)), n[:]...)
+	out = append(out, sealTag(s.upTag, n[:], ciphertext)...)
+	return append(out, ciphertext...)
 }
 
-// openResponse is a response's frames: the TXT data without R, deciphered. False for data too short to hold R.
+// openResponse is a response's frames: the TXT data's ciphertext deciphered. False for data too short to hold R and
+// the tag, or whose tag does not hold (not the node's, or another key).
 func (s *sealer) openResponse(data []byte) ([]byte, bool) {
-	if len(data) < 8 {
+	if len(data) < sealOverhead {
 		return nil, false
 	}
-	stream, err := chacha20.NewUnauthenticatedCipher(s.down, sealNonce(data[:8]))
+	r, tag, ciphertext := data[:8], data[8:sealOverhead], data[sealOverhead:]
+	if !hmac.Equal(tag, sealTag(s.downTag, r, ciphertext)) {
+		return nil, false
+	}
+	stream, err := chacha20.NewUnauthenticatedCipher(s.down, sealNonce(r))
 	if err != nil {
 		panic(err)
 	}
-	plain := make([]byte, len(data)-8)
-	stream.XORKeyStream(plain, data[8:])
+	plain := make([]byte, len(ciphertext))
+	stream.XORKeyStream(plain, ciphertext)
 	return plain, true
 }
 

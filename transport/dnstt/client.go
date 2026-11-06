@@ -137,7 +137,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		return nil, E.Cause(err, "parse public key")
 	}
 	// clientid + padding length prefix + padding + data length prefix (+ the dnsauth tag); sealed (dnsseal-v1): N and
-	// the key check + clientid + data length prefix in a name whose labels may be at their shortest, the padding frame
+	// the tag + clientid + data length prefix in a name whose labels may be at their shortest, the padding frame
 	// only where it fits
 	mtu := dnsNameCapacity(domain) - 8 - 1 - numPadding - 1
 	var seal *sealer

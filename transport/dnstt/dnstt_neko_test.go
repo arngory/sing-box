@@ -32,8 +32,8 @@ type testServer struct {
 	conn    net.PacketConn
 	tunnel  *turbotunnel.QueuePacketConn
 	privkey []byte
-	// dnsseal-v1 as the node does it (Ku, Kd from K), nil: open dnstt
-	sealUp, sealDown []byte
+	// dnsseal-v1 as the node does it (Ku, Kd and their tag keys from K), nil: open dnstt
+	sealUp, sealDown, sealUpTag, sealDownTag []byte
 }
 
 func startTestServer(t *testing.T, domain string) (*testServer, string) {
@@ -63,6 +63,7 @@ func startTestServerSealed(t *testing.T, domain string, sealKey []byte) (*testSe
 	}
 	if sealKey != nil {
 		server.sealUp, server.sealDown = testSealKey(sealKey, "dnsseal-v1 up"), testSealKey(sealKey, "dnsseal-v1 down")
+		server.sealUpTag, server.sealDownTag = testSealKey(sealKey, "dnsseal-v1 up tag"), testSealKey(sealKey, "dnsseal-v1 down tag")
 	}
 	listener, err := kcp.ServeConn(nil, 0, 0, server.tunnel)
 	if err != nil {
@@ -101,15 +102,15 @@ func (s *testServer) serveDNS() {
 		}
 		payload = payload[:n]
 		if s.sealUp != nil {
-			// N || ChaCha20(Ku, N || 0^4)(00 00 00 00 || ClientID || frames)
+			// N || T || C, C = ChaCha20(Ku, N || 0^4)(ClientID || frames), T = HMAC(Kut, N || C)[:4]
 			if len(payload) < 12+8 {
 				continue
 			}
-			plain := testChaCha(s.sealUp, payload[:8], payload[8:])
-			if !bytes.Equal(plain[:4], []byte{0, 0, 0, 0}) {
+			n, tag, ciphertext := payload[:8], payload[8:12], payload[12:]
+			if !hmac.Equal(tag, testSealKey(s.sealUpTag, string(n)+string(ciphertext))[:4]) {
 				continue
 			}
-			payload = plain[4:]
+			payload = testChaCha(s.sealUp, n, ciphertext)
 		}
 		var clientID turbotunnel.ClientID
 		copy(clientID[:], payload[:8])
@@ -152,12 +153,13 @@ func (s *testServer) respond(query dns.Message, clientID turbotunnel.ClientID, a
 	}
 	data := body.Bytes()
 	if s.sealDown != nil {
-		// R || ChaCha20(Kd, R || 0^4)(packets || 00 00 || zeros to a multiple of 64 with R)
+		// R || T || C, C = ChaCha20(Kd, R || 0^4)(packets || 00 00 || zeros to a multiple of 64 with R and T)
 		frames := append(data, 0, 0)
-		frames = append(frames, make([]byte, (64-(8+len(frames))%64)%64)...)
+		frames = append(frames, make([]byte, (64-(12+len(frames))%64)%64)...)
 		r := make([]byte, 8)
 		rand.Read(r)
-		data = append(r, testChaCha(s.sealDown, r, frames)...)
+		ciphertext := testChaCha(s.sealDown, r, frames)
+		data = append(append(r, testSealKey(s.sealDownTag, string(r)+string(ciphertext))[:4]...), ciphertext...)
 	}
 	response := &dns.Message{
 		ID:       query.ID,
@@ -374,7 +376,9 @@ func testChaCha(key, prefix, data []byte) []byte {
 	return out
 }
 
-// dnsseal-v1 §9 vectors (niko-server TestSealVectors, checked in Python apart from its code).
+// dnsseal-v1 vectors with the tag (encrypt-then-MAC), computed in Python (hmac, ChaCha20 of cryptography) apart from
+// this code: K = 00..1f; the query N = a0..a7, inner = ClientID c0..c7 || a packet 01 ff; the answer R = b0..b7, a
+// packet aa bb, then 00 00 and zeros to 64 bytes of TXT data.
 func TestNekoSealVectors(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
@@ -386,13 +390,21 @@ func TestNekoSealVectors(t *testing.T) {
 	}
 	inner := []byte{0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0x01, 0xff}
 	query := seal.sealQueryWith([8]byte{0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7}, inner)
-	if got := hex.EncodeToString(query); got != "a0a1a2a3a4a5a6a751843fdcf8328cbad3f8132199b4" {
+	if got := hex.EncodeToString(query); got != "a0a1a2a3a4a5a6a70c56c1a39145fd1ffc3688be16c2" {
 		t.Fatalf("query %s", got)
 	}
-	answer, _ := hex.DecodeString("b0b1b2b3b4b5b6b7f77002e5cc82e741ca69b3f568b5facff046fa764c1646d7395735e3f34ca5e0f2082aeae570f04304a4571256c325042f0d9dd5cec5c254")
+	answer, _ := hex.DecodeString("b0b1b2b3b4b5b6b7d119c872f77002e5cc82e741ca69b3f568b5facff046fa764c1646d7395735e3f34ca5e0f2082aeae570f04304a4571256c325042f0d9dd5")
+	// a byte changed anywhere, its tag no longer holds: the answer is dropped
+	for i := range answer {
+		tampered := append([]byte{}, answer...)
+		tampered[i] ^= 1
+		if _, ok := seal.openResponse(tampered); ok {
+			t.Fatalf("byte %d changed, the answer still opened", i)
+		}
+	}
 	frames, ok := seal.openResponse(answer)
 	if !ok {
-		t.Fatal("answer too short")
+		t.Fatal("the answer did not open")
 	}
 	r := bytes.NewReader(frames)
 	if p, err := nextPacket(r); err != nil || !bytes.Equal(p, []byte{0xaa, 0xbb}) {
