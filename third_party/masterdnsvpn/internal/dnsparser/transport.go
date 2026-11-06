@@ -204,7 +204,7 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	questionBytes, questionCount, questionEndOffset := extractQuestionSection(questionPacket, header)
 	optStart, optLen := findOPTRecordRange(questionPacket, header, questionEndOffset)
 
-	nameBytes, err := responseAnswerNameBytes(questionPacket, answerName)
+	nameBytes, err := responseAnswerNameBytes(questionPacket, answerName, len(questionBytes) > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,7 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	firstAnswerNameOffset := offset
 
 	for i, payload := range answerPayloads {
-		if useAnswerNameCompression && i > 0 && firstAnswerNameOffset <= 0x3FFF {
+		if useAnswerNameCompression && i > 0 && firstAnswerNameOffset <= 0x3FFF && len(nameBytes) > 2 {
 			binary.BigEndian.PutUint16(response[offset:offset+2], uint16(0xC000|firstAnswerNameOffset))
 			offset += 2
 		} else {
@@ -295,7 +295,7 @@ func buildSingleTXTResponsePacket(questionPacket []byte, answerName string, answ
 	questionBytes, questionCount, questionEndOffset := extractQuestionSection(questionPacket, header)
 	optStart, optLen := findOPTRecordRange(questionPacket, header, questionEndOffset)
 
-	nameBytes, err := responseAnswerNameBytes(questionPacket, answerName)
+	nameBytes, err := responseAnswerNameBytes(questionPacket, answerName, len(questionBytes) > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -325,9 +325,18 @@ func buildSingleTXTResponsePacket(questionPacket []byte, answerName string, answ
 	return response, nil
 }
 
-func responseAnswerNameBytes(questionPacket []byte, answerName string) ([]byte, error) {
+// questionNamePointer is the question's name by compression (RFC 1035 §4.1.4): it starts right after the header.
+var questionNamePointer = []byte{0xC0, dnsHeaderSize}
+
+// responseAnswerNameBytes is the answers' owner name. neko: a pointer to the question when the answer carries it, as
+// every DNS server answers, not the name again: a tunnel query's name is up to 255 bytes, and the answer repeated it
+// (a mark of masterdns between the node and the resolver, and room the answer lacked).
+func responseAnswerNameBytes(questionPacket []byte, answerName string, questionCopied bool) ([]byte, error) {
 	rawName, parsedName, ok := extractFirstQuestionNameWire(questionPacket)
 	if ok && sameDNSName(parsedName, answerName) {
+		if questionCopied {
+			return questionNamePointer, nil
+		}
 		return rawName, nil
 	}
 	return encodeDNSNameStrict(answerName)

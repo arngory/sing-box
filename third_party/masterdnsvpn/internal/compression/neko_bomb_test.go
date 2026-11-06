@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"runtime"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -49,6 +50,20 @@ func TestNekoDecompressBounded(t *testing.T) {
 	}
 	if _, ok := TryDecompressPayload(bomb, TypeZSTD); ok {
 		t.Fatal("zstd bomb inflated")
+	}
+	// a frame of 10 bytes that declares a window of 512 MiB and no content size, one RLE block of 1000 bytes: the old
+	// decoder allocated the window and gave the 1000 bytes
+	window := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 19 << 3, 0x43, 0x1F, 0x00, 0x00}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, ok := TryDecompressPayload(window, TypeZSTD)
+	runtime.ReadMemStats(&after)
+	if ok {
+		t.Fatal("a window of 512 MiB taken")
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8<<20 {
+		t.Fatalf("%d bytes allocated for a refused frame", allocated)
 	}
 	// lz4's size header is believed before anything else: a claim of 10 MB is refused
 	lz4 := make([]byte, 8)

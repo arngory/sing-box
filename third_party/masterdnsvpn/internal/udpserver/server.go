@@ -36,6 +36,9 @@ const (
 	mtuProbeDownMinSize = mtuProbeUpMinSize + 2
 	mtuProbeMinDownSize = VpnProto.SessionAcceptPayloadSize
 	mtuProbeMaxDownSize = 4096
+	// mtuProbeDownPerQueryByte bounds a probe's answer by its query (neko): Niko's probes of 500 bytes come in
+	// queries of over 250
+	mtuProbeDownPerQueryByte = 4
 )
 
 var preSessionPacketTypes = buildPreSessionPacketTypes()

@@ -38,7 +38,9 @@ const (
 
 var (
 	maxUploadProbePacketType = VpnProto.MaxHeaderPacketType()
-	mtuDownResponseReserve   = func() int {
+	// mtuDownQueryPad is what a download probe's payload lacks against data under the largest header (neko)
+	mtuDownQueryPad        = max(0, VpnProto.MaxHeaderRawSize()-VpnProto.HeaderRawSize(Enums.PACKET_MTU_DOWN_REQ))
+	mtuDownResponseReserve = func() int {
 		reserve := VpnProto.MaxHeaderRawSize() - VpnProto.HeaderRawSize(Enums.PACKET_MTU_DOWN_RES)
 		if reserve < 0 {
 			return 0
@@ -1253,7 +1255,9 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, prob
 		return false, 0, nil
 	}
 
-	requestLen := max(1+mtuProbeCodeLength+2, uploadMTU)
+	// neko: the probe's query as long as the session's longest, an upload MTU of data under the largest header: the
+	// answer carries its question, and probes 7 bytes shorter found a download MTU too large for the data's answers
+	requestLen := max(1+mtuProbeCodeLength+2, uploadMTU+mtuDownQueryPad)
 	payload, code, useBase64, err := c.buildMTUProbePayload(requestLen)
 	if err != nil {
 		return false, 0, err

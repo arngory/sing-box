@@ -38,10 +38,11 @@ func nekoTestServer(t *testing.T, values map[string]any) (*Server, *security.Cod
 	return New(cfg, logger.NewWithWriter("test", "ERROR", io.Discard), codec), codec
 }
 
-// nekoMTUDownQuery is a client's MTU_DOWN_REQ for an answer of size bytes, raw, with an OPT of edns.
-func nekoMTUDownQuery(t *testing.T, codec *security.Codec, size int, edns uint16) []byte {
+// nekoMTUDownQuery is a client's MTU_DOWN_REQ for an answer of size bytes, raw, its payload padded to pad bytes (a
+// client pads it to its upload MTU), with an OPT of edns.
+func nekoMTUDownQuery(t *testing.T, codec *security.Codec, size, pad int, edns uint16) []byte {
 	t.Helper()
-	payload := make([]byte, mtuProbeDownMinSize)
+	payload := make([]byte, max(mtuProbeDownMinSize, pad))
 	payload[0] = mtuProbeModeRaw
 	copy(payload[1:], []byte{1, 2, 3, 4})
 	binary.BigEndian.PutUint16(payload[mtuProbeUpMinSize:], uint16(size))
@@ -62,33 +63,62 @@ func nekoMTUDownQuery(t *testing.T, codec *security.Codec, size int, edns uint16
 	return query
 }
 
-// neko: an MTU probe asks no more than a session may take; what the server answers goes within its requester's size.
+// neko: an MTU probe asks no more than a session may take, nor more than 4 times its query; what the server answers
+// goes within its requester's size.
 func TestNekoMTUDownBounded(t *testing.T) {
 	server, codec := nekoTestServer(t, map[string]any{"MAX_ALLOWED_CLIENT_DOWNLOAD_MTU": 1232})
 
-	answer := server.handlePacket(nekoMTUDownQuery(t, codec, 1000, 4096))
+	// as Niko probes: padded to its upload MTU
+	query := nekoMTUDownQuery(t, codec, 1000, 100, 4096)
+	if len(query) < 250 {
+		t.Fatalf("padded probe of %d bytes", len(query))
+	}
+	answer := server.handlePacket(query)
 	packet, err := DnsParser.ExtractVPNResponse(answer, false)
 	if err != nil || packet.PacketType != Enums.PACKET_MTU_DOWN_RES || len(packet.Payload) != 1000 {
 		t.Fatalf("probe for 1000: %v %d %d", err, packet.PacketType, len(packet.Payload))
 	}
-	// past the session's most: no answer but an empty one (as for a probe past 4096 before)
-	for _, size := range []int{1233, 4096} {
-		answer := server.handlePacket(nekoMTUDownQuery(t, codec, size, 4096))
-		if len(answer) < 12 || binary.BigEndian.Uint16(answer[6:8]) != 0 || len(answer) > 200 {
-			t.Fatalf("probe for %d: %d bytes", size, len(answer))
+	nekoEmpty := func(name string, answer []byte) {
+		t.Helper()
+		if len(answer) < 12 || binary.BigEndian.Uint16(answer[6:8]) != 0 || len(answer) > len(query)+64 {
+			t.Fatalf("%s: %d bytes", name, len(answer))
 		}
 	}
-	// the default before: 4096 bytes of answer to a query of about 100
-	wide, codec := nekoTestServer(t, nil)
-	query := nekoMTUDownQuery(t, codec, 4096, 4096)
-	if answer := wide.handlePacket(query); len(answer) < 4096 {
-		t.Fatalf("server default: %d bytes", len(answer))
+	// past the session's most: the empty answer (as for a probe past 4096 before)
+	nekoEmpty("probe for 1233", server.handlePacket(nekoMTUDownQuery(t, codec, 1233, 100, 4096)))
+	nekoEmpty("probe for 4096", server.handlePacket(nekoMTUDownQuery(t, codec, 4096, 100, 4096)))
+	// a probe crafted short (about 100 bytes) gets 4 times its query at most
+	short := nekoMTUDownQuery(t, codec, 1000, 0, 4096)
+	nekoEmpty("short probe for 1000", server.handlePacket(short))
+	if _, err := DnsParser.ExtractVPNResponse(server.handlePacket(nekoMTUDownQuery(t, codec, 4*len(short)-8, 0, 4096)), false); err != nil {
+		t.Fatalf("short probe within 4 times: %v", err)
 	}
+	// the server's own default, 4096, bounds a probe by its query all the same
+	wide, codec := nekoTestServer(t, nil)
+	nekoEmpty("probe for 4000 of a server of 4096", wide.handlePacket(nekoMTUDownQuery(t, codec, 4000, 100, 4096)))
 
-	// a requester of 1232: the probe's answer for 1200 does not fit it and goes as TC
-	query = nekoMTUDownQuery(t, codec, 1200, 1232)
-	answer = DnsParser.FitRequester(query, server.handlePacket(query))
+	// a requester of 1232: the probe's answer for 1000 does not fit it and goes as TC
+	query = nekoMTUDownQuery(t, codec, 1000, 100, 1232)
+	answer = server.handlePacket(query)
+	if len(answer) <= 1232 {
+		t.Fatalf("answer of %d bytes", len(answer))
+	}
+	answer = DnsParser.FitRequester(query, answer)
 	if len(answer) > 1232 || answer[2]&0x02 == 0 || binary.BigEndian.Uint16(answer[6:8]) != 0 {
 		t.Fatalf("to a requester of 1232: %d bytes, flags % x", len(answer), answer[2:4])
+	}
+}
+
+// neko: the answer's owner name points to the question (C0 0C), as every DNS server answers.
+func TestNekoAnswerNamePointer(t *testing.T) {
+	server, codec := nekoTestServer(t, nil)
+	query := nekoMTUDownQuery(t, codec, 200, 100, 4096)
+	answer := server.handlePacket(query)
+	questionEnd := len(query) - 11 // the query's OPT is 11 bytes
+	if len(answer) < questionEnd+2 || answer[questionEnd] != 0xC0 || answer[questionEnd+1] != 12 {
+		t.Fatalf("owner name % x", answer[questionEnd:questionEnd+2])
+	}
+	if _, err := DnsParser.ExtractVPNResponse(answer, false); err != nil {
+		t.Fatal(err)
 	}
 }
