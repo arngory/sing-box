@@ -33,9 +33,16 @@ type ServerOptions struct {
 	Conn UDPConn
 	// Dial connects a client stream to the one fixed upstream (TCP mode)
 	Dial func(timeout time.Duration) (net.Conn, error)
+	// MaxDownloadMTU is the most a session's answers carry and its MTU probes ask
+	// (MAX_ALLOWED_CLIENT_DOWNLOAD_MTU); 0 is DefaultMaxDownloadMTU
+	MaxDownloadMTU int
 	// Log receives the server log (nil: discarded)
 	Log io.Writer
 }
+
+// DefaultMaxDownloadMTU bounds a session's answers and the MTU probes: an answer that carries more passes few resolvers
+// (most take 1232 bytes), and a probe for 4096 reflected about 50 times its query.
+const DefaultMaxDownloadMTU = 1232
 
 // RunServer serves until ctx ends or the server stops.
 func RunServer(ctx context.Context, options ServerOptions) error {
@@ -45,23 +52,9 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 	if options.Conn == nil || options.Dial == nil {
 		return errors.New("masterdnsvpn: socket and upstream dialer are required")
 	}
-	values := map[string]any{
-		"DOMAIN":                 options.Domains,
-		"PROTOCOL_TYPE":          "TCP",
-		"FORWARD_IP":             "127.0.0.1",
-		"FORWARD_PORT":           1,
-		"DATA_ENCRYPTION_METHOD": options.Method,
-		"ENCRYPTION_KEY_FILE":    options.KeyFile,
-		"LOG_LEVEL":              defaultString(options.LogLevel, "WARN"),
-		"UDP_PORT":               53,
-	}
-	raw, err := json.Marshal(values)
+	cfg, err := serverConfig(options)
 	if err != nil {
 		return err
-	}
-	cfg, err := config.LoadServerConfigFromJSONBase64WithOverrides(base64.StdEncoding.EncodeToString(raw), config.ServerConfigOverrides{})
-	if err != nil {
-		return fmt.Errorf("masterdnsvpn: %w", err)
 	}
 	key, err := readKey(options.KeyFile, options.Method)
 	if err != nil {
@@ -91,6 +84,31 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 		return nil
 	}
 	return err
+}
+
+// serverConfig is the server's configuration for options.
+func serverConfig(options ServerOptions) (config.ServerConfig, error) {
+	values := map[string]any{
+		"DOMAIN":                 options.Domains,
+		"PROTOCOL_TYPE":          "TCP",
+		"FORWARD_IP":             "127.0.0.1",
+		"FORWARD_PORT":           1,
+		"DATA_ENCRYPTION_METHOD": options.Method,
+		"ENCRYPTION_KEY_FILE":    options.KeyFile,
+		"LOG_LEVEL":              defaultString(options.LogLevel, "WARN"),
+		"UDP_PORT":               53,
+		// the server's own default, 4096, let an MTU probe reflect kilobytes; Niko asks 500 at most
+		"MAX_ALLOWED_CLIENT_DOWNLOAD_MTU": defaultInt(options.MaxDownloadMTU, DefaultMaxDownloadMTU),
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return config.ServerConfig{}, err
+	}
+	cfg, err := config.LoadServerConfigFromJSONBase64WithOverrides(base64.StdEncoding.EncodeToString(raw), config.ServerConfigOverrides{})
+	if err != nil {
+		return config.ServerConfig{}, fmt.Errorf("masterdnsvpn: %w", err)
+	}
+	return cfg, nil
 }
 
 // RefuseQuery answers a DNS query with REFUSED: same ID, opcode and RD, the question echoed.
@@ -149,6 +167,13 @@ func readKey(path string, method int) (string, error) {
 
 func defaultString(value, fallback string) string {
 	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func defaultInt(value, fallback int) int {
+	if value <= 0 {
 		return fallback
 	}
 	return value

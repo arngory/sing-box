@@ -802,7 +802,9 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 		return nil
 	}
 	downloadSize := int(binary.BigEndian.Uint16(vpnPacket.Payload[mtuProbeUpMinSize:mtuProbeDownMinSize]))
-	if downloadSize < mtuProbeMinDownSize || downloadSize > mtuProbeMaxDownSize {
+	// neko: no probe past what a session may take (MAX_ALLOWED_CLIENT_DOWNLOAD_MTU): such an answer served only
+	// to reflect kilobytes
+	if downloadSize < mtuProbeMinDownSize || downloadSize > min(mtuProbeMaxDownSize, s.cfg.ClientMaxDownloadMTU) {
 		return nil
 	}
 

@@ -15,3 +15,19 @@ func TestNekoRefuseQuery(t *testing.T) {
 		t.Fatal("short query accepted")
 	}
 }
+
+// neko: the most a session's answers carry, and its probes ask, is 1232 unless niko-server says otherwise.
+func TestNekoServerMaxDownloadMTU(t *testing.T) {
+	options := ServerOptions{Domains: []string{"t.example.com"}, Method: 0}
+	cfg, err := serverConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientMaxDownloadMTU != DefaultMaxDownloadMTU {
+		t.Fatalf("default %d", cfg.ClientMaxDownloadMTU)
+	}
+	options.MaxDownloadMTU = 900
+	if cfg, err = serverConfig(options); err != nil || cfg.ClientMaxDownloadMTU != 900 {
+		t.Fatalf("900: %d %v", cfg.ClientMaxDownloadMTU, err)
+	}
+}

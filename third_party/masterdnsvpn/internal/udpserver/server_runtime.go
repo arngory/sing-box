@@ -269,6 +269,10 @@ func (s *Server) dnsWorker(ctx context.Context, conn UDPConn, reqCh <-chan reque
 				response = s.safeHandlePacket(packet)
 			}
 			if len(response) != 0 {
+				// neko: within the requester's size, TC otherwise
+				response = DnsParser.FitRequester(packet, response)
+			}
+			if len(response) != 0 {
 				writeConn := conn
 				if req.conn != nil {
 					writeConn = req.conn

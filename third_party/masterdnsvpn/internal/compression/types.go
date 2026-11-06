@@ -21,7 +21,10 @@ const (
 	DefaultMinSize = 100
 
 	// maxDecompressedSize caps decompressed output to prevent decompression bombs.
-	maxDecompressedSize = 10 * 1024 * 1024 // 10 MB
+	// neko: 64 KiB, not 10 MB. A frame's payload is compressed whole and is at most
+	// one MTU (at most 65535) before it, and the inflating comes before any session
+	// check: a query of 150 bytes made the server allocate megabytes.
+	maxDecompressedSize = 64 * 1024
 )
 
 var ErrDecompressedTooLarge = errors.New("decompressed payload exceeds safety limit")
@@ -73,7 +76,8 @@ var (
 	}
 	zstdDecoderPool = sync.Pool{
 		New: func() any {
-			decoder, _ := zstd.NewReader(nil)
+			// neko: the window within the cap, and no blocks decoded ahead of the reader
+			decoder, _ := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxDecompressedSize), zstd.WithDecoderConcurrency(1))
 			return decoder
 		},
 	}
