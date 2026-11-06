@@ -261,41 +261,178 @@ func TestNekoAuthSessionsPerDevice(t *testing.T) {
 	}
 }
 
-// neko: §3.6: a query before a session is served up to 3 times in 30 s, by its decoded bytes
+// neko: §3.6: a query before a session is served up to 3 times in 30 s, by its decoded bytes; only one whose tag held
+// is noted
 func TestNekoAuthNonceRepeats(t *testing.T) {
 	memory := newNonceMemory()
 	nonce := []byte("twelve bytes")
 	now := time.Now()
 	for i := 1; i <= nonceRepeats; i++ {
-		if !memory.allow(nonce, now.Add(time.Duration(i)*time.Second)) {
+		at := now.Add(time.Duration(i) * time.Second)
+		if !memory.servable(nonce, at) {
 			t.Fatalf("sight %d refused", i)
 		}
+		memory.note(nonce, at)
 	}
-	if memory.allow(nonce, now.Add(5*time.Second)) {
+	if memory.servable(nonce, now.Add(5*time.Second)) {
 		t.Fatal("a fourth sight served")
 	}
 	other := []byte("other twelve")
-	if !memory.allow(other, now) || memory.allow(other, now.Add(31*time.Second)) {
+	memory.note(other, now)
+	if memory.servable(other, now.Add(31*time.Second)) {
 		t.Fatal("a repeat after 30 s served")
 	}
-	// kept across a generation's turn
+	// kept longer than a tag holds (its epoch and one next to it, the client's clock 10 minutes off): through the
+	// first turn of the generations, gone after the second
 	late := []byte("late twelve.")
-	memory.allow(late, now)
-	if memory.allow(late, now.Add(nonceGeneration+time.Second)) {
-		t.Fatal("a nonce forgotten at the generation's turn")
+	memory.note(late, now)
+	for _, after := range []time.Duration{15*time.Minute + time.Second, 31 * time.Minute, 59 * time.Minute} {
+		if memory.servable(late, now.Add(after)) {
+			t.Fatalf("a nonce forgotten after %v", after)
+		}
 	}
-	if memory.allow([]byte("short"), now) {
+	if memory.servable([]byte("short"), now) {
 		t.Fatal("a nonce of another length")
 	}
+}
 
-	// through the server: the same probe query, byte for byte
+// neko: the review's flush: queries whose tag does not hold (junk with the service's key, or past the budget) note
+// nothing, so they never wash a noted nonce out; a generation full refuses new nonces rather than forget old ones
+func TestNekoAuthNonceNotFlushed(t *testing.T) {
+	memory := newNonceMemory()
+	now := time.Now()
+	victim := []byte("victim probe")
+	memory.note(victim, now)
+	junk := make([]byte, nonceKeyLen)
+	for i := 0; i < 3*nonceGenerationCap; i++ {
+		binary.BigEndian.PutUint64(junk, uint64(i))
+		memory.servable(junk, now) // a scan that fails: nothing noted
+	}
+	if len(memory.current) != 1 || memory.servable(victim, now.Add(time.Minute)) {
+		t.Fatalf("%d noted, the victim's nonce served again", len(memory.current))
+	}
+	// full of nonces whose tag held: the new are refused, the noted stay
+	for i := 0; len(memory.current) < nonceGenerationCap; i++ {
+		binary.BigEndian.PutUint64(junk, uint64(i))
+		memory.note(junk, now)
+	}
+	if memory.servable([]byte("a new one..."), now) {
+		t.Fatal("a new nonce served with the generation full")
+	}
+	if memory.servable(victim, now.Add(time.Minute)) {
+		t.Fatal("the victim's nonce served again with the generation full")
+	}
+
+	// through the server: probes of an unknown key, then the device's probe four times
 	server, auth := nekoAuthServer(t, authRequired)
+	stranger := nekoDevice(t, []byte("not a device of this node ......"))
+	for i := 0; i < 20; i++ {
+		if nekoProbeAnswered(t, server, stranger) {
+			t.Fatal("a stranger's probe answered")
+		}
+	}
+	if n := len(server.authNonces.current); n != 0 {
+		t.Fatalf("%d nonces noted for tags that did not hold", n)
+	}
 	query := nekoProbe(t, nekoDevice(t, auth.keys["phone"]), mtuProbeModeRaw, 300)
 	for i := 1; i <= nonceRepeats+1; i++ {
-		answer := server.handlePacket(query)
-		_, err := DnsParser.ExtractVPNResponse(answer, false)
+		_, err := DnsParser.ExtractVPNResponse(server.handlePacket(query), false)
 		if (err == nil) != (i <= nonceRepeats) {
 			t.Fatalf("copy %d: %v", i, err)
 		}
+	}
+}
+
+// neko: the review: a scan that names no device is no device's
+func TestNekoAuthEmptyScan(t *testing.T) {
+	server, _ := nekoTestServer(t, map[string]any{"MAX_ALLOWED_CLIENT_DOWNLOAD_MTU": 1232})
+	if err := server.SetAuth(authRequired, nekoEmptyAuthenticator{}); err != nil {
+		t.Fatal(err)
+	}
+	if nekoProbeAnswered(t, server, nekoDevice(t, []byte("phone key, 32 bytes of it ......"))) {
+		t.Fatal("a probe answered for a scan of no device")
+	}
+}
+
+type nekoEmptyAuthenticator struct{}
+
+func (nekoEmptyAuthenticator) Device(string, [security.AuthTagLen]byte, []byte) bool { return true }
+func (nekoEmptyAuthenticator) Scan(int, [security.AuthTagLen]byte, []byte) (string, bool) {
+	return "", true
+}
+
+// neko: §3.5: an INIT's reuse is its device's entry, another device's same INIT takes none of it; a device at its
+// limit gives up the session silent longest
+func TestNekoAuthReuseAndIdlest(t *testing.T) {
+	server, auth := nekoAuthServer(t, authRequired)
+	phone := nekoDevice(t, auth.keys["phone"])
+	tablet := nekoDevice(t, auth.keys["tablet"])
+	first, _, ok := nekoInit(t, server, phone, 1)
+	if !ok {
+		t.Fatal("no session for the phone")
+	}
+	other, _, ok := nekoInit(t, server, tablet, 1)
+	if !ok || other == first {
+		t.Fatalf("the tablet's same INIT: %d %v", other, ok)
+	}
+	if again, _, ok := nekoInit(t, server, phone, 1); !ok || again != first {
+		t.Fatalf("the phone's INIT again after the tablet's: %d, want %d", again, first)
+	}
+
+	type session struct{ id, cookie uint8 }
+	sessions := []session{}
+	for verify := byte(10); verify < 10+maxSessionsPerDevice-1; verify++ {
+		id, cookie, ok := nekoInit(t, server, phone, verify)
+		if !ok {
+			t.Fatal("INIT", verify)
+		}
+		sessions = append(sessions, session{id, cookie})
+		time.Sleep(2 * time.Millisecond)
+	}
+	// the first session is the oldest but the one in use: the next INIT closes the one silent longest
+	firstCookie := server.sessions.byID[first].Cookie
+	time.Sleep(2 * time.Millisecond)
+	if _, ok := nekoPing(t, server, phone, first, firstCookie); !ok {
+		t.Fatal("the phone's ping in its first session")
+	}
+	if _, _, ok := nekoInit(t, server, phone, 99); !ok {
+		t.Fatal("the fifth INIT")
+	}
+	if _, live := server.sessions.deviceOf(first, firstCookie); !live {
+		t.Fatal("the session in use was closed")
+	}
+	if _, live := server.sessions.deviceOf(sessions[0].id, sessions[0].cookie); live {
+		t.Fatal("the session silent longest is still live")
+	}
+}
+
+// neko: the review: the device is checked as the session is used; a query of another device, or none, to a session
+// that changed hands between the tag's check and its use gets the empty answer, and closes nothing
+func TestNekoAuthDeviceAtUse(t *testing.T) {
+	server, auth := nekoAuthServer(t, authOptional)
+	id, cookie, ok := nekoInit(t, server, nekoDevice(t, auth.keys["phone"]), 1)
+	if !ok {
+		t.Fatal("no session for the phone")
+	}
+	query := nekoQuery(t, nekoDevice(t, nil), VpnProto.BuildOptions{
+		SessionID: id, SessionCookie: cookie, PacketType: Enums.PACKET_PING, Payload: []byte("ping"),
+	})
+	packet := VpnProto.Packet{SessionID: id, SessionCookie: cookie, PacketType: Enums.PACKET_PING}
+	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "tablet"); v.ok || v.response != nil {
+		t.Fatal("another device's query used the phone's session")
+	}
+	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, ""); v.ok {
+		t.Fatal("an untagged query used the phone's session")
+	}
+	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "phone"); !v.ok {
+		t.Fatal("the phone's own query")
+	}
+	server.handleSessionCloseNotice(packet, time.Now(), "tablet")
+	if _, live := server.sessions.deviceOf(id, cookie); !live {
+		t.Fatal("another device closed the phone's session")
+	}
+	server.handleSessionCloseNotice(packet, time.Now(), "phone")
+	if _, live := server.sessions.deviceOf(id, cookie); live {
+		t.Fatal("the phone could not close its session")
 	}
 }

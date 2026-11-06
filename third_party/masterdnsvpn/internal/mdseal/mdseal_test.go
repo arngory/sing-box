@@ -29,17 +29,32 @@ func TestVectors(t *testing.T) {
 		room  int
 		want  string
 	}{
-		{"42 bytes", frame, -1, "c0c1c2c3c4c5c6c76b0519aed048831995597c85674215c3b694e25a0e45f90ba648aed96769262065593728b4aa31559f5ae03c5c8bb7f898f170e0f11e838c"},
-		{"empty", nil, -1, "c0c1c2c3c4c5c6c7a8a96dfdd0628318975a788061451dcabc9fee57004ae91ab45bbacc717e3e397f422b35aab51174bd79c4197aac9fd198f170e0f11e838c"},
-		{"room of 60", frame, 60, "c0c1c2c3c4c5c6c702724ce3d048831995597c85674215c3b694e25a0e45f90ba648aed96769262065593728b4aa31559f5ae03c5c8bb7f898f170e0"},
+		{"42 bytes", frame, -1, "c0c1c2c3c4c5c6c7689612c3d048831995597c85674215c3b694e25a0e45f90ba648aed96769262065593728b4aa31559f5ae03c5c8bb7f898f170e0f11e838c"},
+		{"empty", nil, -1, "c0c1c2c3c4c5c6c716b6b6f0d0628318975a788061451dcabc9fee57004ae91ab45bbacc717e3e397f422b35aab51174bd79c4197aac9fd198f170e0f11e838c"},
+		{"room of 60", frame, 60, "c0c1c2c3c4c5c6c7da1eb186d048831995597c85674215c3b694e25a0e45f90ba648aed96769262065593728b4aa31559f5ae03c5c8bb7f898f170e0"},
 	} {
-		s := keys.sealWith(r, c.frame, c.room)
+		const q = "abc.v.example.com"
+		s := keys.sealWith(r, q, c.frame, c.room)
 		if got := hex.EncodeToString(s); got != c.want {
 			t.Fatalf("%s:\n got %s\nwant %s", c.name, got, c.want)
 		}
-		opened, ok := keys.Open(s)
+		opened, ok := keys.Open(q, s)
 		if !ok || !bytes.Equal(opened, c.frame) {
 			t.Fatalf("%s: opened %x, %v", c.name, opened, ok)
+		}
+		// another query's: the answer does not fit it
+		if _, ok := keys.Open("abd.v.example.com", s); ok {
+			t.Fatalf("%s: opened as the answer to another query", c.name)
+		}
+	}
+}
+
+func TestQueryName(t *testing.T) {
+	for name, want := range map[string]string{
+		"abc.v.example.com": "abc.v.example.com", "AbC.V.Example.COM.": "abc.v.example.com", ".": "", "": "",
+	} {
+		if got := QueryName(name); got != want {
+			t.Fatalf("%q: %q", name, got)
 		}
 	}
 }
@@ -60,33 +75,34 @@ func TestLengths(t *testing.T) {
 func TestOpenRefuses(t *testing.T) {
 	keys, _ := NewKeys("00112233445566778899aabbccddeeff")
 	other, _ := NewKeys("ffeeddccbbaa99887766554433221100")
-	s := keys.Seal([]byte("frame"), -1)
-	if _, ok := other.Open(s); ok {
+	const q = "abc.v.example.com"
+	s := keys.Seal(q, []byte("frame"), -1)
+	if _, ok := other.Open(q, s); ok {
 		t.Fatal("another key's answer opened")
 	}
 	for i := range s {
 		bad := append([]byte(nil), s...)
 		bad[i] ^= 1
-		if _, ok := keys.Open(bad); ok {
+		if _, ok := keys.Open(q, bad); ok {
 			t.Fatalf("a bit flipped at %d still opened", i)
 		}
 	}
-	if _, ok := keys.Open(s[:Overhead-1]); ok {
+	if _, ok := keys.Open(q, s[:Overhead-1]); ok {
 		t.Fatal("a short answer opened")
 	}
 	// an open frame is not a sealed one
-	if _, ok := keys.Open(append([]byte{0, 1, 2}, bytes.Repeat([]byte{9}, 60)...)); ok {
+	if _, ok := keys.Open(q, append([]byte{0, 1, 2}, bytes.Repeat([]byte{9}, 60)...)); ok {
 		t.Fatal("an open frame opened")
 	}
 	// a length past what the answer holds: the tag holds (the node's own key), the length does not
-	long := keys.sealWith([8]byte{}, nil, 16)
+	long := keys.sealWith([8]byte{}, q, nil, 16)
 	stream := xorStream(keys, long[:8])
 	plain := make([]byte, len(long)-12)
 	stream(plain, long[12:])
 	plain[0], plain[1] = 0, 200
 	stream(long[12:], plain)
-	copy(long[8:12], tag(keys.downTag, long[:8], long[12:]))
-	if _, ok := keys.Open(long); ok {
+	copy(long[8:12], tag(keys.downTag, q, long[:8], long[12:]))
+	if _, ok := keys.Open(q, long); ok {
 		t.Fatal("a length past the answer opened")
 	}
 	if _, err := NewKeys(""); err != ErrNoKey {

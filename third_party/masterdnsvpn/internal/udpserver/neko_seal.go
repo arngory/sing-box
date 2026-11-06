@@ -71,7 +71,11 @@ func (s *Server) responseModeAllowed(mode uint8) bool {
 // capS the session's cap, 0 for a probe's answer).
 func (s *Server) answer(questionPacket []byte, requestName string, packet VpnProto.Packet, mode uint8, capS int) ([]byte, error) {
 	base := mode&^mdseal.ModeBit == mtuProbeModeBase64
-	if mode&mdseal.ModeBit != 0 && s.sealKeys != nil {
+	if mode&mdseal.ModeBit != 0 {
+		// a sealed answer asked for is never sent open (responseModeAllowed lets bit 7 in with the keys only)
+		if s.sealKeys == nil {
+			return nil, mdseal.ErrNoKey
+		}
 		return DnsParser.BuildSealedVPNResponsePacket(questionPacket, requestName, packet, base, s.sealKeys, capS)
 	}
 	return DnsParser.BuildVPNResponsePacket(questionPacket, requestName, packet, base)

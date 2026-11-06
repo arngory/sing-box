@@ -4,8 +4,11 @@
 //
 //	P = uint16_be(len(F)) || F || 00 … 00    zeros until len(S) is a multiple of 64, as far as the answer has room
 //	C = ChaCha20(Kd, R || 00 00 00 00)(P)    RFC 8439, the block counter from 0; R 8 random bytes, new in each answer
-//	T = HMAC-SHA256(Kdt, R || C)[:4]         encrypt-then-MAC
+//	T = HMAC-SHA256(Kdt, len(Q) || Q || R || C)[:4]   encrypt-then-MAC; Q the question's name (QueryName)
 //	S = R || T || C
+//
+// Q binds the answer to its query: a sealed answer seen on the path (an ERROR_DROP, a SESSION_ACCEPT) is no answer to
+// another query.
 //
 // Kd, Kdt = HMAC-SHA256(K, "mdseal-v1 down", "mdseal-v1 down tag"); K is the key's text as the link gives it
 // (niko-dnskey), its ASCII bytes as they are: not decoded from hex.
@@ -17,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"strings"
 
 	"golang.org/x/crypto/chacha20"
 )
@@ -66,16 +70,33 @@ func SealedLen(frameLen, room int) int {
 	return full
 }
 
-// Seal is S for the frame f, under a new random R, padded within room bytes (room < 0: no bound).
-func (k *Keys) Seal(f []byte, room int) []byte {
+// QueryName is Q (§3): the question's name, ASCII in lower case, without a trailing dot ("" for the root). A
+// resolver may change the name's case on the way (0x20): each side folds it.
+func QueryName(name string) string {
+	name = strings.TrimSuffix(name, ".")
+	if strings.IndexFunc(name, func(r rune) bool { return r >= 'A' && r <= 'Z' }) < 0 {
+		return name
+	}
+	b := []byte(name)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// Seal is S for the frame f answering the query named q (QueryName), under a new random R, padded within room bytes
+// (room < 0: no bound).
+func (k *Keys) Seal(q string, f []byte, room int) []byte {
 	var r [nonceLen]byte
 	if _, err := rand.Read(r[:]); err != nil {
 		panic(err) // crypto/rand does not fail on the platforms the core runs on
 	}
-	return k.sealWith(r, f, room)
+	return k.sealWith(r, q, f, room)
 }
 
-func (k *Keys) sealWith(r [nonceLen]byte, f []byte, room int) []byte {
+func (k *Keys) sealWith(r [nonceLen]byte, q string, f []byte, room int) []byte {
 	total := SealedLen(len(f), room)
 	out := make([]byte, total)
 	copy(out, r[:])
@@ -88,18 +109,19 @@ func (k *Keys) sealWith(r [nonceLen]byte, f []byte, room int) []byte {
 		panic(err) // the key and the nonce have their sizes
 	}
 	stream.XORKeyStream(plain, plain)
-	copy(out[nonceLen:], tag(k.downTag, r[:], plain))
+	copy(out[nonceLen:], tag(k.downTag, q, r[:], plain))
 	return out
 }
 
-// Open is the frame sealed in s; false when s is too short, its tag does not hold (not the node's, another key, an
-// open answer) or its length runs past what it holds. The padding is not checked.
-func (k *Keys) Open(s []byte) ([]byte, bool) {
-	if len(s) < Overhead {
+// Open is the frame sealed in s, an answer to the query named q (QueryName); false when s is too short, its tag does
+// not hold (not the node's, another key, an open answer, an answer to another query) or its length runs past what it
+// holds. The padding is not checked.
+func (k *Keys) Open(q string, s []byte) ([]byte, bool) {
+	if len(s) < Overhead || len(q) > 255 {
 		return nil, false
 	}
 	r, t, ciphertext := s[:nonceLen], s[nonceLen:nonceLen+tagLen], s[nonceLen+tagLen:]
-	if !hmac.Equal(t, tag(k.downTag, r, ciphertext)) {
+	if !hmac.Equal(t, tag(k.downTag, q, r, ciphertext)) {
 		return nil, false
 	}
 	stream, err := newCipher(k.down, r)
@@ -115,8 +137,14 @@ func (k *Keys) Open(s []byte) ([]byte, bool) {
 	return plain[lenLen : lenLen+n], true
 }
 
-func tag(key, r, ciphertext []byte) []byte {
+// tag is T over len(Q) || Q || R || C; a DNS name is at most 253 bytes, so len(Q) is one byte
+func tag(key []byte, q string, r, ciphertext []byte) []byte {
+	if len(q) > 255 {
+		q = q[:255]
+	}
 	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte{byte(len(q))})
+	mac.Write([]byte(q))
 	mac.Write(r)
 	mac.Write(ciphertext)
 	return mac.Sum(nil)[:tagLen]

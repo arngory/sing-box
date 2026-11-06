@@ -67,12 +67,12 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	}
 
 	if vpnPacket.PacketType == Enums.PACKET_SESSION_CLOSE {
-		s.handleSessionCloseNotice(vpnPacket, time.Now())
+		s.handleSessionCloseNotice(vpnPacket, time.Now(), device)
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "session-close-notice")
 	}
 
 	if !isPreSessionRequestType(vpnPacket.PacketType) {
-		validation := s.validatePostSessionPacket(packet, decision.RequestName, vpnPacket)
+		validation := s.validatePostSessionPacket(packet, decision.RequestName, vpnPacket, device)
 		if !validation.ok {
 			return validation.response
 		}

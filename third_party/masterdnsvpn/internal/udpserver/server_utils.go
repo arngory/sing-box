@@ -15,6 +15,7 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mdseal"
 )
 
 func (s *Server) debugLoggingEnabled() bool {
@@ -93,10 +94,15 @@ func isClosedStreamAwarePacketType(packetType uint8) bool {
 }
 
 func sessionResponseModeName(mode uint8) string {
-	if mode == mtuProbeModeBase64 {
-		return "BASE64"
+	name := "RAW (Bytes)"
+	if mode&^mdseal.ModeBit == mtuProbeModeBase64 {
+		name = "BASE64"
 	}
-	return "RAW (Bytes)"
+	// neko: mdseal-v1
+	if mode&mdseal.ModeBit != 0 {
+		name += ", sealed"
+	}
+	return name
 }
 
 func buildCompressionMask(values []int) uint8 {

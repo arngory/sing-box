@@ -163,11 +163,28 @@ func TestNekoSealedRefused(t *testing.T) {
 		if _, err := ExtractSealedVPNResponse(open, base, keys); err == nil {
 			t.Fatalf("base64 %v: an open answer opened", base)
 		}
+		// the same sealed answer to another query (an ERROR_DROP seen on the path, sent again): it fits none but its
+		// own; the name's case as a resolver may have changed it does not matter
+		other, _ := BuildTXTQuestionPacket("abcdefgi.a.example.com", Enums.DNS_RECORD_TYPE_TXT, 1232)
+		replayed := append(append([]byte(nil), sealed[:12]...), other[12:12+len(other)-12-11]...)
+		replayed = append(replayed, sealed[12+len(query)-12-11:]...)
+		if _, err := ExtractSealedVPNResponse(replayed, base, keys); !errors.Is(err, ErrSealTag) {
+			t.Fatalf("base64 %v: a sealed answer under another question: %v", base, err)
+		}
+		upper := append([]byte(nil), sealed...)
+		for i := 12; i < 12+len(query)-12-11-4; i++ {
+			if upper[i] >= 'a' && upper[i] <= 'z' {
+				upper[i] -= 'a' - 'A'
+			}
+		}
+		if got, err := ExtractSealedVPNResponse(upper, base, keys); err != nil || got.PacketType != Enums.PACKET_ERROR_DROP {
+			t.Fatalf("base64 %v: the question in upper case: %v", base, err)
+		}
 	}
 	// parts: one missing, one twice, a count that does not match
 	big := VpnProto.Packet{SessionID: 1, PacketType: Enums.PACKET_STREAM_DATA, StreamID: 1, SequenceNum: 1, Payload: bytes.Repeat([]byte{3}, 700)}
 	frame, _ := buildResponseFrame(big)
-	s := keys.Seal(frame, -1)
+	s := keys.Seal("abcdefgh.a.example.com", frame, -1)
 	chunks, _ := sealedTXTChunks(s, false)
 	if len(chunks) < 3 {
 		t.Fatalf("%d parts", len(chunks))

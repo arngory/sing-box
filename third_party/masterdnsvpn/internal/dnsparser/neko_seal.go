@@ -11,7 +11,8 @@ import (
 // neko: mdseal-v1 (raycontrol docs/spec/mdseal-v1.md §3). An answer's frame F sealed into S = R || T || C lies in the
 // TXT data where F lay, raw or in base64 as the session chose: one string while S fits one (255 bytes raw, 191 before
 // base64), otherwise in parts as F is today, part 0 `00 N` and the start of S, part i `i` and the next bytes. S is
-// cut by bytes: part 0 holds no frame header of its own.
+// cut by bytes: part 0 holds no frame header of its own. T covers the question's name (Q), so an answer seen on the
+// path fits no other query.
 
 // ErrSealTag is an answer whose seal does not hold: not the node's, another key, an open answer.
 var ErrSealTag = errors.New("dns txt answer: the seal does not hold")
@@ -25,6 +26,10 @@ func BuildSealedVPNResponsePacket(questionPacket []byte, answerName string, pack
 		return nil, mdseal.ErrNoKey
 	}
 	rawFrame, err := buildResponseFrame(packet)
+	if err != nil {
+		return nil, err
+	}
+	q, err := sealQueryName(questionPacket)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +55,7 @@ func BuildSealedVPNResponsePacket(questionPacket []byte, answerName string, pack
 		}
 		room = lo
 	}
-	chunks, err := sealedTXTChunks(keys.Seal(rawFrame, room), baseEncode)
+	chunks, err := sealedTXTChunks(keys.Seal(q, rawFrame, room), baseEncode)
 	if err != nil {
 		return nil, err
 	}
@@ -171,11 +176,14 @@ func ExtractSealedVPNResponse(packet []byte, baseEncoded bool, keys *mdseal.Keys
 	if len(rawAnswers) == 0 {
 		return VpnProto.Packet{}, ErrTXTAnswerMissing
 	}
+	if len(parsed.Questions) == 0 {
+		return VpnProto.Packet{}, ErrTXTAnswerMalformed
+	}
 	s, err := assembleSealed(rawAnswers, baseEncoded)
 	if err != nil {
 		return VpnProto.Packet{}, err
 	}
-	frame, ok := keys.Open(s)
+	frame, ok := keys.Open(mdseal.QueryName(parsed.Questions[0].Name), s)
 	if !ok {
 		return VpnProto.Packet{}, ErrSealTag
 	}
@@ -234,4 +242,17 @@ func assembleSealed(rawAnswers [][]byte, baseEncoded bool) ([]byte, error) {
 		s = append(s, parts[id]...)
 	}
 	return s, nil
+}
+
+// sealQueryName is Q of the answer to questionPacket: its first question's name, as the parser gives it (lower case
+// ASCII, no trailing dot) and the reader folds it
+func sealQueryName(questionPacket []byte) (string, error) {
+	lite, err := ParsePacketLite(questionPacket)
+	if err != nil {
+		return "", err
+	}
+	if !lite.HasQuestion {
+		return "", ErrTXTAnswerMalformed
+	}
+	return mdseal.QueryName(lite.FirstQuestion.Name), nil
 }
