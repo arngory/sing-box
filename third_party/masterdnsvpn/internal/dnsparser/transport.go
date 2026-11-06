@@ -209,11 +209,13 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 		return nil, err
 	}
 
+	// later answers point to the first one's owner name when that is a name (not already the pointer to the
+	// question) and a pointer reaches it; the same test sizes the packet and writes it (neko)
+	pointToFirst := len(answerPayloads) > 1 && len(nameBytes) > 2 && dnsHeaderSize+len(questionBytes) <= 0x3FFF
 	answerLen := 0
-	useAnswerNameCompression := len(answerPayloads) > 1
 	for i, payload := range answerPayloads {
 		nameLen := len(nameBytes)
-		if useAnswerNameCompression && i > 0 {
+		if pointToFirst && i > 0 {
 			nameLen = 2
 		}
 		answerLen += nameLen + 10 + len(payload)
@@ -232,7 +234,7 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	firstAnswerNameOffset := offset
 
 	for i, payload := range answerPayloads {
-		if useAnswerNameCompression && i > 0 && firstAnswerNameOffset <= 0x3FFF && len(nameBytes) > 2 {
+		if pointToFirst && i > 0 {
 			binary.BigEndian.PutUint16(response[offset:offset+2], uint16(0xC000|firstAnswerNameOffset))
 			offset += 2
 		} else {

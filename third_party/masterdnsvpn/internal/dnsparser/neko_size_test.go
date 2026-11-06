@@ -86,3 +86,26 @@ func TestNekoFitRequester(t *testing.T) {
 		t.Fatal("a large answer that does not parse was sent")
 	}
 }
+
+// neko: answers in several chunks size the packet as they write it, whatever the owner name: the pointer to the
+// question, the name of another (pointed to by the later answers), the root.
+func TestNekoTXTAnswersExact(t *testing.T) {
+	query, err := BuildTXTQuestionPacket("a.example.com", Enums.DNS_RECORD_TYPE_TXT, 1232)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := [][]byte{bytes.Repeat([]byte{'x'}, 100), bytes.Repeat([]byte{'y'}, 100), bytes.Repeat([]byte{'z'}, 100)}
+	for _, name := range []string{"a.example.com", "b.example.com", "."} {
+		answer, err := BuildTXTResponsePacket(query, name, chunks)
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		if _, err := ParseDNSDatagramLite(answer); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		parsed, err := ParsePacket(answer)
+		if err != nil || len(parsed.Answers) != 3 {
+			t.Fatalf("%s: %v, %d answers", name, err, len(parsed.Answers))
+		}
+	}
+}
