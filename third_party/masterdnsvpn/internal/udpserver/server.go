@@ -23,7 +23,6 @@ import (
 	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
-	"masterdnsvpn-go/internal/mdseal"
 	"masterdnsvpn-go/internal/security"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -45,9 +44,11 @@ const (
 var preSessionPacketTypes = buildPreSessionPacketTypes()
 
 type Server struct {
-	cfg                    config.ServerConfig
-	log                    *logger.Logger
-	codec                  *security.Codec
+	cfg config.ServerConfig
+	log *logger.Logger
+	// neko: the service's keys, the current first (neko_keys.go, SetKeys)
+	keys                   atomic.Pointer[serviceKeys]
+	keysMu                 sync.Mutex
 	domainMatcher          *domainMatcher.Matcher
 	sessions               *sessionStore
 	deferredDNSSession     *deferredSessionProcessor
@@ -89,9 +90,8 @@ type Server struct {
 	lastDropLogUnix          atomic.Int64
 	deferredDroppedPackets   atomic.Uint64
 	lastDeferredDropLogUnix  atomic.Int64
-	// neko: mdseal-v1, SetSeal
+	// neko: mdseal-v1, SetSeal (the seal keys are each service key's)
 	sealMode uint8
-	sealKeys *mdseal.Keys
 	// neko: dnsauth, SetAuth
 	authMode   uint8
 	auth       Authenticator
@@ -141,10 +141,9 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	if cfg.FallbackAddress != "" && packetBufferSize < udpFallbackMaxUDPPacketSize {
 		packetBufferSize = udpFallbackMaxUDPPacketSize
 	}
-	return &Server{
+	server := &Server{
 		cfg:                    cfg,
 		log:                    log,
-		codec:                  codec,
 		domainMatcher:          domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
 		sessions:               sessions,
 		deferredDNSSession:     newDeferredSessionProcessor(dnsDeferredWorkers, dnsDeferredQueue, log),
@@ -193,6 +192,8 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 			},
 		},
 	}
+	server.keys.Store(&serviceKeys{{codec: codec}})
+	return server
 }
 
 type throttledLogState struct {

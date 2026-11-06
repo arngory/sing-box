@@ -61,18 +61,18 @@ func (s *Server) handleParsedPacket(packet []byte, parsed DnsParser.LitePacket, 
 }
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
 	// neko: the device's tag checked before the frame is parsed further or inflated (dnsauth, openQuery)
-	vpnPacket, device, ok := s.openQuery(decision.Labels, time.Now())
+	vpnPacket, device, key, ok := s.openQuery(decision.Labels, time.Now())
 	if !ok {
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "vpn-proto-parse-failed")
 	}
 
 	if vpnPacket.PacketType == Enums.PACKET_SESSION_CLOSE {
-		s.handleSessionCloseNotice(vpnPacket, time.Now(), device)
+		s.handleSessionCloseNotice(vpnPacket, time.Now(), device, key)
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "session-close-notice")
 	}
 
 	if !isPreSessionRequestType(vpnPacket.PacketType) {
-		validation := s.validatePostSessionPacket(packet, decision.RequestName, vpnPacket, device)
+		validation := s.validatePostSessionPacket(packet, decision.RequestName, vpnPacket, device, key)
 		if !validation.ok {
 			return validation.response
 		}
@@ -86,11 +86,11 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 
 	switch vpnPacket.PacketType {
 	case Enums.PACKET_MTU_UP_REQ:
-		return s.handleMTUUpRequest(packet, parsed, decision, vpnPacket)
+		return s.handleMTUUpRequest(packet, parsed, decision, vpnPacket, key)
 	case Enums.PACKET_MTU_DOWN_REQ:
-		return s.handleMTUDownRequest(packet, parsed, decision, vpnPacket)
+		return s.handleMTUDownRequest(packet, parsed, decision, vpnPacket, key)
 	case Enums.PACKET_SESSION_INIT:
-		return s.handleSessionInitRequest(packet, decision, vpnPacket, device)
+		return s.handleSessionInitRequest(packet, decision, vpnPacket, device, key)
 	default:
 		return s.buildNoDataResponseLiteLogged(packet, parsed, fmt.Sprintf("pre-session-unhandled-%s", Enums.PacketTypeName(vpnPacket.PacketType)))
 	}

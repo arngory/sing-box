@@ -2,6 +2,7 @@ package udpserver
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -36,17 +37,28 @@ func ParseSealMode(mode string) (uint8, error) {
 	}
 }
 
-// SetSeal sets the seal mode and the service's key K, its text (mdseal-v1 §2); before the server runs.
+// SetSeal sets the seal mode and the service's key K, its text (mdseal-v1 §2), the key New's codec is of; before the
+// server runs. Keys set later (SetKeys) get their own seal keys in this mode.
 func (s *Server) SetSeal(mode uint8, key string) error {
-	if mode == sealOff {
-		s.sealMode, s.sealKeys = sealOff, nil
-		return nil
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
+	keys := s.currentKeys()
+	if len(keys) == 0 {
+		return errors.New("masterdnsvpn: no key")
 	}
-	keys, err := mdseal.NewKeys(key)
-	if err != nil {
-		return err
+	first := *keys[0]
+	first.text = key
+	first.seal = nil
+	if mode != sealOff {
+		seal, err := mdseal.NewKeys(key)
+		if err != nil {
+			return err
+		}
+		first.seal = seal
 	}
-	s.sealMode, s.sealKeys = mode, keys
+	next := append(serviceKeys{&first}, keys[1:]...)
+	s.sealMode = mode
+	s.keys.Store(&next)
 	return nil
 }
 
@@ -67,16 +79,17 @@ func (s *Server) responseModeAllowed(mode uint8) bool {
 	}
 }
 
-// answer builds the answer carrying packet in the response mode mode: base64 by its low bit, sealed by bit 7 (with
-// capS the session's cap, 0 for a probe's answer).
-func (s *Server) answer(questionPacket []byte, requestName string, packet VpnProto.Packet, mode uint8, capS int) ([]byte, error) {
+// answer builds the answer carrying packet in the response mode mode: base64 by its low bit, sealed by bit 7 with
+// key's seal keys (the session's key, or before a session the query's; with capS the session's cap, 0 for a probe's
+// answer).
+func (s *Server) answer(questionPacket []byte, requestName string, packet VpnProto.Packet, mode uint8, capS int, key *serviceKey) ([]byte, error) {
 	base := mode&^mdseal.ModeBit == mtuProbeModeBase64
 	if mode&mdseal.ModeBit != 0 {
-		// a sealed answer asked for is never sent open (responseModeAllowed lets bit 7 in with the keys only)
-		if s.sealKeys == nil {
+		// a sealed answer asked for is never sent open (responseModeAllowed lets bit 7 in with a seal mode only)
+		if key == nil || key.seal == nil {
 			return nil, mdseal.ErrNoKey
 		}
-		return DnsParser.BuildSealedVPNResponsePacket(questionPacket, requestName, packet, base, s.sealKeys, capS)
+		return DnsParser.BuildSealedVPNResponsePacket(questionPacket, requestName, packet, base, key.seal, capS)
 	}
 	return DnsParser.BuildVPNResponsePacket(questionPacket, requestName, packet, base)
 }

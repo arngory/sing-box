@@ -83,6 +83,9 @@ type sessionRecord struct {
 	SealCap int
 	// Device is the device whose tagged SESSION_INIT set the session up, "" for none (neko: dnsauth)
 	Device string
+	// Key is the service key its SESSION_INIT opened with: its queries open, its answers are sealed, with it alone
+	// (neko: masterdns-key-rotation §3)
+	Key *serviceKey
 }
 
 type recentlyClosedStreamRecord struct {
@@ -164,12 +167,16 @@ type sessionRuntimeView struct {
 	MaxPackedBlocks     int
 	// neko: dnsauth, the session's device
 	Device string
+	// neko: the service key the session is on
+	Key *serviceKey
 }
 
-// initKey is the key a SESSION_INIT reuses its session by: its ten bytes and the device of its tag (neko: dnsauth)
+// initKey is the key a SESSION_INIT reuses its session by: its ten bytes, the device of its tag (neko: dnsauth) and
+// the service key it opened with (neko: key rotation)
 type initKey struct {
 	sig    [sessionInitDataSize]byte
 	device string
+	key    *serviceKey
 }
 
 type closedSessionRecord struct {
@@ -178,6 +185,8 @@ type closedSessionRecord struct {
 	ExpiresAt    time.Time
 	// neko: dnsauth, the closed session's device
 	Device string
+	// neko: the closed session's service key
+	Key *serviceKey
 }
 
 type sessionLookupState uint8
@@ -194,6 +203,8 @@ type sessionLookupResult struct {
 	State        sessionLookupState
 	// neko: dnsauth, the session's device
 	Device string
+	// neko: the session's service key
+	Key *serviceKey
 }
 
 type sessionValidationResult struct {
@@ -201,7 +212,8 @@ type sessionValidationResult struct {
 	Known  bool
 	Valid  bool
 	Active *sessionRuntimeView
-	// neko: dnsauth, the session is live with this cookie but another device's: refused, not touched
+	// neko: dnsauth, the session is live with this cookie but another device's, or (key rotation) the query opened
+	// with another service key: refused, not touched
 	OtherDevice bool
 }
 
@@ -283,6 +295,7 @@ func (s *sessionStore) findOrCreate(
 	maxClientUploadMTU int,
 	maxClientDownloadMTU int,
 	device string,
+	key *serviceKey,
 	closedRetention time.Duration,
 ) (*sessionRecord, bool, *closedSessionCleanup, error) {
 	if len(payload) != sessionInitDataSize || !isValidSessionResponseMode(payload[0]) {
@@ -301,9 +314,9 @@ func (s *sessionStore) findOrCreate(
 
 	// neko: an INIT reuses the session of the same INIT of the same device (dnsauth §3.5): its own entry, another
 	// device's stays
-	reuse := initKey{signature, device}
+	reuse := initKey{signature, device, key}
 	if sessionID, ok := s.bySig[reuse]; ok {
-		if existing := s.byID[sessionID]; existing != nil && existing.Device == device {
+		if existing := s.byID[sessionID]; existing != nil && existing.Device == device && existing.Key == key {
 			if nowUnixNano <= existing.reuseUntilUnixNano {
 				existing.setLastActivityUnixNano(nowUnixNano)
 				return existing, true, nil, nil
@@ -358,6 +371,7 @@ func (s *sessionStore) findOrCreate(
 	copy(record.VerifyCode[:], payload[6:10])
 	record.Cookie = s.randomCookieLocked()
 	record.Device = device
+	record.Key = key
 
 	s.byID[slot] = record
 	s.activeCount++
@@ -422,6 +436,7 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 			ResponseMode: record.ResponseMode,
 			State:        sessionLookupActive,
 			Device:       record.Device,
+			Key:          record.Key,
 		}, true
 	}
 
@@ -431,15 +446,17 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 			ResponseMode: record.ResponseMode,
 			State:        sessionLookupClosed,
 			Device:       record.Device,
+			Key:          record.Key,
 		}, true
 	}
 
 	return sessionLookupResult{}, false
 }
 
-// ValidateAndTouch validates a query to session sessionID with cookie from device ("" for none, neko: dnsauth) and
-// counts it as the session's activity when it is the session's: another device's query neither uses nor touches it.
-func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, device string, now time.Time) sessionValidationResult {
+// ValidateAndTouch validates a query to session sessionID with cookie from device ("" for none, neko: dnsauth),
+// opened with key (neko: key rotation), and counts it as the session's activity when it is the session's: another
+// device's query, or one opened with another key, neither uses nor touches it.
+func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, device string, key *serviceKey, now time.Time) sessionValidationResult {
 	s.mu.RLock()
 	if record := s.byID[sessionID]; record != nil {
 		result := sessionValidationResult{
@@ -448,11 +465,12 @@ func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, device st
 				ResponseMode: record.ResponseMode,
 				State:        sessionLookupActive,
 				Device:       record.Device,
+				Key:          record.Key,
 			},
 			Known: true,
-			Valid: record.Cookie == cookie && record.Device == device,
+			Valid: record.Cookie == cookie && record.Device == device && record.Key == key,
 		}
-		result.OtherDevice = record.Cookie == cookie && record.Device != device
+		result.OtherDevice = record.Cookie == cookie && (record.Device != device || record.Key != key)
 		if result.Valid {
 			view := record.runtimeView()
 			result.Active = &view
@@ -472,6 +490,7 @@ func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, device st
 				ResponseMode: record.ResponseMode,
 				State:        sessionLookupClosed,
 				Device:       record.Device,
+				Key:          record.Key,
 			},
 			Known: true,
 			Valid: false,
@@ -497,7 +516,7 @@ func (s *sessionStore) closeLocked(sessionID uint8, now time.Time, retention tim
 	}
 	record.markClosed()
 
-	delete(s.bySig, initKey{record.Signature, record.Device})
+	delete(s.bySig, initKey{record.Signature, record.Device, record.Key})
 	s.byID[sessionID] = nil
 	if s.activeCount > 0 {
 		s.activeCount--
@@ -508,6 +527,7 @@ func (s *sessionStore) closeLocked(sessionID uint8, now time.Time, retention tim
 			ResponseMode: record.ResponseMode,
 			ExpiresAt:    now.Add(retention),
 			Device:       record.Device,
+			Key:          record.Key,
 		}
 	} else {
 		delete(s.recentClosed, sessionID)
@@ -545,7 +565,7 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 			continue
 		}
 
-		delete(s.bySig, initKey{record.Signature, record.Device})
+		delete(s.bySig, initKey{record.Signature, record.Device, record.Key})
 		s.byID[sessionID] = nil
 		if s.activeCount > 0 {
 			s.activeCount--
@@ -556,6 +576,7 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 				ResponseMode: record.ResponseMode,
 				ExpiresAt:    now.Add(closedRetention),
 				Device:       record.Device,
+				Key:          record.Key,
 			}
 		}
 		record.markClosed()
@@ -774,6 +795,7 @@ func (r *sessionRecord) runtimeView() sessionRuntimeView {
 		DownloadMTUBytes:    r.DownloadMTUBytes,
 		MaxPackedBlocks:     r.MaxPackedBlocks,
 		Device:              r.Device,
+		Key:                 r.Key,
 	}
 }
 
@@ -1194,4 +1216,17 @@ func (r *sessionRecord) enqueueOrphanReset(packetType uint8, streamID uint16, se
 	key := orphanResetKey(packetType, streamID)
 	// Orphans have high priority (0).
 	r.OrphanQueue.Push(0, key, packet)
+}
+
+// withKeyNotIn is the live sessions on a service key kept does not hold (neko: key rotation, SetKeys).
+func (s *sessionStore) withKeyNotIn(kept map[*serviceKey]bool) []uint8 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var ids []uint8
+	for id, record := range s.byID {
+		if record != nil && !kept[record.Key] {
+			ids = append(ids, uint8(id))
+		}
+	}
+	return ids
 }

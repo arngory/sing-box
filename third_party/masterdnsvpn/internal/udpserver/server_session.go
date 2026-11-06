@@ -21,9 +21,11 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName string, vpnPacket VpnProto.Packet, device string) postSessionValidation {
+// validatePostSessionPacket checks a query to a session from device, opened with key (neko: the session's own key
+// only; an answer about a session it is not is sealed with the query's key).
+func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName string, vpnPacket VpnProto.Packet, device string, key *serviceKey) postSessionValidation {
 	now := time.Now()
-	validation := s.sessions.ValidateAndTouch(vpnPacket.SessionID, vpnPacket.SessionCookie, device, now)
+	validation := s.sessions.ValidateAndTouch(vpnPacket.SessionID, vpnPacket.SessionCookie, device, key, now)
 	if validation.Valid {
 		return postSessionValidation{
 			record: validation.Active,
@@ -40,14 +42,14 @@ func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName st
 		mode := s.unknownSessionDropMode()
 		s.logInvalidSessionDrop("unknown session", vpnPacket.SessionID, vpnPacket.SessionCookie, 0, mode)
 		return postSessionValidation{
-			response: s.buildInvalidSessionErrorResponse(questionPacket, requestName, vpnPacket.SessionID, mode),
+			response: s.buildInvalidSessionErrorResponse(questionPacket, requestName, vpnPacket.SessionID, mode, key),
 		}
 	}
 
 	if validation.Lookup.State == sessionLookupClosed {
 		s.logInvalidSessionDrop("recently closed session", vpnPacket.SessionID, vpnPacket.SessionCookie, validation.Lookup.Cookie, validation.Lookup.ResponseMode)
 		return postSessionValidation{
-			response: s.buildInvalidSessionErrorResponse(questionPacket, requestName, vpnPacket.SessionID, validation.Lookup.ResponseMode),
+			response: s.buildInvalidSessionErrorResponse(questionPacket, requestName, vpnPacket.SessionID, validation.Lookup.ResponseMode, key),
 		}
 	}
 
@@ -66,18 +68,18 @@ func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName st
 	s.logInvalidSessionDrop("invalid cookie threshold", vpnPacket.SessionID, vpnPacket.SessionCookie, validation.Lookup.Cookie, validation.Lookup.ResponseMode)
 
 	return postSessionValidation{
-		response: s.buildInvalidSessionErrorResponse(questionPacket, requestName, vpnPacket.SessionID, validation.Lookup.ResponseMode),
+		response: s.buildInvalidSessionErrorResponse(questionPacket, requestName, vpnPacket.SessionID, validation.Lookup.ResponseMode, key),
 	}
 }
 
-func (s *Server) handleSessionCloseNotice(vpnPacket VpnProto.Packet, now time.Time, device string) {
+func (s *Server) handleSessionCloseNotice(vpnPacket VpnProto.Packet, now time.Time, device string, key *serviceKey) {
 	if s == nil || vpnPacket.SessionID == 0 {
 		return
 	}
 
 	lookup, known := s.sessions.Lookup(vpnPacket.SessionID)
-	// neko: dnsauth, only its device closes a session
-	if !known || lookup.State != sessionLookupActive || lookup.Cookie != vpnPacket.SessionCookie || lookup.Device != device {
+	// neko: dnsauth, only its device closes a session; and only on its key (key rotation)
+	if !known || lookup.State != sessionLookupActive || lookup.Cookie != vpnPacket.SessionCookie || lookup.Device != device || lookup.Key != key {
 		return
 	}
 
@@ -137,19 +139,19 @@ func invalidSessionDropLogConfig(reason string, sessionID uint8, receivedCookie 
 	}
 }
 
-func (s *Server) buildInvalidSessionErrorResponse(questionPacket []byte, requestName string, sessionID uint8, responseMode uint8) []byte {
+func (s *Server) buildInvalidSessionErrorResponse(questionPacket []byte, requestName string, sessionID uint8, responseMode uint8, key *serviceKey) []byte {
 	response, err := s.answer(questionPacket, requestName, VpnProto.Packet{
 		SessionID:  sessionID,
 		PacketType: Enums.PACKET_ERROR_DROP,
 		Payload:    randomPayload(invalidDropPayloadSize),
-	}, responseMode, 0)
+	}, responseMode, 0, key)
 	if err != nil {
 		return nil
 	}
 	return response
 }
 
-func (s *Server) buildSessionBusyResponse(questionPacket []byte, requestName string, responseMode uint8, verifyCode []byte) []byte {
+func (s *Server) buildSessionBusyResponse(questionPacket []byte, requestName string, responseMode uint8, verifyCode []byte, key *serviceKey) []byte {
 	if len(verifyCode) < mtuProbeCodeLength {
 		return nil
 	}
@@ -159,7 +161,7 @@ func (s *Server) buildSessionBusyResponse(questionPacket []byte, requestName str
 		SessionID:  0,
 		PacketType: Enums.PACKET_SESSION_BUSY,
 		Payload:    payload[:],
-	}, responseMode, 0)
+	}, responseMode, 0, key)
 	if err != nil {
 		return nil
 	}
@@ -172,7 +174,7 @@ func (s *Server) buildSessionVPNResponse(questionPacket []byte, requestName stri
 	}
 	packet.SessionID = record.ID
 	packet.SessionCookie = record.Cookie
-	response, err := s.answer(questionPacket, requestName, packet, record.ResponseMode, record.SealCap)
+	response, err := s.answer(questionPacket, requestName, packet, record.ResponseMode, record.SealCap, record.Key)
 	if err != nil {
 		return nil
 	}
@@ -650,7 +652,7 @@ func buildPreSessionPacketTypes() [256]bool {
 	return values
 }
 
-func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, device string) []byte {
+func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, device string, key *serviceKey) []byte {
 	if vpnPacket.SessionID != 0 || len(vpnPacket.Payload) != sessionInitDataSize || !s.responseModeAllowed(vpnPacket.Payload[0]) {
 		return nil
 	}
@@ -667,6 +669,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 		s.cfg.ClientMaxUploadMTU,
 		s.cfg.ClientMaxDownloadMTU,
 		device,
+		key,
 		s.cfg.ClosedSessionRetention(),
 	)
 	if evicted != nil {
@@ -680,7 +683,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 					decision.RequestName,
 				)
 			}
-			return s.buildSessionBusyResponse(questionPacket, decision.RequestName, vpnPacket.Payload[0], vpnPacket.Payload[6:10])
+			return s.buildSessionBusyResponse(questionPacket, decision.RequestName, vpnPacket.Payload[0], vpnPacket.Payload[6:10], key)
 		}
 		return nil
 	}
@@ -727,7 +730,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 		SessionID:  0,
 		PacketType: Enums.PACKET_SESSION_ACCEPT,
 		Payload:    responsePayload,
-	}, record.ResponseMode, record.SealCap)
+	}, record.ResponseMode, record.SealCap, record.Key)
 	if err != nil {
 		return nil
 	}
@@ -742,7 +745,7 @@ func resolveCompressionType(requested uint8, allowedMask uint8) uint8 {
 	return compression.TypeOff
 }
 
-func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, key *serviceKey) []byte {
 	if len(vpnPacket.Payload) < mtuProbeUpMinSize {
 		return nil
 	}
@@ -757,7 +760,7 @@ func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacke
 		SessionID:  vpnPacket.SessionID,
 		PacketType: Enums.PACKET_MTU_UP_RES,
 		Payload:    responsePayload[:],
-	}, mode, 0)
+	}, mode, 0, key)
 
 	if err != nil {
 		return nil
@@ -766,7 +769,7 @@ func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacke
 	return response
 }
 
-func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, key *serviceKey) []byte {
 	if len(vpnPacket.Payload) < mtuProbeDownMinSize {
 		return nil
 	}
@@ -801,7 +804,7 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 		FragmentID:     vpnPacket.FragmentID,
 		TotalFragments: vpnPacket.TotalFragments,
 		Payload:        payload,
-	}, mode, 0)
+	}, mode, 0, key)
 	if err != nil {
 		return nil
 	}

@@ -162,7 +162,7 @@ func TestNekoAuthModes(t *testing.T) {
 	for _, method := range []int{0, 1, 2} {
 		server, _ := nekoTestServer(t, map[string]any{"DATA_ENCRYPTION_METHOD": method})
 		codec, _ := security.NewCodec(method, "0123456789abcdef0123456789abcdef")
-		server.codec = codec
+		server.keys.Store(&serviceKeys{{codec: codec}})
 		if err := server.SetAuth(authOptional, &nekoAuthenticator{}); !errors.Is(err, security.ErrAuthNeedsAEAD) {
 			t.Fatalf("method %d: %v", method, err)
 		}
@@ -610,25 +610,26 @@ func TestNekoAuthDeviceAtUse(t *testing.T) {
 		SessionID: id, SessionCookie: cookie, PacketType: Enums.PACKET_PING, Payload: []byte("ping"),
 	})
 	packet := VpnProto.Packet{SessionID: id, SessionCookie: cookie, PacketType: Enums.PACKET_PING}
+	key := server.currentKeys()[0]
 	before := server.sessions.byID[id].lastActivity()
 	time.Sleep(2 * time.Millisecond)
-	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "tablet"); v.ok || v.response != nil {
+	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "tablet", key); v.ok || v.response != nil {
 		t.Fatal("another device's query used the phone's session")
 	}
 	if server.sessions.byID[id].lastActivity() != before {
 		t.Fatal("another device's refused query counted as the phone's session's activity")
 	}
-	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, ""); v.ok {
+	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "", key); v.ok {
 		t.Fatal("an untagged query used the phone's session")
 	}
-	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "phone"); !v.ok {
+	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "phone", key); !v.ok {
 		t.Fatal("the phone's own query")
 	}
-	server.handleSessionCloseNotice(packet, time.Now(), "tablet")
+	server.handleSessionCloseNotice(packet, time.Now(), "tablet", key)
 	if _, live := server.sessions.deviceOf(id, cookie); !live {
 		t.Fatal("another device closed the phone's session")
 	}
-	server.handleSessionCloseNotice(packet, time.Now(), "phone")
+	server.handleSessionCloseNotice(packet, time.Now(), "phone", key)
 	if _, live := server.sessions.deviceOf(id, cookie); live {
 		t.Fatal("the phone could not close its session")
 	}

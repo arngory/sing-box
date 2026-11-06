@@ -26,7 +26,9 @@ type ServerOptions struct {
 	Domains []string
 	// Method is DATA_ENCRYPTION_METHOD; raycontrol nodes use 5 (AES-256-GCM)
 	Method int
-	// KeyFile holds the key as text, as the server's own key file; it is never generated here
+	// KeyFile holds the key as text, as the server's own key file; it is never generated here. One key a line: the
+	// current, then (masterdns-key-rotation §3, AES-GCM methods only) the previous one still taken; Server.SetKeys
+	// changes them while the server runs
 	KeyFile  string
 	LogLevel string
 	// Conn is the DNS socket (a virtual one fed by niko-server's front)
@@ -80,39 +82,54 @@ func (a authAdapter) Scan(kind int, tag [8]byte, msg []byte) (string, bool) {
 // (most take 1232 bytes), and a probe for 4096 reflected about 50 times its query.
 const DefaultMaxDownloadMTU = 1232
 
+// Server is an embedded MasterDnsVPN server whose keys change while it runs (SetKeys).
+type Server struct {
+	server *udpserver.Server
+	method int
+}
+
 // RunServer serves until ctx ends or the server stops.
 func RunServer(ctx context.Context, options ServerOptions) error {
+	server, err := NewServer(options)
+	if err != nil {
+		return err
+	}
+	return server.Run(ctx)
+}
+
+// NewServer is the server of options, ready to Run.
+func NewServer(options ServerOptions) (*Server, error) {
 	if len(options.Domains) == 0 {
-		return errors.New("masterdnsvpn: no domains")
+		return nil, errors.New("masterdnsvpn: no domains")
 	}
 	if options.Conn == nil || options.Dial == nil {
-		return errors.New("masterdnsvpn: socket and upstream dialer are required")
+		return nil, errors.New("masterdnsvpn: socket and upstream dialer are required")
 	}
 	cfg, err := serverConfig(options)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	seal, err := udpserver.ParseSealMode(options.Seal)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	authMode, err := udpserver.ParseAuthMode(options.AuthMode)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if authMode != 0 && options.Auth == nil {
-		return errors.New("masterdnsvpn: auth without an authenticator")
+		return nil, errors.New("masterdnsvpn: auth without an authenticator")
 	}
-	key, err := readKey(options.KeyFile, options.Method)
+	keys, err := readKeys(options.KeyFile, options.Method)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if seal != 0 && key == "" {
-		return errors.New("masterdnsvpn: a seal needs the key (DATA_ENCRYPTION_METHOD 1-5)")
+	if seal != 0 && keys[0] == "" {
+		return nil, errors.New("masterdnsvpn: a seal needs the key (DATA_ENCRYPTION_METHOD 1-5)")
 	}
-	codec, err := security.NewCodecFromConfig(cfg, key)
+	codec, err := security.NewCodecFromConfig(cfg, keys[0])
 	if err != nil {
-		return fmt.Errorf("masterdnsvpn: %w", err)
+		return nil, fmt.Errorf("masterdnsvpn: %w", err)
 	}
 	var log *logger.Logger
 	if options.Log != nil {
@@ -121,12 +138,18 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 		log = logger.NewWithWriter("MasterDnsVPN Server", cfg.LogLevel, io.Discard)
 	}
 	server := udpserver.New(cfg, log, codec)
-	if err := server.SetSeal(seal, key); err != nil {
-		return fmt.Errorf("masterdnsvpn: seal: %w", err)
+	if err := server.SetSeal(seal, keys[0]); err != nil {
+		return nil, fmt.Errorf("masterdnsvpn: seal: %w", err)
+	}
+	if options.Method != 0 {
+		// the file's keys: the current one New's codec is of, the previous after it
+		if err := server.SetKeys(keys); err != nil {
+			return nil, err
+		}
 	}
 	if authMode != 0 {
 		if err := server.SetAuth(authMode, authAdapter{options.Auth}); err != nil {
-			return fmt.Errorf("masterdnsvpn: auth: %w", err)
+			return nil, fmt.Errorf("masterdnsvpn: auth: %w", err)
 		}
 	}
 	server.SetListener(options.Conn)
@@ -137,11 +160,26 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 	// (the client resolves inside the inner stage); without this the server would
 	// ask 1.1.1.1 straight from the node
 	server.SetDNSResolver(RefuseQuery)
-	err = server.Run(ctx)
+	return &Server{server: server, method: options.Method}, nil
+}
+
+// Run serves until ctx ends or the server stops.
+func (s *Server) Run(ctx context.Context) error {
+	err := s.server.Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
+}
+
+// SetKeys replaces the service's keys while the server runs: the current first, the previous after it while it is
+// still taken (masterdns-key-rotation §3). The sessions of a key no longer listed close at once; a key kept keeps
+// its sessions. niko-server calls it when the key file changes.
+func (s *Server) SetKeys(keys []string) error {
+	if s.method == 0 {
+		return errors.New("masterdnsvpn: DATA_ENCRYPTION_METHOD 0 has no key")
+	}
+	return s.server.SetKeys(keys)
 }
 
 // serverConfig is the server's configuration for options.
@@ -200,27 +238,38 @@ func RefuseQuery(query []byte) ([]byte, error) {
 	return answer, nil
 }
 
-// readKey reads the key as the server would, but fails instead of writing a new one.
-func readKey(path string, method int) (string, error) {
+// readKeys reads the keys as the server would, but fails instead of writing a new one: one a line, the current
+// first and the previous after it ("" for method 0, which has none).
+func readKeys(path string, method int) ([]string, error) {
 	if method == 0 {
-		return "", nil
+		return []string{""}, nil
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("masterdnsvpn: read key: %w", err)
+		return nil, fmt.Errorf("masterdnsvpn: read key: %w", err)
 	}
-	key := strings.TrimSpace(string(raw))
-	want := 32
-	switch method {
-	case 3:
-		want = 16
-	case 4:
-		want = 24
+	var keys []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if key := strings.TrimSpace(line); key != "" {
+			keys = append(keys, key)
+		}
 	}
-	if len(key) != want {
-		return "", fmt.Errorf("masterdnsvpn: the key for method %d must be %d characters, the file has %d", method, want, len(key))
+	if len(keys) == 0 {
+		return nil, errors.New("masterdnsvpn: the key file has no key")
 	}
-	return key, nil
+	if len(keys) > 2 {
+		return nil, fmt.Errorf("masterdnsvpn: the key file has %d keys (the current and the previous at most)", len(keys))
+	}
+	if len(keys) > 1 && method < 3 {
+		return nil, errors.New("masterdnsvpn: a previous key needs DATA_ENCRYPTION_METHOD 3-5 (AES-GCM)")
+	}
+	want := udpserver.KeyLength(method)
+	for _, key := range keys {
+		if len(key) != want {
+			return nil, fmt.Errorf("masterdnsvpn: the key for method %d must be %d characters, the file has %d", method, want, len(key))
+		}
+	}
+	return keys, nil
 }
 
 func defaultString(value, fallback string) string {

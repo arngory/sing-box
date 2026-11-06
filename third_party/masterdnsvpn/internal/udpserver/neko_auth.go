@@ -71,23 +71,37 @@ func (s *Server) SetAuth(mode uint8, auth Authenticator) error {
 	if auth == nil {
 		return errors.New("masterdnsvpn: auth without an authenticator")
 	}
-	if s.codec == nil || s.codec.Method() < 3 {
+	if codec := s.firstCodec(); codec == nil || codec.Method() < 3 {
 		return security.ErrAuthNeedsAEAD
 	}
 	s.authMode, s.auth, s.authNonces = mode, auth, newNonceMemory()
 	return nil
 }
 
-// openQuery is the packet a query's labels carry, and the device whose tag it bears ("" for none): the cipher opened,
-// the tag checked, the frame parsed and inflated. False for a query to answer as undecipherable.
-func (s *Server) openQuery(labels string, now time.Time) (VpnProto.Packet, string, bool) {
+// openQuery is the packet a query's labels carry, the device whose tag it bears ("" for none) and the service key
+// that opened it: the cipher opened (the current key, then the previous), the tag checked, the frame parsed and
+// inflated. False for a query to answer as undecipherable.
+func (s *Server) openQuery(labels string, now time.Time) (VpnProto.Packet, string, *serviceKey, bool) {
+	keys := s.currentKeys()
 	if s.authMode == authOff {
-		packet, err := VpnProto.ParseInflatedFromLabels(labels, s.codec)
-		return packet, "", err == nil
+		for _, key := range keys {
+			if packet, err := VpnProto.ParseInflatedFromLabels(labels, key.codec); err == nil {
+				return packet, "", key, true
+			}
+		}
+		return VpnProto.Packet{}, "", nil, false
 	}
-	nonce, plain, err := s.codec.DecodeStringAndOpen(labels)
-	if err != nil {
-		return VpnProto.Packet{}, "", false
+	var key *serviceKey
+	var nonce, plain []byte
+	for _, candidate := range keys {
+		var err error
+		if nonce, plain, err = candidate.codec.DecodeStringAndOpen(labels); err == nil {
+			key = candidate
+			break
+		}
+	}
+	if key == nil {
+		return VpnProto.Packet{}, "", nil, false
 	}
 	if len(plain) > security.AuthTagLen {
 		frameBytes := plain[security.AuthTagLen:]
@@ -97,25 +111,25 @@ func (s *Server) openQuery(labels string, now time.Time) (VpnProto.Packet, strin
 			copy(tag[:], plain)
 			if device, ok := s.checkTag(tag, nonce, frameBytes, frame, now); ok {
 				packet, err := VpnProto.InflatePayload(frame)
-				return packet, device, err == nil
+				return packet, device, key, err == nil
 			}
 		}
 	}
 	if s.authMode == authRequired {
-		return VpnProto.Packet{}, "", false
+		return VpnProto.Packet{}, "", nil, false
 	}
 	// optional: a frame without a tag, an old client's, unless it is about a session a device holds
 	frame, err := VpnProto.Parse(plain)
 	if err != nil {
-		return VpnProto.Packet{}, "", false
+		return VpnProto.Packet{}, "", nil, false
 	}
 	if !isPreSessionRequestType(frame.PacketType) {
 		if device, _ := s.sessions.deviceOf(frame.SessionID, frame.SessionCookie); device != "" {
-			return VpnProto.Packet{}, "", false
+			return VpnProto.Packet{}, "", nil, false
 		}
 	}
 	packet, err := VpnProto.InflatePayload(frame)
-	return packet, "", err == nil
+	return packet, "", key, err == nil
 }
 
 // checkTag is the device whose tag a query bears (§3): before a session, by a scan, a request seen too often refused
