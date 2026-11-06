@@ -46,7 +46,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, err
 	}
 	var tlsConfig tls.Config
-	if resolver.Kind != dnstt.ResolverUDP {
+	if resolver.Kind == dnstt.ResolverDoT || resolver.Kind == dnstt.ResolverDoH {
 		tlsOptions := common.PtrValueOrDefault(options.TLS)
 		tlsOptions.Enabled = true
 		if tlsOptions.ServerName == "" && resolver.Address.IsDomain() {

@@ -193,7 +193,65 @@ var _ N.Dialer = udpDialer{}
 // Streams through the client reach the server's upstream and back, over plain UDP DNS.
 func TestNekoDNSTTEcho(t *testing.T) {
 	server, pubkey := startTestServer(t, "t.example.com")
-	resolver, err := ParseResolver("udp://" + server.conn.LocalAddr().String())
+	echoThrough(t, "udp://"+server.conn.LocalAddr().String(), pubkey)
+}
+
+// The same over DNS over TCP (RFC 7766): a resolver that takes length-prefixed messages on TCP and asks the server
+// over UDP, as a public resolver reached on TCP 53 does.
+func TestNekoDNSTTEchoTCP(t *testing.T) {
+	server, pubkey := startTestServer(t, "t.example.com")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go tcpToUDP(conn, server.conn.LocalAddr())
+		}
+	}()
+	echoThrough(t, "tcp://"+listener.Addr().String(), pubkey)
+}
+
+// tcpToUDP relays one TCP DNS connection to a UDP DNS server and its answers back, framed by their length.
+func tcpToUDP(conn net.Conn, server net.Addr) {
+	defer conn.Close()
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return
+	}
+	defer upstream.Close()
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, _, err := upstream.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if _, err = conn.Write(append(binary.BigEndian.AppendUint16(nil, uint16(n)), buf[:n]...)); err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		var size [2]byte
+		if _, err := io.ReadFull(conn, size[:]); err != nil {
+			return
+		}
+		message := make([]byte, binary.BigEndian.Uint16(size[:]))
+		if _, err := io.ReadFull(conn, message); err != nil {
+			return
+		}
+		upstream.WriteTo(message, server)
+	}
+}
+
+func echoThrough(t *testing.T, resolverURL, pubkey string) {
+	resolver, err := ParseResolver(resolverURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +295,7 @@ func TestNekoDNSTTParseResolver(t *testing.T) {
 		"tls://1.1.1.1":                 ResolverDoT,
 		"udp://8.8.8.8:5353":            ResolverUDP,
 		"8.8.8.8":                       ResolverUDP,
+		"tcp://9.9.9.9":                 ResolverTCP,
 	} {
 		resolver, err := ParseResolver(raw)
 		if err != nil || resolver.Kind != want {
@@ -245,6 +304,9 @@ func TestNekoDNSTTParseResolver(t *testing.T) {
 	}
 	if resolver, _ := ParseResolver("tls://1.1.1.1"); resolver.Address.Port != 853 {
 		t.Fatal("DoT default port")
+	}
+	if resolver, _ := ParseResolver("tcp://[2001:db8::53]"); resolver.Address.Port != 53 || resolver.Address.AddrString() != "2001:db8::53" {
+		t.Fatal("TCP default port")
 	}
 	if _, err := ParseResolver("ftp://x"); err == nil {
 		t.Fatal("accepted ftp")

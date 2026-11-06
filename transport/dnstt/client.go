@@ -36,16 +36,18 @@ const (
 	ResolverDoH ResolverKind = iota
 	ResolverDoT
 	ResolverUDP
+	// DNS over TCP (RFC 7766), length-prefixed as DoT without TLS: where UDP 53 is redirected and TCP 53 is not
+	ResolverTCP
 )
 
-// Resolver is where the DNS queries go: a DoH URL, or a DoT or UDP host:port.
+// Resolver is where the DNS queries go: a DoH URL, or a DoT, TCP or UDP host:port.
 type Resolver struct {
 	Kind    ResolverKind
 	URL     string // DoH
 	Address M.Socksaddr
 }
 
-// ParseResolver reads "https://host/dns-query", "tls://host[:853]" or "udp://host[:53]"
+// ParseResolver reads "https://host/dns-query", "tls://host[:853]", "tcp://host[:53]" or "udp://host[:53]"
 // ("host[:53]" alone is UDP).
 func ParseResolver(raw string) (Resolver, error) {
 	raw = strings.TrimSpace(raw)
@@ -75,8 +77,10 @@ func ParseResolver(raw string) (Resolver, error) {
 		return Resolver{Kind: ResolverDoT, Address: M.ParseSocksaddrHostPort(parsed.Hostname(), port(853))}, nil
 	case "udp":
 		return Resolver{Kind: ResolverUDP, Address: M.ParseSocksaddrHostPort(parsed.Hostname(), port(53))}, nil
+	case "tcp":
+		return Resolver{Kind: ResolverTCP, Address: M.ParseSocksaddrHostPort(parsed.Hostname(), port(53))}, nil
 	default:
-		return Resolver{}, E.New("unknown resolver scheme ", parsed.Scheme, " (expected https, tls or udp)")
+		return Resolver{}, E.New("unknown resolver scheme ", parsed.Scheme, " (expected https, tls, tcp or udp)")
 	}
 }
 
@@ -258,6 +262,13 @@ func (c *Client) openTransport(ctx context.Context) (net.PacketConn, net.Addr, e
 			return nil, nil, E.Cause(err, "connect to the DoT resolver")
 		}
 		return packetConn, turbotunnel.DummyAddr{}, nil
+	case ResolverTCP:
+		// the same stream of length-prefixed messages as DoT, over the bare TCP connection
+		packetConn, err := newTLSPacketConn(c.ctx, c.dialTCP, c.logger)
+		if err != nil {
+			return nil, nil, E.Cause(err, "connect to the DNS resolver over TCP")
+		}
+		return packetConn, turbotunnel.DummyAddr{}, nil
 	default:
 		transport := &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -269,6 +280,10 @@ func (c *Client) openTransport(ctx context.Context) (net.PacketConn, net.Addr, e
 		}
 		return newHTTPPacketConn(transport, c.resolver.URL, c.logger), turbotunnel.DummyAddr{}, nil
 	}
+}
+
+func (c *Client) dialTCP(ctx context.Context) (net.Conn, error) {
+	return c.dialer.DialContext(ctx, N.NetworkTCP, c.resolver.Address)
 }
 
 func (c *Client) dialTLS(ctx context.Context) (net.Conn, error) {
