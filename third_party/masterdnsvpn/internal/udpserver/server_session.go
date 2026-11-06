@@ -23,17 +23,17 @@ import (
 
 func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName string, vpnPacket VpnProto.Packet, device string) postSessionValidation {
 	now := time.Now()
-	validation := s.sessions.ValidateAndTouch(vpnPacket.SessionID, vpnPacket.SessionCookie, now)
+	validation := s.sessions.ValidateAndTouch(vpnPacket.SessionID, vpnPacket.SessionCookie, device, now)
 	if validation.Valid {
-		// neko: dnsauth, the query's device is the session's as it is used, not only as the tag was checked: a
-		// session of the same ID and cookie set up meanwhile is another's (the empty answer)
-		if validation.Active.Device != device {
-			return postSessionValidation{}
-		}
 		return postSessionValidation{
 			record: validation.Active,
 			ok:     true,
 		}
+	}
+	// neko: dnsauth, the query's device is the session's as it is used, not only as the tag was checked: a session of
+	// the same ID and cookie set up meanwhile is another's, untouched (the empty answer)
+	if validation.OtherDevice {
+		return postSessionValidation{}
 	}
 
 	if !validation.Known {

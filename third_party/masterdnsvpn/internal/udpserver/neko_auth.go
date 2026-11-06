@@ -137,7 +137,14 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 		if !ok || device == "" {
 			return "", false
 		}
-		s.authNonces.note(nonce, now)
+		noted, turnedEarly := s.authNonces.note(device, nonce, now)
+		if turnedEarly && s.log != nil {
+			s.log.Warnf("dnsauth: the nonce memory filled before its time (%d of the devices' queries in a generation), turned early: replays of the oldest become possible", nonceGenerationCap)
+		}
+		if !noted {
+			// a device over its quota: its own queries refused, the others' as they are
+			return "", false
+		}
 		return device, true
 	}
 	device, live := s.sessions.deviceOf(frame.SessionID, frame.SessionCookie)
@@ -156,12 +163,15 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 // than a tag holds: its epoch of 600 s and one next to it, a client's clock off by up to 10 minutes), by the decoded
 // bytes (base36 lets different names give the same bytes, §3.6). The same query is served up to 3 times in 30 s from
 // its first sight (a client sends a SESSION_INIT to several resolvers in the same bytes, a resolver repeats one);
-// past that, or later, it is someone's replay. A generation full keeps what it has and takes no new nonce until it
-// turns: queries of unseen nonces are refused meanwhile, never a seen one let through again.
+// past that, or later, it is someone's replay. Each device notes at most nonceDeviceQuota new nonces in a generation:
+// past it, its own queries are refused, so one device (a stolen key) neither locks the others out nor washes the
+// memory; the whole generation full (that many devices at their quota) turns early, logged.
 type nonceMemory struct {
 	mu                sync.Mutex
 	current, previous map[[nonceKeyLen]byte]nonceSeen
-	rotatedAt         time.Time
+	// the new nonces each device noted in the current generation
+	perDevice map[string]int
+	rotatedAt time.Time
 }
 
 type nonceSeen struct {
@@ -175,17 +185,19 @@ const (
 	nonceRepeatWindow  = 30 * time.Second
 	nonceRepeats       = 3
 	nonceGenerationCap = 1 << 17
+	// Niko's probes and SESSION_INITs of a start on many resolvers, on many networks in a half hour, many times over
+	nonceDeviceQuota = 8192
 )
 
 func newNonceMemory() *nonceMemory {
 	return &nonceMemory{
 		current: make(map[[nonceKeyLen]byte]nonceSeen), previous: make(map[[nonceKeyLen]byte]nonceSeen),
-		rotatedAt: time.Now(),
+		perDevice: make(map[string]int), rotatedAt: time.Now(),
 	}
 }
 
-// servable is whether a query of this nonce may be served now: unseen (and room to note it), or seen fewer than 3
-// times in the 30 s since its first sight. It notes nothing: note does, once the tag holds.
+// servable is whether a query of this nonce may be served now: unseen, or seen fewer than 3 times in the 30 s since
+// its first sight. It notes nothing: note does, once the tag holds.
 func (m *nonceMemory) servable(nonce []byte, now time.Time) bool {
 	if len(nonce) != nonceKeyLen {
 		return false
@@ -199,15 +211,16 @@ func (m *nonceMemory) servable(nonce []byte, now time.Time) bool {
 		seen, ok = m.previous[key]
 	}
 	if !ok {
-		return len(m.current) < nonceGenerationCap
+		return true
 	}
 	return seen.count < nonceRepeats && now.UnixNano()-seen.first <= int64(nonceRepeatWindow)
 }
 
-// note counts a sight of a nonce whose query's tag held
-func (m *nonceMemory) note(nonce []byte, now time.Time) {
+// note counts a sight of a nonce whose query's tag held, device's: false when a new nonce would take the device past
+// its quota (the query is refused); turnedEarly when the generation was full and turned before its time
+func (m *nonceMemory) note(device string, nonce []byte, now time.Time) (noted, turnedEarly bool) {
 	if len(nonce) != nonceKeyLen {
-		return
+		return false, false
 	}
 	key := [nonceKeyLen]byte(nonce)
 	m.mu.Lock()
@@ -216,21 +229,32 @@ func (m *nonceMemory) note(nonce []byte, now time.Time) {
 	seen, ok := m.current[key]
 	if !ok {
 		if seen, ok = m.previous[key]; !ok {
-			if len(m.current) >= nonceGenerationCap {
-				return
+			if m.perDevice[device] >= nonceDeviceQuota {
+				return false, false
 			}
+			if len(m.current) >= nonceGenerationCap {
+				m.turnNowLocked(now)
+				turnedEarly = true
+			}
+			m.perDevice[device]++
 			seen = nonceSeen{first: now.UnixNano()}
 		}
 	}
 	seen.count++
 	m.current[key] = seen
+	return true, turnedEarly
 }
 
-// turnLocked starts a new generation every nonceGeneration, the one before kept: by time only, never by a flood
+// turnLocked starts a new generation every nonceGeneration, the one before kept
 func (m *nonceMemory) turnLocked(now time.Time) {
 	if now.Sub(m.rotatedAt) >= nonceGeneration {
-		m.previous, m.current, m.rotatedAt = m.current, make(map[[nonceKeyLen]byte]nonceSeen), now
+		m.turnNowLocked(now)
 	}
+}
+
+func (m *nonceMemory) turnNowLocked(now time.Time) {
+	m.previous, m.current, m.rotatedAt = m.current, make(map[[nonceKeyLen]byte]nonceSeen), now
+	m.perDevice = make(map[string]int)
 }
 
 // deviceOf is the device of the session id with cookie: a live one (live true) or its closed record; "" when the

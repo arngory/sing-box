@@ -72,9 +72,10 @@ type Client struct {
 	streamResolverFailoverResendThreshold int
 	streamResolverFailoverCooldown        time.Duration
 
-	// neko: mdseal-v1 (initSeal)
+	// neko: mdseal-v1 (initSeal); the names of the queries sent lately, for their answers (answerToOurs)
 	sealKeys     *mdseal.Keys
 	sealRequired bool
+	sentQueries  sentQueries
 
 	// Session States
 	sessionID     uint8

@@ -73,7 +73,7 @@ func TestNekoSealedRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				got, err := ExtractSealedVPNResponse(answer, base, keys)
+				got, _, err := ExtractSealedVPNResponse(answer, base, keys)
 				if err != nil {
 					t.Fatalf("size %d, base64 %v, payload %d: %v", size, base, payloadLen, err)
 				}
@@ -156,11 +156,11 @@ func TestNekoSealedRefused(t *testing.T) {
 	packet := VpnProto.Packet{SessionID: 4, PacketType: Enums.PACKET_ERROR_DROP, Payload: []byte("12345678")}
 	for _, base := range []bool{false, true} {
 		sealed, _ := BuildSealedVPNResponsePacket(query, "abcdefgh.a.example.com", packet, base, keys, 0)
-		if _, err := ExtractSealedVPNResponse(sealed, base, other); !errors.Is(err, ErrSealTag) {
+		if _, _, err := ExtractSealedVPNResponse(sealed, base, other); !errors.Is(err, ErrSealTag) {
 			t.Fatalf("base64 %v: another key's answer: %v", base, err)
 		}
 		open, _ := BuildVPNResponsePacket(query, "abcdefgh.a.example.com", packet, base)
-		if _, err := ExtractSealedVPNResponse(open, base, keys); err == nil {
+		if _, _, err := ExtractSealedVPNResponse(open, base, keys); err == nil {
 			t.Fatalf("base64 %v: an open answer opened", base)
 		}
 		// the same sealed answer to another query (an ERROR_DROP seen on the path, sent again): it fits none but its
@@ -168,7 +168,7 @@ func TestNekoSealedRefused(t *testing.T) {
 		other, _ := BuildTXTQuestionPacket("abcdefgi.a.example.com", Enums.DNS_RECORD_TYPE_TXT, 1232)
 		replayed := append(append([]byte(nil), sealed[:12]...), other[12:12+len(other)-12-11]...)
 		replayed = append(replayed, sealed[12+len(query)-12-11:]...)
-		if _, err := ExtractSealedVPNResponse(replayed, base, keys); !errors.Is(err, ErrSealTag) {
+		if _, _, err := ExtractSealedVPNResponse(replayed, base, keys); !errors.Is(err, ErrSealTag) {
 			t.Fatalf("base64 %v: a sealed answer under another question: %v", base, err)
 		}
 		upper := append([]byte(nil), sealed...)
@@ -177,7 +177,7 @@ func TestNekoSealedRefused(t *testing.T) {
 				upper[i] -= 'a' - 'A'
 			}
 		}
-		if got, err := ExtractSealedVPNResponse(upper, base, keys); err != nil || got.PacketType != Enums.PACKET_ERROR_DROP {
+		if got, q, err := ExtractSealedVPNResponse(upper, base, keys); err != nil || got.PacketType != Enums.PACKET_ERROR_DROP || q != "abcdefgh.a.example.com" {
 			t.Fatalf("base64 %v: the question in upper case: %v", base, err)
 		}
 	}

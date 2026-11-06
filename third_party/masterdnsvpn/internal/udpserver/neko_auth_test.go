@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -272,20 +273,20 @@ func TestNekoAuthNonceRepeats(t *testing.T) {
 		if !memory.servable(nonce, at) {
 			t.Fatalf("sight %d refused", i)
 		}
-		memory.note(nonce, at)
+		memory.note("phone", nonce, at)
 	}
 	if memory.servable(nonce, now.Add(5*time.Second)) {
 		t.Fatal("a fourth sight served")
 	}
 	other := []byte("other twelve")
-	memory.note(other, now)
+	memory.note("phone", other, now)
 	if memory.servable(other, now.Add(31*time.Second)) {
 		t.Fatal("a repeat after 30 s served")
 	}
 	// kept longer than a tag holds (its epoch and one next to it, the client's clock 10 minutes off): through the
 	// first turn of the generations, gone after the second
 	late := []byte("late twelve.")
-	memory.note(late, now)
+	memory.note("phone", late, now)
 	for _, after := range []time.Duration{15*time.Minute + time.Second, 31 * time.Minute, 59 * time.Minute} {
 		if memory.servable(late, now.Add(after)) {
 			t.Fatalf("a nonce forgotten after %v", after)
@@ -302,7 +303,7 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	memory := newNonceMemory()
 	now := time.Now()
 	victim := []byte("victim probe")
-	memory.note(victim, now)
+	memory.note("victim", victim, now)
 	junk := make([]byte, nonceKeyLen)
 	for i := 0; i < 3*nonceGenerationCap; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
@@ -311,16 +312,32 @@ func TestNekoAuthNonceNotFlushed(t *testing.T) {
 	if len(memory.current) != 1 || memory.servable(victim, now.Add(time.Minute)) {
 		t.Fatalf("%d noted, the victim's nonce served again", len(memory.current))
 	}
-	// full of nonces whose tag held: the new are refused, the noted stay
-	for i := 0; len(memory.current) < nonceGenerationCap; i++ {
+	// one device's flood of tags that hold: past its quota its own queries are refused, the others' noted as before,
+	// the victim's nonce still remembered
+	for i := 0; i < nonceDeviceQuota; i++ {
 		binary.BigEndian.PutUint64(junk, uint64(i))
-		memory.note(junk, now)
+		if noted, _ := memory.note("stolen", junk, now); !noted {
+			t.Fatalf("refused within the quota at %d", i)
+		}
 	}
-	if memory.servable([]byte("a new one..."), now) {
-		t.Fatal("a new nonce served with the generation full")
+	binary.BigEndian.PutUint64(junk, uint64(nonceDeviceQuota))
+	if noted, _ := memory.note("stolen", junk, now); noted {
+		t.Fatal("a device past its quota noted")
+	}
+	if noted, _ := memory.note("tablet", []byte("tablet probe"), now); !noted {
+		t.Fatal("another device refused for one's flood")
 	}
 	if memory.servable(victim, now.Add(time.Minute)) {
-		t.Fatal("the victim's nonce served again with the generation full")
+		t.Fatal("the victim's nonce served again after the flood")
+	}
+	// the whole generation full (many devices at their quota): it turns early, and says so
+	full := newNonceMemory()
+	for i := 0; len(full.current) < nonceGenerationCap; i++ {
+		binary.BigEndian.PutUint64(junk, uint64(i))
+		full.note(fmt.Sprintf("device %d", i/nonceDeviceQuota), junk, now)
+	}
+	if noted, turned := full.note("one more", []byte("one more ..."), now); !noted || !turned {
+		t.Fatalf("the full generation: noted %v, turned %v", noted, turned)
 	}
 
 	// through the server: probes of an unknown key, then the device's probe four times
@@ -418,8 +435,13 @@ func TestNekoAuthDeviceAtUse(t *testing.T) {
 		SessionID: id, SessionCookie: cookie, PacketType: Enums.PACKET_PING, Payload: []byte("ping"),
 	})
 	packet := VpnProto.Packet{SessionID: id, SessionCookie: cookie, PacketType: Enums.PACKET_PING}
+	before := server.sessions.byID[id].lastActivity()
+	time.Sleep(2 * time.Millisecond)
 	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, "tablet"); v.ok || v.response != nil {
 		t.Fatal("another device's query used the phone's session")
+	}
+	if server.sessions.byID[id].lastActivity() != before {
+		t.Fatal("another device's refused query counted as the phone's session's activity")
 	}
 	if v := server.validatePostSessionPacket(query, nekoTestDomain, packet, ""); v.ok {
 		t.Fatal("an untagged query used the phone's session")

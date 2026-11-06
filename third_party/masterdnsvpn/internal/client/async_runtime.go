@@ -728,6 +728,7 @@ func (c *Client) buildPlannedOutboundFrames(
 			if err != nil {
 				continue
 			}
+			c.noteSentQuery(dnsPacket)
 			firstDomain = domain
 			firstDNSPacket = dnsPacket
 		case domain == firstDomain:
@@ -743,6 +744,7 @@ func (c *Client) buildPlannedOutboundFrames(
 				if err != nil {
 					continue
 				}
+				c.noteSentQuery(dnsPacket)
 				packetByDomain[domain] = dnsPacket
 			}
 		}

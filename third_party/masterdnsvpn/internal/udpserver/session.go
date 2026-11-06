@@ -201,6 +201,8 @@ type sessionValidationResult struct {
 	Known  bool
 	Valid  bool
 	Active *sessionRuntimeView
+	// neko: dnsauth, the session is live with this cookie but another device's: refused, not touched
+	OtherDevice bool
 }
 
 type closedSessionCleanup struct {
@@ -435,7 +437,9 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 	return sessionLookupResult{}, false
 }
 
-func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.Time) sessionValidationResult {
+// ValidateAndTouch validates a query to session sessionID with cookie from device ("" for none, neko: dnsauth) and
+// counts it as the session's activity when it is the session's: another device's query neither uses nor touches it.
+func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, device string, now time.Time) sessionValidationResult {
 	s.mu.RLock()
 	if record := s.byID[sessionID]; record != nil {
 		result := sessionValidationResult{
@@ -446,8 +450,9 @@ func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.
 				Device:       record.Device,
 			},
 			Known: true,
-			Valid: record.Cookie == cookie,
+			Valid: record.Cookie == cookie && record.Device == device,
 		}
+		result.OtherDevice = record.Cookie == cookie && record.Device != device
 		if result.Valid {
 			view := record.runtimeView()
 			result.Active = &view

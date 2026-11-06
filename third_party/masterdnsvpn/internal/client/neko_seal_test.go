@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"masterdnsvpn-go/internal/config"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
@@ -87,6 +88,7 @@ func TestNekoExtractResponse(t *testing.T) {
 		{"sealed raw data to a base64 session", 0x81, keys, true, sealed(data, false), 0},
 	} {
 		client := &Client{sealKeys: c.keys, sealRequired: c.required}
+		client.noteSentQuery(query)
 		packet, err := client.extractResponse(c.answer, c.mode)
 		if c.want == 0 {
 			if err == nil {
@@ -103,6 +105,55 @@ func TestNekoExtractResponse(t *testing.T) {
 	client := &Client{sealKeys: keys, sealRequired: true}
 	if _, err := client.extractResponse(empty, 0x80); !errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 		t.Fatalf("an empty answer: %v", err)
+	}
+}
+
+// neko: a sealed answer is taken only as the answer to a query this client sent lately, once: one seen on the path and
+// sent again as it was (its question and seal with it) is lost, as is an answer to a query never sent or sent long ago
+func TestNekoSealedReplay(t *testing.T) {
+	keys := nekoKeys(t)
+	query, _ := DnsParser.BuildTXTQuestionPacket("abcdefgh.v.example.com", Enums.DNS_RECORD_TYPE_TXT, 1232)
+	drop := VpnProto.Packet{SessionID: 3, PacketType: Enums.PACKET_ERROR_DROP, Payload: []byte("12345678")}
+	sealed, err := DnsParser.BuildSealedVPNResponsePacket(query, "abcdefgh.v.example.com", drop, false, keys, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []bool{false, true} {
+		client := &Client{sealKeys: keys, sealRequired: required, sessionID: 3, sessionReady: true}
+		// never sent: the node's answer to another client of the service, or an old one of this client's
+		if _, err := client.extractResponse(sealed, 0x80); !errors.Is(err, ErrNotOurs) {
+			t.Fatalf("required %v: an answer to a query never sent: %v", required, err)
+		}
+		client.noteSentQuery(query)
+		if packet, err := client.extractResponse(sealed, 0x80); err != nil || packet.PacketType != Enums.PACKET_ERROR_DROP {
+			t.Fatalf("required %v: the answer to the query sent: %v", required, err)
+		}
+		// the same answer again, as it was: its query is answered
+		if _, err := client.extractResponse(sealed, 0x80); !errors.Is(err, ErrNotOurs) {
+			t.Fatalf("required %v: a verbatim replay taken: %v", required, err)
+		}
+		if client.runtimeResetPending.Load() {
+			t.Fatal("extractResponse restarted the session itself")
+		}
+	}
+	// an open ERROR_DROP in optional: the same rule
+	open, _ := DnsParser.BuildVPNResponsePacket(query, "abcdefgh.v.example.com", drop, false)
+	client := &Client{sealKeys: keys}
+	if _, err := client.extractResponse(open, 0x80); !errors.Is(err, ErrNotOurs) {
+		t.Fatalf("an open ERROR_DROP to a query never sent: %v", err)
+	}
+	// a query sent too long ago: past both generations
+	var sent sentQueries
+	now := time.Now()
+	sent.note("abcdefgh.v.example.com", now)
+	if !sent.take("abcdefgh.v.example.com", now.Add(sentQueryWindow+time.Second)) {
+		t.Fatal("an answer within the second generation lost")
+	}
+	var old sentQueries
+	old.note("abcdefgh.v.example.com", now)
+	old.take("x", now.Add(sentQueryWindow))
+	if old.take("abcdefgh.v.example.com", now.Add(2*sentQueryWindow+time.Second)) {
+		t.Fatal("an answer past both generations taken")
 	}
 }
 

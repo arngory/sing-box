@@ -162,32 +162,45 @@ func sealedTXTChunks(s []byte, baseEncode bool) ([][]byte, error) {
 	return chunks, nil
 }
 
-// ExtractSealedVPNResponse is the packet a sealed answer carries: S gathered from its parts, its seal checked and the
-// frame inside parsed. ErrSealTag for an answer that is not sealed with keys.
-func ExtractSealedVPNResponse(packet []byte, baseEncoded bool, keys *mdseal.Keys) (VpnProto.Packet, error) {
+// ExtractSealedVPNResponse is the packet a sealed answer carries and the query it answers (Q, its question's name):
+// S gathered from its parts, its seal checked and the frame inside parsed. ErrSealTag for an answer that is not
+// sealed with keys. The seal holds for the answer's own question: whether it is a query the reader sent, the reader
+// knows (an answer seen on the path and sent again as it was carries its question too).
+func ExtractSealedVPNResponse(packet []byte, baseEncoded bool, keys *mdseal.Keys) (VpnProto.Packet, string, error) {
 	if keys == nil {
-		return VpnProto.Packet{}, mdseal.ErrNoKey
+		return VpnProto.Packet{}, "", mdseal.ErrNoKey
 	}
 	parsed, err := ParsePacket(packet)
 	if err != nil {
-		return VpnProto.Packet{}, err
+		return VpnProto.Packet{}, "", err
 	}
 	rawAnswers := extractTXTAnswerPayloads(parsed)
 	if len(rawAnswers) == 0 {
-		return VpnProto.Packet{}, ErrTXTAnswerMissing
+		return VpnProto.Packet{}, "", ErrTXTAnswerMissing
 	}
 	if len(parsed.Questions) == 0 {
-		return VpnProto.Packet{}, ErrTXTAnswerMalformed
+		return VpnProto.Packet{}, "", ErrTXTAnswerMalformed
 	}
 	s, err := assembleSealed(rawAnswers, baseEncoded)
 	if err != nil {
-		return VpnProto.Packet{}, err
+		return VpnProto.Packet{}, "", err
 	}
-	frame, ok := keys.Open(mdseal.QueryName(parsed.Questions[0].Name), s)
+	q := mdseal.QueryName(parsed.Questions[0].Name)
+	frame, ok := keys.Open(q, s)
 	if !ok {
-		return VpnProto.Packet{}, ErrSealTag
+		return VpnProto.Packet{}, "", ErrSealTag
 	}
-	return VpnProto.ParseInflated(frame)
+	packetOut, err := VpnProto.ParseInflated(frame)
+	return packetOut, q, err
+}
+
+// QueryNameOf is Q of a DNS message: its first question's name as the reader folds it; "" without one.
+func QueryNameOf(packet []byte) string {
+	lite, err := ParsePacketLite(packet)
+	if err != nil || !lite.HasQuestion {
+		return ""
+	}
+	return mdseal.QueryName(lite.FirstQuestion.Name)
 }
 
 // assembleSealed is S from an answer's TXT data: the one string, or parts 0…N−1 each once, in order

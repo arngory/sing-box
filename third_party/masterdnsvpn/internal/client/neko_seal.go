@@ -2,6 +2,8 @@ package client
 
 import (
 	"errors"
+	"sync"
+	"time"
 
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
@@ -49,20 +51,23 @@ func (c *Client) initSeal() {
 func (c *Client) extractResponse(data []byte, mode uint8) (VpnProto.Packet, error) {
 	base := mode&^mdseal.ModeBit == mtuProbeBase64Reply
 	if mode&mdseal.ModeBit != 0 && c.sealKeys != nil {
-		packet, err := DnsParser.ExtractSealedVPNResponse(data, base, c.sealKeys)
-		if err == nil || errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
+		packet, q, err := DnsParser.ExtractSealedVPNResponse(data, base, c.sealKeys)
+		if err == nil {
+			return c.answerToOurs(packet, q)
+		}
+		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			return packet, err
 		}
 		// the ERROR_DROP to a session the node does not know comes raw: sealed in required, open in optional
-		if drop, dropErr := DnsParser.ExtractSealedVPNResponse(data, !base, c.sealKeys); dropErr == nil &&
+		if drop, q, dropErr := DnsParser.ExtractSealedVPNResponse(data, !base, c.sealKeys); dropErr == nil &&
 			drop.PacketType == Enums.PACKET_ERROR_DROP {
-			return drop, nil
+			return c.answerToOurs(drop, q)
 		}
 		if c.sealRequired {
 			return packet, err
 		}
 		if drop, ok := openErrorDrop(data, base); ok {
-			return drop, nil
+			return c.answerToOurs(drop, DnsParser.QueryNameOf(data))
 		}
 		return packet, err
 	}
@@ -74,6 +79,77 @@ func (c *Client) extractResponse(data []byte, mode uint8) (VpnProto.Packet, erro
 		return drop, nil
 	}
 	return packet, err
+}
+
+// ErrNotOurs is a sealed answer whose question is no query this client sent lately, or one already answered: an
+// answer seen on the path and sent again as it was (its question and seal with it), dropped as lost.
+var ErrNotOurs = errors.New("masterdnsvpn: an answer to no query of ours")
+
+// answerToOurs is packet when q is a query this client sent lately and not answered yet (the name taken), else
+// ErrNotOurs. The seal binds an answer to its question; this binds the question to a query of this client's.
+func (c *Client) answerToOurs(packet VpnProto.Packet, q string) (VpnProto.Packet, error) {
+	if q == "" || !c.sentQueries.take(q, time.Now()) {
+		return VpnProto.Packet{}, ErrNotOurs
+	}
+	return packet, nil
+}
+
+// noteSentQuery keeps the name of a query this client sends, when it seals: its answer is taken once, within
+// sentQueryWindow to sentQueryWindow*2.
+func (c *Client) noteSentQuery(query []byte) {
+	if c.sealKeys == nil {
+		return
+	}
+	if q := DnsParser.QueryNameOf(query); q != "" {
+		c.sentQueries.note(q, time.Now())
+	}
+}
+
+// sentQueries are the names of the queries a sealing client sent lately, in two generations of sentQueryWindow. The
+// client alone writes them, so their bound only keeps memory: a generation full turns early.
+type sentQueries struct {
+	mu                sync.Mutex
+	current, previous map[string]struct{}
+	turnedAt          time.Time
+}
+
+const (
+	// longer than any answer worth taking takes to come (a resolver's own timeout is seconds)
+	sentQueryWindow = 30 * time.Second
+	sentQueryCap    = 1 << 16
+)
+
+func (s *sentQueries) turnLocked(now time.Time) {
+	if s.current == nil {
+		s.current, s.previous, s.turnedAt = make(map[string]struct{}), make(map[string]struct{}), now
+		return
+	}
+	if now.Sub(s.turnedAt) >= sentQueryWindow || len(s.current) >= sentQueryCap {
+		s.previous, s.current, s.turnedAt = s.current, make(map[string]struct{}), now
+	}
+}
+
+func (s *sentQueries) note(q string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnLocked(now)
+	s.current[q] = struct{}{}
+}
+
+// take is whether q was sent lately and not answered yet; it answers it
+func (s *sentQueries) take(q string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnLocked(now)
+	if _, ok := s.current[q]; ok {
+		delete(s.current, q)
+		return true
+	}
+	if _, ok := s.previous[q]; ok {
+		delete(s.previous, q)
+		return true
+	}
+	return false
 }
 
 // openErrorDrop is an open ERROR_DROP in data, read in the encoding given first, then in the other

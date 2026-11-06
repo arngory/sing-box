@@ -42,7 +42,11 @@ func (c *Client) buildTunnelTXTQueryRaw(domain string, options VpnProto.BuildOpt
 	if err != nil {
 		return nil, err
 	}
-	return buildTunnelTXTQuestionBytes(domain, encoded)
+	query, err := buildTunnelTXTQuestionBytes(domain, encoded)
+	if err == nil {
+		c.noteSentQuery(query)
+	}
+	return query, err
 }
 
 func (c *Client) buildEncodedAutoWithCompressionTrace(options VpnProto.BuildOptions) ([]byte, error) {
@@ -63,5 +67,9 @@ func (c *Client) buildTunnelTXTQuery(domain string, options VpnProto.BuildOption
 	if err != nil {
 		return nil, err
 	}
-	return buildTunnelTXTQuestionBytes(domain, encoded)
+	query, err := buildTunnelTXTQuestionBytes(domain, encoded)
+	if err == nil {
+		c.noteSentQuery(query)
+	}
+	return query, err
 }

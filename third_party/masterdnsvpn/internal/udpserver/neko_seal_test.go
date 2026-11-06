@@ -74,7 +74,7 @@ func TestNekoSealProbeModes(t *testing.T) {
 				t.Fatalf("%s: open probe's answer %d, %d bytes", c.name, packet.PacketType, len(packet.Payload))
 			}
 			answer = server.handlePacket(nekoProbe(t, codec, encoding|mdseal.ModeBit, 600))
-			packet, err := DnsParser.ExtractSealedVPNResponse(answer, base, keys)
+			packet, _, err := DnsParser.ExtractSealedVPNResponse(answer, base, keys)
 			if c.sealed != (err == nil) {
 				t.Fatalf("%s, base64 %v: sealed probe answered %v (%v)", c.name, base, err == nil, err)
 			}
@@ -114,7 +114,7 @@ func TestNekoUnknownSessionDrop(t *testing.T) {
 			var packet VpnProto.Packet
 			var err error
 			if mode == sealRequired {
-				packet, err = DnsParser.ExtractSealedVPNResponse(answer, false, keys)
+				packet, _, err = DnsParser.ExtractSealedVPNResponse(answer, false, keys)
 			} else {
 				packet, err = DnsParser.ExtractVPNResponse(answer, false)
 			}
