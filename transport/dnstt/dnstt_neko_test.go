@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,9 @@ type testServer struct {
 	privkey []byte
 	// dnsseal-v1 as the node does it (Ku, Kd and their tag keys from K), nil: open dnstt
 	sealUp, sealDown, sealUpTag, sealDownTag []byte
+	// the next sessions whose handshake is never answered: KCP acknowledges their segments, Noise stays silent, as
+	// a node that forgot the ClientID after the first segment
+	silent atomic.Int32
 }
 
 func startTestServer(t *testing.T, domain string) (*testServer, string) {
@@ -189,6 +193,10 @@ func (s *testServer) acceptSessions(listener *kcp.Listener, mtu int) {
 		conn.SetNoDelay(0, 0, 0, 1)
 		conn.SetWindowSize(turbotunnel.QueueSize/2, turbotunnel.QueueSize/2)
 		conn.SetMtu(mtu)
+		if s.silent.Add(-1) >= 0 {
+			go io.Copy(io.Discard, conn)
+			continue
+		}
 		go func() {
 			defer conn.Close()
 			noiseConn, err := noise.NewServer(conn, s.privkey)
@@ -296,43 +304,107 @@ func tcpToUDP(conn net.Conn, server net.Addr) {
 	}
 }
 
-func echoThrough(t *testing.T, resolverURL, pubkey string, sealKey []byte) {
+func newTestClient(t *testing.T, resolverURL, pubkey string, sealKey []byte, handshakeTimeout time.Duration) *Client {
 	resolver, err := ParseResolver(resolverURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientOptions{
-		Context:  context.Background(),
-		Logger:   logger.NOP(),
-		Dialer:   udpDialer{},
-		Domain:   "t.example.com",
-		PubKey:   pubkey,
-		Resolver: resolver,
-		SealKey:  sealKey,
+		Context:          context.Background(),
+		Logger:           logger.NOP(),
+		Dialer:           udpDialer{},
+		Domain:           "t.example.com",
+		PubKey:           pubkey,
+		Resolver:         resolver,
+		SealKey:          sealKey,
+		HandshakeTimeout: handshakeTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return client
+}
+
+func echoThrough(t *testing.T, resolverURL, pubkey string, sealKey []byte) {
+	client := newTestClient(t, resolverURL, pubkey, sealKey, 0)
 	defer client.Close()
 	for round := 0; round < 2; round++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		conn, err := client.DialConn(ctx)
-		cancel()
-		if err != nil {
-			t.Fatal(err)
+		echoOnce(t, client, round)
+	}
+}
+
+func echoOnce(t *testing.T, client *Client, round int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	conn, err := client.DialConn(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	message := make([]byte, 20000)
+	rand.Read(message)
+	go conn.Write(message)
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	echo := make([]byte, len(message))
+	if _, err = io.ReadFull(conn, echo); err != nil {
+		t.Fatalf("round %d: %v", round, err)
+	}
+	if !bytes.Equal(echo, message) {
+		t.Fatalf("round %d: echo differs", round)
+	}
+}
+
+// A session whose handshake is never answered (the node acknowledged its first segment and forgot the ClientID):
+// the client gives it up after its handshake timeout, and the next dial sets up a new session, a new ClientID, that
+// works. Before, the dial waited forever and held every other dial and Close with it.
+func TestNekoDNSTTHandshakeRetry(t *testing.T) {
+	server, pubkey := startTestServer(t, "t.example.com")
+	server.silent.Store(1)
+	client := newTestClient(t, "udp://"+server.conn.LocalAddr().String(), pubkey, nil, time.Second)
+	defer client.Close()
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	_, err := client.DialConn(ctx)
+	cancel()
+	if err == nil {
+		t.Fatal("a stream through a session whose handshake was never answered")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("gave up after %v", elapsed)
+	}
+	echoOnce(t, client, 1)
+}
+
+// Close while a handshake hangs returns at once, and the dial waiting for it ends too.
+func TestNekoDNSTTCloseDuringHandshake(t *testing.T) {
+	server, pubkey := startTestServer(t, "t.example.com")
+	server.silent.Store(100)
+	client := newTestClient(t, "udp://"+server.conn.LocalAddr().String(), pubkey, nil, time.Minute)
+	dialed := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := client.DialConn(context.Background())
+			dialed <- err
+		}()
+	}
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	client.Close()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Close took %v", elapsed)
+	}
+	for range 2 {
+		select {
+		case err := <-dialed:
+			if err == nil {
+				t.Fatal("a dial went through")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a dial still waits after Close")
 		}
-		message := make([]byte, 20000)
-		rand.Read(message)
-		go conn.Write(message)
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		echo := make([]byte, len(message))
-		if _, err = io.ReadFull(conn, echo); err != nil {
-			t.Fatalf("round %d: %v", round, err)
-		}
-		if !bytes.Equal(echo, message) {
-			t.Fatalf("round %d: echo differs", round)
-		}
-		conn.Close()
+	}
+	if _, err := client.DialConn(context.Background()); err == nil {
+		t.Fatal("a dial after Close")
 	}
 }
 

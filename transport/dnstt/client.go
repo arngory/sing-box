@@ -97,7 +97,15 @@ type ClientOptions struct {
 	AuthKey []byte
 	// raycontrol dnsseal-v1: the zone's key K (32 bytes) to seal the framing with; nil sends it open
 	SealKey []byte
+	// how long a session's Noise handshake may take before a new session (a new ClientID) is tried; 0 is 30 s
+	HandshakeTimeout time.Duration
 }
+
+// defaultHandshakeTimeout bounds a session's Noise handshake. The node acknowledges the first KCP segment at once;
+// when the handshake message after it does not reach the node before its own deadline (a resolver dropping a
+// session's first queries, queues full in a flood), the node forgets the ClientID and takes no other segment of it,
+// and the client would wait for an answer forever.
+const defaultHandshakeTimeout = 30 * time.Second
 
 type Client struct {
 	ctx      context.Context
@@ -111,8 +119,20 @@ type Client struct {
 	authKey  []byte
 	seal     *sealer
 
+	cancel           context.CancelFunc
+	handshakeTimeout time.Duration
+
 	access  sync.Mutex
 	session *session
+	// the session being set up: dials wait for it without holding access
+	pending *pendingSession
+	closed  bool
+}
+
+type pendingSession struct {
+	done    chan struct{}
+	session *session
+	err     error
 }
 
 type session struct {
@@ -153,17 +173,28 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if mtu < 80 {
 		return nil, E.New("domain ", options.Domain, " leaves only ", mtu, " bytes for the payload")
 	}
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	handshakeTimeout := options.HandshakeTimeout
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = defaultHandshakeTimeout
+	}
 	return &Client{
-		ctx:      options.Context,
-		logger:   options.Logger,
-		dialer:   options.Dialer,
-		domain:   domain,
-		pubkey:   pubkey,
-		resolver: options.Resolver,
-		tls:      options.TLSConfig,
-		mtu:      mtu,
-		authKey:  options.AuthKey,
-		seal:     seal,
+		ctx:              ctx,
+		cancel:           cancel,
+		handshakeTimeout: handshakeTimeout,
+		logger:           options.Logger,
+		dialer:           options.Dialer,
+		domain:           domain,
+		pubkey:           pubkey,
+		resolver:         options.Resolver,
+		tls:              options.TLSConfig,
+		mtu:              mtu,
+		authKey:          options.AuthKey,
+		seal:             seal,
 	}, nil
 }
 
@@ -195,20 +226,53 @@ func (c *Client) DialConn(ctx context.Context) (net.Conn, error) {
 
 func (c *Client) getSession(ctx context.Context) (*session, error) {
 	c.access.Lock()
-	defer c.access.Unlock()
+	if c.closed {
+		c.access.Unlock()
+		return nil, net.ErrClosed
+	}
 	if c.session != nil && !c.session.smux.IsClosed() {
-		return c.session, nil
+		session := c.session
+		c.access.Unlock()
+		return session, nil
 	}
 	if c.session != nil {
 		c.session.close()
 		c.session = nil
 	}
-	session, err := c.newSession(ctx)
-	if err != nil {
-		return nil, err
+	// one session set up at a time, apart from the dials: a handshake that hangs holds neither them nor Close
+	pending := c.pending
+	if pending == nil {
+		pending = &pendingSession{done: make(chan struct{})}
+		c.pending = pending
+		go c.establish(pending)
 	}
-	c.session = session
-	return session, nil
+	c.access.Unlock()
+	select {
+	case <-pending.done:
+		return pending.session, pending.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// establish sets up a session within the handshake timeout; one that fails leaves the next dial a new one, with a
+// new ClientID.
+func (c *Client) establish(pending *pendingSession) {
+	ctx, cancel := context.WithTimeout(c.ctx, c.handshakeTimeout)
+	defer cancel()
+	session, err := c.newSession(ctx)
+	c.access.Lock()
+	c.pending = nil
+	if err == nil && c.closed {
+		session.close()
+		session, err = nil, net.ErrClosed
+	}
+	if err == nil {
+		c.session = session
+	}
+	pending.session, pending.err = session, err
+	c.access.Unlock()
+	close(pending.done)
 }
 
 func (c *Client) dropSession(dead *session) {
@@ -240,10 +304,21 @@ func (c *Client) newSession(ctx context.Context) (*session, error) {
 		packetConn.Close()
 		return nil, E.New("set KCP MTU ", c.mtu)
 	}
+	// the handshake within ctx (its timeout, or the client closing): the KCP conn is closed when ctx ends first,
+	// which ends the handshake's read. Not a deadline on it: noise reads it from its own goroutine after the
+	// handshake, and kcp-go's SetDeadline races with a Read
+	stop := context.AfterFunc(ctx, func() { kcpConn.Close() })
 	noiseConn, err := noise.NewClient(kcpConn, c.pubkey)
+	if !stop() && err == nil {
+		// ctx ended as the handshake did: the conn is closed or about to be
+		err = context.Cause(ctx)
+	}
 	if err != nil {
 		kcpConn.Close()
 		packetConn.Close()
+		if ctx.Err() != nil {
+			err = E.Cause(ctx.Err(), err.Error())
+		}
 		return nil, E.Cause(err, "noise handshake")
 	}
 	smuxConfig := smux.DefaultConfig()
@@ -315,6 +390,9 @@ func (c *Client) dialTLS(ctx context.Context) (net.Conn, error) {
 func (c *Client) Close() error {
 	c.access.Lock()
 	defer c.access.Unlock()
+	c.closed = true
+	// a handshake under way ends now
+	c.cancel()
 	if c.session != nil {
 		c.session.close()
 		c.session = nil
