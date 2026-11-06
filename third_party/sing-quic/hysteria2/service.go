@@ -434,6 +434,15 @@ func (c *serverConn) Write(p []byte) (n int, err error) {
 	return n, qtls.WrapError(err)
 }
 
+// CloseWrite ends this side of the stream and keeps reading the client's (neko): the target's half-close reaches the
+// client instead of closing the stream whole. The response goes out first if it has not.
+func (c *serverConn) CloseWrite() error {
+	if err := c.HandshakeSuccess(); err != nil {
+		return err
+	}
+	return qtls.WrapError(c.Stream.Close())
+}
+
 func (c *serverConn) LocalAddr() net.Addr {
 	return M.Socksaddr{}
 }
