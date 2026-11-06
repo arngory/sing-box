@@ -92,7 +92,11 @@ type Server struct {
 	// neko: mdseal-v1, SetSeal
 	sealMode uint8
 	sealKeys *mdseal.Keys
-	fallback *udpFallbackManager
+	// neko: dnsauth, SetAuth
+	authMode   uint8
+	auth       Authenticator
+	authNonces *nonceMemory
+	fallback   *udpFallbackManager
 }
 
 type request struct {

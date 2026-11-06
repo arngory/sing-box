@@ -61,6 +61,8 @@ type Codec struct {
 	key     []byte
 	encrypt func(dst, src []byte) ([]byte, error)
 	decrypt func(dst, src []byte) ([]byte, error)
+	// neko: methods 3-5, for SetTagger and DecodeStringAndOpen
+	aead cipher.AEAD
 }
 
 func NewCodecFromConfig(cfg config.ServerConfig, rawKey string) (*Codec, error) {
@@ -93,6 +95,7 @@ func NewCodec(method int, rawKey string) (*Codec, error) {
 		if err != nil {
 			return nil, err
 		}
+		codec.aead = aead
 		codec.encrypt = codec.makeAESEncryptor(aead)
 		codec.decrypt = codec.makeAESDecryptor(aead)
 	default:

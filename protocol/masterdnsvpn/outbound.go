@@ -15,6 +15,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/dnstt"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -70,6 +71,32 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	config["PROTOCOL_TYPE"] = mode
 	config["DATA_ENCRYPTION_METHOD"] = options.EncryptionMethod
 	config["ENCRYPTION_KEY"] = options.EncryptionKey
+	switch options.Seal {
+	case "":
+	case "optional", "required":
+		config["NIKO_MDSEAL"] = options.Seal
+	default:
+		return nil, E.New("seal ", options.Seal, " (expected optional or required)")
+	}
+	var tagger func(nonce, frame []byte) [8]byte
+	if options.Auth != nil {
+		if options.EncryptionMethod < 3 || options.EncryptionMethod > 5 {
+			return nil, E.New("dnsauth: needs encryption_method 3-5 (AES-GCM)")
+		}
+		deviceKey, err := dnstt.ResolveDeviceKey(options.Auth.DeviceKey, options.Auth.DeviceKeyRef)
+		if err != nil {
+			return nil, err
+		}
+		authKey, err := dnstt.AuthKey(deviceKey, options.Auth.NodeID, options.Auth.ServiceID)
+		if err != nil {
+			return nil, err
+		}
+		skew := time.Duration(options.Auth.ClockSkew) * time.Second
+		tagger = func(nonce, frame []byte) (tag [8]byte) {
+			copy(tag[:], dnstt.AuthTag(authKey, time.Now().Add(skew), nonce, frame))
+			return tag
+		}
+	}
 	if _, set := config["LOG_LEVEL"]; !set {
 		config["LOG_LEVEL"] = "WARN"
 	}
@@ -90,6 +117,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			WorkDir:     workDir,
 			Conns:       conns,
 			ProtectPath: options.ProtectPath,
+			Tagger:      tagger,
 		},
 	}, nil
 }

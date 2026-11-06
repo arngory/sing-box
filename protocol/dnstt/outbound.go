@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -64,7 +65,9 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		}
 	}
 	var authKey []byte
+	var authSkew time.Duration
 	if options.Auth != nil {
+		authSkew = time.Duration(options.Auth.ClockSkew) * time.Second
 		deviceKey, err := dnstt.ResolveDeviceKey(options.Auth.DeviceKey, options.Auth.DeviceKeyRef)
 		if err != nil {
 			return nil, err
@@ -91,6 +94,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		TLSConfig: tlsConfig,
 		AuthKey:   authKey,
 		SealKey:   sealKey,
+
+		AuthClockSkew: authSkew,
 	})
 	if err != nil {
 		return nil, err

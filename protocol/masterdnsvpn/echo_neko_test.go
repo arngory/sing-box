@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"net"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/dnstt"
 	M "github.com/sagernet/sing/common/metadata"
 
 	"masterdnsvpn-go/embed"
@@ -81,6 +83,81 @@ type nekoEchoCase struct {
 	mustCut  bool   // the probes must meet the size
 	seal     string // the node's mdseal mode
 	session  bool   // a session must come up (else: must not, within a short wait)
+	authMode string // the node's dnsauth mode
+	auth     *option.DNSTTAuthOptions
+}
+
+// dnsauth for masterdns: the client tags its queries with the device's key, the node checks them (niko-server's part
+// here: the device's key for the node and the service, the epochs around now).
+func TestNekoMasterDNSVPNAuth(t *testing.T) {
+	device := strings.Repeat("ab", 32)
+	stranger := strings.Repeat("cd", 32)
+	auth := func(key string) *option.DNSTTAuthOptions {
+		return &option.DNSTTAuthOptions{NodeID: nekoNodeID, ServiceID: 8, DeviceKey: key}
+	}
+	for _, c := range []struct {
+		name, mode, seal string
+		auth             *option.DNSTTAuthOptions
+		session          bool
+	}{
+		{"required", "required", "", auth(device), true},
+		{"required and sealed", "required", "required", auth(device), true},
+		{"optional, an old client", "optional", "", nil, true},
+		{"optional, a device", "optional", "", auth(device), true},
+		{"required, an old client", "required", "", nil, false},
+		{"required, another key", "required", "", auth(stranger), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			extra := map[string]any{}
+			if c.seal != "" {
+				extra["niko_mdseal"] = c.seal
+			}
+			nekoEcho(t, nekoEchoCase{resolver: 1232, extra: extra, seal: c.seal, session: c.session, authMode: c.mode, auth: c.auth})
+		})
+	}
+}
+
+const nekoNodeID = "00112233445566778899aabbccddeeff"
+
+// nekoAuthenticator holds one device, "phone", whose key is ab…ab for service 8 of nekoNodeID
+type nekoAuthenticator struct{ key []byte }
+
+func newNekoAuthenticator(t *testing.T) *nekoAuthenticator {
+	deviceKey, _ := hex.DecodeString(strings.Repeat("ab", 32))
+	key, err := dnstt.AuthKey(deviceKey, nekoNodeID, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &nekoAuthenticator{key: key}
+}
+
+func (a *nekoAuthenticator) holds(tag [8]byte, msg []byte) bool {
+	now := time.Now()
+	for _, at := range []time.Time{now, now.Add(-10 * time.Minute), now.Add(10 * time.Minute)} {
+		if bytes.Equal(dnstt.AuthTag(a.key, at, msg), tag[:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *nekoAuthenticator) Device(id string, tag [8]byte, msg []byte) bool {
+	return id == "phone" && a.holds(tag, msg)
+}
+
+func (a *nekoAuthenticator) Scan(_ embed.ScanKind, tag [8]byte, msg []byte) (string, bool) {
+	if a.holds(tag, msg) {
+		return "phone", true
+	}
+	return "", false
+}
+
+// nekoAuthOf is the node's authenticator for mode: none when off
+func nekoAuthOf(t *testing.T, mode string) embed.Authenticator {
+	if mode == "" || mode == "off" {
+		return nil
+	}
+	return newNekoAuthenticator(t)
 }
 
 func nekoEcho(t *testing.T, c nekoEchoCase) {
@@ -131,6 +208,9 @@ func nekoEcho(t *testing.T, c nekoEchoCase) {
 			KeyFile: keyFile,
 			Seal:    c.seal,
 			Conn:    serverConn,
+
+			AuthMode: c.authMode,
+			Auth:     nekoAuthOf(t, c.authMode),
 			Dial: func(timeout time.Duration) (net.Conn, error) {
 				return net.DialTimeout("tcp", echo.Addr().String(), timeout)
 			},
@@ -154,6 +234,7 @@ func nekoEcho(t *testing.T, c nekoEchoCase) {
 		EncryptionMethod: 5,
 		EncryptionKey:    key,
 		Extra:            options,
+		Auth:             c.auth,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -6,6 +6,7 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/mdseal"
+	"masterdnsvpn-go/internal/security"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -83,4 +84,16 @@ func openErrorDrop(data []byte, base bool) (VpnProto.Packet, bool) {
 		}
 	}
 	return VpnProto.Packet{}, false
+}
+
+// SetQueryTagger tags every query with the device's tag (neko: raycontrol docs/spec/dnsauth-masterdns.md §2), inside
+// AES-GCM before the frame; the sizes the client computes count its 8 bytes. Before Run.
+func (c *Client) SetQueryTagger(tagger security.Tagger) error {
+	if err := c.codec.SetTagger(tagger); err != nil {
+		return err
+	}
+	if tagger != nil {
+		c.mtuCryptoOverhead = mtuCryptoOverhead(c.cfg.DataEncryptionMethod) + security.AuthTagLen
+	}
+	return nil
 }

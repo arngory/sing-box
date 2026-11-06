@@ -28,6 +28,10 @@ type Options struct {
 	Conns <-chan net.Conn
 	// Android VpnService protect socket, "" off
 	ProtectPath string
+	// Tagger tags every query with the device's tag (dnsauth for masterdns, raycontrol
+	// docs/spec/dnsauth-masterdns.md §2): HMAC-SHA256(K, "dnsauth1" || uint32_be(epoch) || nonce || frame)[:8];
+	// nil: untagged. Needs DATA_ENCRYPTION_METHOD 3-5.
+	Tagger func(nonce, frame []byte) [8]byte
 }
 
 // Run starts the client and blocks until ctx is done. Keys that would expose the
@@ -70,6 +74,11 @@ func Run(ctx context.Context, options Options) error {
 	app, err := client.BootstrapLoadedConfig(cfg, "")
 	if err != nil {
 		return err
+	}
+	if options.Tagger != nil {
+		if err := app.SetQueryTagger(options.Tagger); err != nil {
+			return err
+		}
 	}
 	app.SetListenerFactory(func() (net.Listener, error) {
 		return &connListener{conns: options.Conns, closed: make(chan struct{})}, nil

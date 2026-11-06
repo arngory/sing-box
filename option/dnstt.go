@@ -36,4 +36,6 @@ type DNSTTAuthOptions struct {
 	// key stays out of the config
 	DeviceKey    string `json:"device_key,omitempty"`
 	DeviceKeyRef string `json:"device_key_ref,omitempty"`
+	// how many seconds the node's clock is ahead of the device's (the subscription's skew): the epoch is the node's
+	ClockSkew int64 `json:"clock_skew,omitempty"`
 }

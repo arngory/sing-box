@@ -81,6 +81,8 @@ type sessionRecord struct {
 
 	// SealCap is the most S a sealed answer in the session takes (neko: mdseal-v1, sessionSealCap)
 	SealCap int
+	// Device is the device whose tagged SESSION_INIT set the session up, "" for none (neko: dnsauth)
+	Device string
 }
 
 type recentlyClosedStreamRecord struct {
@@ -166,6 +168,8 @@ type closedSessionRecord struct {
 	Cookie       uint8
 	ResponseMode uint8
 	ExpiresAt    time.Time
+	// neko: dnsauth, the closed session's device
+	Device string
 }
 
 type sessionLookupState uint8
@@ -266,9 +270,11 @@ func (s *sessionStore) findOrCreate(
 	maxPacketsPerBatch int,
 	maxClientUploadMTU int,
 	maxClientDownloadMTU int,
-) (*sessionRecord, bool, error) {
+	device string,
+	closedRetention time.Duration,
+) (*sessionRecord, bool, *closedSessionCleanup, error) {
 	if len(payload) != sessionInitDataSize || !isValidSessionResponseMode(payload[0]) {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	var signature [sessionInitDataSize]byte
@@ -282,18 +288,27 @@ func (s *sessionStore) findOrCreate(
 	s.expireReuseLocked(nowUnixNano)
 
 	if sessionID, ok := s.bySig[signature]; ok {
-		if existing := s.byID[sessionID]; existing != nil {
+		// neko: the session of the same INIT goes to the same device only (dnsauth §3.5)
+		if existing := s.byID[sessionID]; existing != nil && existing.Device == device {
 			if nowUnixNano <= existing.reuseUntilUnixNano {
 				existing.setLastActivityUnixNano(nowUnixNano)
-				return existing, true, nil
+				return existing, true, nil, nil
 			}
 		}
 		delete(s.bySig, signature)
 	}
 
+	// neko: a device at its limit gives its oldest session up for the new one (dnsauth §3.5)
+	var evicted *closedSessionCleanup
+	if oldest, ok := s.oldestOfDeviceLocked(device); ok {
+		if record := s.closeLocked(oldest, now, closedRetention); record != nil {
+			evicted = &closedSessionCleanup{ID: oldest, record: record}
+		}
+	}
+
 	slot := s.allocateSlotLocked()
 	if slot < 0 {
-		return nil, false, ErrSessionTableFull
+		return nil, false, evicted, ErrSessionTableFull
 	}
 
 	record := &sessionRecord{
@@ -328,6 +343,7 @@ func (s *sessionStore) findOrCreate(
 	)
 	copy(record.VerifyCode[:], payload[6:10])
 	record.Cookie = s.randomCookieLocked()
+	record.Device = device
 
 	s.byID[slot] = record
 	s.activeCount++
@@ -335,7 +351,7 @@ func (s *sessionStore) findOrCreate(
 	s.updateNextReuseSweepLocked(record.reuseUntilUnixNano)
 	delete(s.recentClosed, uint8(slot))
 	s.nextID = uint16(nextSessionID(uint8(slot)))
-	return record, false, nil
+	return record, false, evicted, nil
 }
 
 func (s *sessionStore) expireReuseLocked(nowUnixNano int64) {
@@ -449,9 +465,14 @@ func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Dura
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	record := s.closeLocked(sessionID, now, retention)
+	return record, record != nil
+}
+
+func (s *sessionStore) closeLocked(sessionID uint8, now time.Time, retention time.Duration) *sessionRecord {
 	record := s.byID[sessionID]
 	if record == nil {
-		return nil, false
+		return nil
 	}
 	record.markClosed()
 
@@ -465,11 +486,12 @@ func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Dura
 			Cookie:       record.Cookie,
 			ResponseMode: record.ResponseMode,
 			ExpiresAt:    now.Add(retention),
+			Device:       record.Device,
 		}
 	} else {
 		delete(s.recentClosed, sessionID)
 	}
-	return record, true
+	return record
 }
 
 func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedRetention time.Duration) []closedSessionCleanup {
@@ -512,6 +534,7 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 				Cookie:       record.Cookie,
 				ResponseMode: record.ResponseMode,
 				ExpiresAt:    now.Add(closedRetention),
+				Device:       record.Device,
 			}
 		}
 		record.markClosed()

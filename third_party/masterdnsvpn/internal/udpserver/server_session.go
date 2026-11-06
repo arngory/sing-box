@@ -644,7 +644,7 @@ func buildPreSessionPacketTypes() [256]bool {
 	return values
 }
 
-func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, device string) []byte {
 	if vpnPacket.SessionID != 0 || len(vpnPacket.Payload) != sessionInitDataSize || !s.responseModeAllowed(vpnPacket.Payload[0]) {
 		return nil
 	}
@@ -653,14 +653,19 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	resolvedUpload := resolveCompressionType(requestedUpload, s.uploadCompressionMask)
 	resolvedDownload := resolveCompressionType(requestedDownload, s.downloadCompressionMask)
 
-	record, reused, err := s.sessions.findOrCreate(
+	record, reused, evicted, err := s.sessions.findOrCreate(
 		vpnPacket.Payload,
 		resolvedUpload,
 		resolvedDownload,
 		s.cfg.EffectiveMaxPacketsPerBatch(),
 		s.cfg.ClientMaxUploadMTU,
 		s.cfg.ClientMaxDownloadMTU,
+		device,
+		s.cfg.ClosedSessionRetention(),
 	)
+	if evicted != nil {
+		s.cleanupClosedSession(evicted.ID, evicted.record)
+	}
 	if err != nil {
 		if err == ErrSessionTableFull {
 			if s.log != nil {

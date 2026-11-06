@@ -39,8 +39,41 @@ type ServerOptions struct {
 	// Seal is mdseal-v1's mode: "" or "off", "optional", "required" (raycontrol docs/spec/mdseal-v1.md §5); the key
 	// is the text of KeyFile, and a seal needs one (Method 1-5)
 	Seal string
+	// AuthMode is dnsauth's mode: "" or "off", "optional", "required" (raycontrol docs/spec/dnsauth-masterdns.md
+	// §4); Auth checks the devices' tags, needed unless off; AES-GCM only (Method 3-5)
+	AuthMode string
+	Auth     Authenticator
 	// Log receives the server log (nil: discarded)
 	Log io.Writer
+}
+
+// ScanKind is the budget a scan of the devices' keys comes from (dnsauth-masterdns §3.2).
+type ScanKind int
+
+const (
+	// ScanProbe is an MTU probe's (MTU_UP_REQ, MTU_DOWN_REQ)
+	ScanProbe ScanKind = udpserver.ScanProbe
+	// ScanInit is a SESSION_INIT's
+	ScanInit ScanKind = udpserver.ScanInit
+	// ScanSession is a query's to a session with no live record of it (closed, expired, a restarted node)
+	ScanSession ScanKind = udpserver.ScanSession
+)
+
+// Authenticator checks the devices' tags (dnsauth-masterdns §3); niko-server implements it with its keys file. Its
+// methods are called from many goroutines. msg is nonce || frame, the tag HMAC-SHA256(K, "dnsauth1" ||
+// uint32_be(epoch) || msg)[:8].
+type Authenticator interface {
+	// Device is whether tag is device id's over msg in the current epoch or one next to it; false for one revoked.
+	Device(id string, tag [8]byte, msg []byte) bool
+	// Scan is the device whose tag it is, the recent ones first, within kind's budget; false when it is none's or
+	// the budget is spent.
+	Scan(kind ScanKind, tag [8]byte, msg []byte) (id string, ok bool)
+}
+
+type authAdapter struct{ Authenticator }
+
+func (a authAdapter) Scan(kind int, tag [8]byte, msg []byte) (string, bool) {
+	return a.Authenticator.Scan(ScanKind(kind), tag, msg)
 }
 
 // DefaultMaxDownloadMTU bounds a session's answers and the MTU probes: an answer that carries more passes few resolvers
@@ -63,6 +96,13 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 	if err != nil {
 		return err
 	}
+	authMode, err := udpserver.ParseAuthMode(options.AuthMode)
+	if err != nil {
+		return err
+	}
+	if authMode != 0 && options.Auth == nil {
+		return errors.New("masterdnsvpn: auth without an authenticator")
+	}
 	key, err := readKey(options.KeyFile, options.Method)
 	if err != nil {
 		return err
@@ -83,6 +123,11 @@ func RunServer(ctx context.Context, options ServerOptions) error {
 	server := udpserver.New(cfg, log, codec)
 	if err := server.SetSeal(seal, key); err != nil {
 		return fmt.Errorf("masterdnsvpn: seal: %w", err)
+	}
+	if authMode != 0 {
+		if err := server.SetAuth(authMode, authAdapter{options.Auth}); err != nil {
+			return fmt.Errorf("masterdnsvpn: auth: %w", err)
+		}
 	}
 	server.SetListener(options.Conn)
 	server.SetStreamDialer(func(_, _ string, timeout time.Duration) (net.Conn, error) {

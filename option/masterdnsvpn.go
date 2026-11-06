@@ -13,4 +13,9 @@ type MasterDNSVPNOutboundOptions struct {
 	Mode string `json:"mode,omitempty"`
 	// further client config keys, as in client_config.toml (PACKET_DUPLICATION_COUNT, ...)
 	Extra map[string]any `json:"extra,omitempty"`
+	// raycontrol mdseal-v1: "optional" or "required" as the node's link gives it (niko-mdseal), "" off; the key is
+	// EncryptionKey's text
+	Seal string `json:"seal,omitempty"`
+	// raycontrol dnsauth for masterdns: the device's tag in every query, its key as dnstt's (AES-GCM methods 3-5)
+	Auth *DNSTTAuthOptions `json:"auth,omitempty"`
 }

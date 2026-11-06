@@ -58,11 +58,19 @@ func ResolveDeviceKey(key, ref string) ([]byte, error) {
 
 // authTag is the tag of payload (ClientID, padding and packets) at time now.
 func authTag(key, payload []byte, now time.Time) []byte {
+	return AuthTag(key, now, payload)
+}
+
+// AuthTag is dnsauth-v1's tag of the message parts at time now (the node's: the device's clock with the skew the
+// subscription gave), for the other tunnels that carry it (masterdns: nonce, frame).
+func AuthTag(key []byte, now time.Time, parts ...[]byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	var epoch [4]byte
 	binary.BigEndian.PutUint32(epoch[:], uint32(now.Unix()/authEpochLen))
 	mac.Write([]byte("dnsauth1"))
 	mac.Write(epoch[:])
-	mac.Write(payload)
+	for _, part := range parts {
+		mac.Write(part)
+	}
 	return mac.Sum(nil)[:authTagLen]
 }

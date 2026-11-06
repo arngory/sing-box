@@ -15,7 +15,6 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	Enums "masterdnsvpn-go/internal/enums"
-	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 func (s *Server) handlePacket(packet []byte) []byte {
@@ -61,8 +60,9 @@ func (s *Server) handleParsedPacket(packet []byte, parsed DnsParser.LitePacket, 
 	}
 }
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
-	vpnPacket, err := VpnProto.ParseInflatedFromLabels(decision.Labels, s.codec)
-	if err != nil {
+	// neko: the device's tag checked before the frame is parsed further or inflated (dnsauth, openQuery)
+	vpnPacket, device, ok := s.openQuery(decision.Labels, time.Now())
+	if !ok {
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "vpn-proto-parse-failed")
 	}
 
@@ -90,7 +90,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	case Enums.PACKET_MTU_DOWN_REQ:
 		return s.handleMTUDownRequest(packet, parsed, decision, vpnPacket)
 	case Enums.PACKET_SESSION_INIT:
-		return s.handleSessionInitRequest(packet, decision, vpnPacket)
+		return s.handleSessionInitRequest(packet, decision, vpnPacket, device)
 	default:
 		return s.buildNoDataResponseLiteLogged(packet, parsed, fmt.Sprintf("pre-session-unhandled-%s", Enums.PacketTypeName(vpnPacket.PacketType)))
 	}

@@ -95,6 +95,8 @@ type ClientOptions struct {
 	TLSConfig tls.Config
 	// raycontrol dnsauth-v1 tag key (AuthKey); nil sends queries without a tag
 	AuthKey []byte
+	// how far the node's clock is ahead of the device's (the subscription's skew), for the tag's epoch
+	AuthClockSkew time.Duration
 	// raycontrol dnsseal-v1: the zone's key K (32 bytes) to seal the framing with; nil sends it open
 	SealKey []byte
 	// how long a session's Noise handshake may take before a new session (a new ClientID) is tried; 0 is 30 s
@@ -117,6 +119,7 @@ type Client struct {
 	tls      tls.Config
 	mtu      int
 	authKey  []byte
+	authSkew time.Duration
 	seal     *sealer
 
 	cancel           context.CancelFunc
@@ -194,6 +197,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		tls:              options.TLSConfig,
 		mtu:              mtu,
 		authKey:          options.AuthKey,
+		authSkew:         options.AuthClockSkew,
 		seal:             seal,
 	}, nil
 }
@@ -290,6 +294,7 @@ func (c *Client) newSession(ctx context.Context) (*session, error) {
 		return nil, err
 	}
 	packetConn := newDNSPacketConn(transport, remoteAddr, c.domain, c.logger, c.authKey, c.seal)
+	packetConn.authSkew = c.authSkew
 	kcpConn, err := kcp.NewConn2(remoteAddr, nil, 0, 0, packetConn)
 	if err != nil {
 		packetConn.Close()
