@@ -109,3 +109,59 @@ func TestNekoTXTAnswersExact(t *testing.T) {
 		}
 	}
 }
+
+// neko: an answer's OPT is the responder's: the root, 1232, the query's DO bit, no options; the query's own (here a
+// client cookie, which echoed alone is a malformed COOKIE) never goes back.
+func TestNekoAnswerOPT(t *testing.T) {
+	plain, err := BuildTXTQuestionPacket("a.example.com", Enums.DNS_RECORD_TYPE_TXT, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, do := range []bool{true, false} {
+		// the query's OPT (its last 11 bytes) with DO, and a COOKIE option of a client cookie
+		query := append([]byte(nil), plain...)
+		opt := query[len(query)-11:]
+		if do {
+			opt[7] |= 0x80
+		}
+		binary.BigEndian.PutUint16(opt[9:11], 12)
+		query = append(query, 0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8)
+		if RequesterUDPSize(query) != 4096 {
+			t.Fatal("query's OPT")
+		}
+		single, err := BuildTXTResponsePacket(query, "a.example.com", [][]byte{[]byte("x")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		multi, err := BuildTXTResponsePacket(query, "a.example.com", [][]byte{[]byte("x"), []byte("y")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty, err := BuildEmptyNoErrorResponse(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		large, err := BuildTXTResponsePacket(query, "a.example.com", [][]byte{bytes.Repeat([]byte{'x'}, 255), bytes.Repeat([]byte{'y'}, 255)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		small := append([]byte(nil), query...)
+		binary.BigEndian.PutUint16(small[len(small)-12-11+3:], 512) // the query's size to 512: its answer cut
+		cut := FitRequester(small, large)
+		if parseHeader(cut).TC != 1 {
+			t.Fatal("not cut")
+		}
+		want := []byte{0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0}
+		if do {
+			want[7] = 0x80
+		}
+		for name, answer := range map[string][]byte{"single": single, "multi": multi, "empty": empty, "cut": cut} {
+			if _, err := ParseDNSDatagramLite(answer); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if !bytes.Equal(answer[len(answer)-11:], want) || parseHeader(answer).ARCount != 1 {
+				t.Fatalf("%s (DO %v): OPT % x", name, do, answer[len(answer)-11:])
+			}
+		}
+	}
+}

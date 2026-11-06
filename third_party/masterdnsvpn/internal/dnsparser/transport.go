@@ -203,6 +203,8 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	header := parseHeader(questionPacket)
 	questionBytes, questionCount, questionEndOffset := extractQuestionSection(questionPacket, header)
 	optStart, optLen := findOPTRecordRange(questionPacket, header, questionEndOffset)
+	opt := answerOPT(questionPacket, optStart, optLen)
+	optLen = len(opt)
 
 	nameBytes, err := responseAnswerNameBytes(questionPacket, answerName, len(questionBytes) > 0)
 	if err != nil {
@@ -249,7 +251,7 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	}
 
 	if optLen > 0 {
-		copy(response[offset:], questionPacket[optStart:optStart+optLen])
+		copy(response[offset:], opt)
 	}
 
 	return response, nil
@@ -296,6 +298,8 @@ func buildSingleTXTResponsePacket(questionPacket []byte, answerName string, answ
 	header := parseHeader(questionPacket)
 	questionBytes, questionCount, questionEndOffset := extractQuestionSection(questionPacket, header)
 	optStart, optLen := findOPTRecordRange(questionPacket, header, questionEndOffset)
+	opt := answerOPT(questionPacket, optStart, optLen)
+	optLen = len(opt)
 
 	nameBytes, err := responseAnswerNameBytes(questionPacket, answerName, len(questionBytes) > 0)
 	if err != nil {
@@ -321,7 +325,7 @@ func buildSingleTXTResponsePacket(questionPacket []byte, answerName string, answ
 	offset += copy(response[offset:], answerPayload)
 
 	if optLen > 0 {
-		copy(response[offset:], questionPacket[optStart:optStart+optLen])
+		copy(response[offset:], opt)
 	}
 
 	return response, nil

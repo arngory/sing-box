@@ -87,6 +87,8 @@ func buildResponseWithRCode(request []byte, rcode uint8) ([]byte, error) {
 	}
 
 	optStart, optLen := findOPTRecordRange(request, header, questionEndOffset)
+	opt := answerOPT(request, optStart, optLen)
+	optLen = len(opt)
 
 	response := make([]byte, dnsHeaderSize+questionLen+optLen)
 	binary.BigEndian.PutUint16(response[0:2], header.ID)
@@ -99,7 +101,7 @@ func buildResponseWithRCode(request []byte, rcode uint8) ([]byte, error) {
 		copy(response[dnsHeaderSize:], request[dnsHeaderSize:questionEndOffset])
 	}
 	if optLen > 0 {
-		copy(response[dnsHeaderSize+questionLen:], request[optStart:optStart+optLen])
+		copy(response[dnsHeaderSize+questionLen:], opt)
 	}
 
 	return response, nil
@@ -122,6 +124,8 @@ func buildResponseWithFlagsLite(request []byte, parsed LitePacket, flags uint16)
 	}
 
 	optStart, optLen := findOPTRecordRange(request, parsed.Header, parsed.QuestionEndOffset)
+	opt := answerOPT(request, optStart, optLen)
+	optLen = len(opt)
 
 	questionLen := 0
 	if parsed.QuestionEndOffset >= dnsHeaderSize && parsed.QuestionEndOffset <= len(request) {
@@ -138,7 +142,7 @@ func buildResponseWithFlagsLite(request []byte, parsed LitePacket, flags uint16)
 		copy(response[dnsHeaderSize:], request[dnsHeaderSize:parsed.QuestionEndOffset])
 	}
 	if optLen > 0 {
-		copy(response[dnsHeaderSize+questionLen:], request[optStart:optStart+optLen])
+		copy(response[dnsHeaderSize+questionLen:], opt)
 	}
 
 	return response, nil
