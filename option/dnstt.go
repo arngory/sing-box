@@ -38,4 +38,7 @@ type DNSTTAuthOptions struct {
 	DeviceKeyRef string `json:"device_key_ref,omitempty"`
 	// how many seconds the node's clock is ahead of the device's (the subscription's skew): the epoch is the node's
 	ClockSkew int64 `json:"clock_skew,omitempty"`
+	// 1 (or unset): dnsauth-v1's tag; 2: dnsauth-v2's hint || tag (docs/spec/dnsauth-v2.md), when the node's
+	// subscription announces it
+	Version uint8 `json:"version,omitempty"`
 }

@@ -46,6 +46,8 @@ type dnsPacketConn struct {
 	logger    logger.ContextLogger
 	authKey   []byte        // dnsauth-v1, nil without
 	authSkew  time.Duration // the node's clock ahead of the device's: the tag's epoch is the node's
+	// dnsauth's version: 2 puts hint || tag in the 8 bytes, else the v1 tag
+	authVersion int
 	// dnsseal-v1, nil without; capacity: the bytes a sealed query's name carries for certain
 	seal      *sealer
 	capacity  int
@@ -211,8 +213,8 @@ func (c *dnsPacketConn) send(p []byte, addr net.Addr) error {
 	}
 	payload := decoded.Bytes()
 	if c.authKey != nil {
-		// dnsauth-v1: tag (8) || ClientID || padding and packets
-		payload = append(authTag(c.authKey, payload, time.Now().Add(c.authSkew)), payload...)
+		// dnsauth: tag (8, v1) or hint (2) || tag (6) (v2), then ClientID || padding and packets
+		payload = append(AuthField(c.authKey, c.authVersion, time.Now().Add(c.authSkew), payload), payload...)
 	}
 	if c.seal != nil {
 		payload = c.seal.sealQuery(payload)

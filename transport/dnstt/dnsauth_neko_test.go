@@ -63,3 +63,42 @@ func TestNekoDNSAuthQuery(t *testing.T) {
 		t.Fatalf("MTU %d and %d", plain.mtu, signed.mtu)
 	}
 }
+
+// TestNekoDNSAuthV2Vector: dnsauth-v2's field (raycontrol docs/spec/dnsauth-v2.md §6), against the spec's values
+// (computed in Python apart from the code; the slipstream client's meson test checks the same).
+func TestNekoDNSAuthV2Vector(t *testing.T) {
+	key, _ := hex.DecodeString("0b485b425e8b19e0ec7c0362d55fdc34338147f984b87ee005455c8f5fc68b1c")
+	msg := make([]byte, 24)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+	now := time.Unix(1767268800, 0)
+	if got := hex.EncodeToString(AuthField(key, 2, now, msg)); got != "2d82b1220002a927" {
+		t.Fatalf("field %s", got)
+	}
+	// the parts are one message: split anywhere, the same tag
+	if got := hex.EncodeToString(AuthField(key, 2, now, msg[:5], msg[5:])); got != "2d82b1220002a927" {
+		t.Fatalf("split field %s", got)
+	}
+	if got := hex.EncodeToString(AuthField(key, 2, now.Add(-600*time.Second), msg)[:2]); got != "a5f9" {
+		t.Fatalf("hint (epoch - 1) %s", got)
+	}
+	if got := hex.EncodeToString(AuthField(key, 2, now.Add(600*time.Second), msg)[:2]); got != "e97f" {
+		t.Fatalf("hint (epoch + 1) %s", got)
+	}
+	// the hint is the device's for the epoch, whatever the message; v1 stays v1
+	if !bytes.Equal(AuthField(key, 2, now, []byte("other"))[:2], AuthField(key, 2, now, msg)[:2]) {
+		t.Fatal("the hint follows the message")
+	}
+	if !bytes.Equal(AuthField(key, 1, now, msg), AuthTag(key, now, msg)) {
+		t.Fatal("v1 is not the v1 tag")
+	}
+	for version, want := range map[uint8]int{0: 1, 1: 1, 2: 2} {
+		if got, err := AuthVersion(version); err != nil || got != want {
+			t.Fatalf("version %d: %d %v", version, got, err)
+		}
+	}
+	if _, err := AuthVersion(3); err == nil {
+		t.Fatal("version 3 accepted")
+	}
+}

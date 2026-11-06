@@ -97,6 +97,8 @@ type ClientOptions struct {
 	AuthKey []byte
 	// how far the node's clock is ahead of the device's (the subscription's skew), for the tag's epoch
 	AuthClockSkew time.Duration
+	// dnsauth's version, 1 or 2 (AuthVersion); 0 is 1
+	AuthVersion int
 	// raycontrol dnsseal-v1: the zone's key K (32 bytes) to seal the framing with; nil sends it open
 	SealKey []byte
 	// how long a session's Noise handshake may take before a new session (a new ClientID) is tried; 0 is 30 s
@@ -110,17 +112,18 @@ type ClientOptions struct {
 const defaultHandshakeTimeout = 30 * time.Second
 
 type Client struct {
-	ctx      context.Context
-	logger   logger.ContextLogger
-	dialer   N.Dialer
-	domain   dns.Name
-	pubkey   []byte
-	resolver Resolver
-	tls      tls.Config
-	mtu      int
-	authKey  []byte
-	authSkew time.Duration
-	seal     *sealer
+	ctx         context.Context
+	logger      logger.ContextLogger
+	dialer      N.Dialer
+	domain      dns.Name
+	pubkey      []byte
+	resolver    Resolver
+	tls         tls.Config
+	mtu         int
+	authKey     []byte
+	authSkew    time.Duration
+	authVersion int
+	seal        *sealer
 
 	cancel           context.CancelFunc
 	handshakeTimeout time.Duration
@@ -198,6 +201,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		mtu:              mtu,
 		authKey:          options.AuthKey,
 		authSkew:         options.AuthClockSkew,
+		authVersion:      options.AuthVersion,
 		seal:             seal,
 	}, nil
 }
@@ -295,6 +299,7 @@ func (c *Client) newSession(ctx context.Context) (*session, error) {
 	}
 	packetConn := newDNSPacketConn(transport, remoteAddr, c.domain, c.logger, c.authKey, c.seal)
 	packetConn.authSkew = c.authSkew
+	packetConn.authVersion = c.authVersion
 	kcpConn, err := kcp.NewConn2(remoteAddr, nil, 0, 0, packetConn)
 	if err != nil {
 		packetConn.Close()

@@ -66,6 +66,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	var authKey []byte
 	var authSkew time.Duration
+	var authVersion int
 	if options.Auth != nil {
 		authSkew = time.Duration(options.Auth.ClockSkew) * time.Second
 		deviceKey, err := dnstt.ResolveDeviceKey(options.Auth.DeviceKey, options.Auth.DeviceKeyRef)
@@ -73,6 +74,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, err
 		}
 		authKey, err = dnstt.AuthKey(deviceKey, options.Auth.NodeID, options.Auth.ServiceID)
+		if err != nil {
+			return nil, err
+		}
+		authVersion, err = dnstt.AuthVersion(options.Auth.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -96,6 +101,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		SealKey:   sealKey,
 
 		AuthClockSkew: authSkew,
+		AuthVersion:   authVersion,
 	})
 	if err != nil {
 		return nil, err

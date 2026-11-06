@@ -91,9 +91,14 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if err != nil {
 			return nil, err
 		}
+		version, err := dnstt.AuthVersion(options.Auth.Version)
+		if err != nil {
+			return nil, err
+		}
 		skew := time.Duration(options.Auth.ClockSkew) * time.Second
 		tagger = func(nonce, frame []byte) (tag [8]byte) {
-			copy(tag[:], dnstt.AuthTag(authKey, time.Now().Add(skew), nonce, frame))
+			// dnsauth-masterdns §2 with v1's tag or v2's hint || tag (the same 8 bytes, the same message)
+			copy(tag[:], dnstt.AuthField(authKey, version, time.Now().Add(skew), nonce, frame))
 			return tag
 		}
 	}
