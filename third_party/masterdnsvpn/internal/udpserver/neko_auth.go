@@ -3,6 +3,7 @@ package udpserver
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -142,11 +143,11 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 		}
 		kept, event := s.authNonces.keep(sight, device, now)
 		if s.log != nil {
-			switch event {
+			switch event.kind {
 			case nonceQuotaReached:
 				s.log.Warnf("dnsauth: device %s spent its %d queries before a session: its new ones go at %.0f a second until it rests", device, nonceDeviceBurst, nonceDeviceRate)
 			case nonceTurnedEarly:
-				s.log.Warnf("dnsauth: the nonce memory filled before its time (%d queries of many devices), turned early: replays of the oldest become possible", nonceGenerationCap)
+				s.log.Warnf("dnsauth: the nonce memory filled before its time (%d queries of many devices), turned early: replays of the oldest become possible; most new nonces: %s", nonceGenerationCap, event.topText())
 			}
 		}
 		if !kept {
@@ -174,25 +175,33 @@ func (s *Server) checkTag(tag [security.AuthTagLen]byte, nonce, frameBytes []byt
 // past that, or later, it is someone's replay. Each device's new nonces go through a bucket of nonceDeviceBurst that
 // fills again in nonceDeviceRefill: a device that spends it (a stolen key's flood, or a start on a list of resolvers
 // by the hundred) goes on at nonceDeviceRate a second, its queries past that refused, so one device neither locks
-// the others out nor itself for long; the whole generation full (many devices at once) turns early, logged.
+// the others out nor itself for long; the whole generation full (many devices at once) turns early, logged with the
+// devices that filled it. A nonce is paid for once, by its first copy kept: the copies of it after pass on that.
+// Times are the memory's own, monotonic: a step of the wall clock neither fills the buckets nor empties them.
 type nonceMemory struct {
 	mu                sync.Mutex
 	current, previous map[[nonceKeyLen]byte]nonceSeen
 	// each device's bucket of new nonces
 	perDevice map[string]nonceBucket
 	rotatedAt time.Time
+	// each device's new nonces in the current generation, for the log of an early turn
+	newOfDevice map[string]int
+	// base is the memory's start: its times are nanoseconds since, by the monotonic clock
+	base time.Time
 }
 
-// nonceBucket is a device's allowance of new nonces: tokens at time at (unix ns); spent marks it logged as empty
+// nonceBucket is a device's allowance of new nonces: tokens at time at (the memory's); spent marks it logged as empty
 type nonceBucket struct {
 	tokens float64
 	at     int64
 	spent  bool
 }
 
+// nonceSeen is a nonce's sights: how many, the first's time (the memory's), and whether a device's bucket paid for it
 type nonceSeen struct {
-	count uint8
-	first int64
+	count   uint8
+	charged bool
+	first   int64
 }
 
 const (
@@ -209,16 +218,21 @@ const (
 )
 
 func newNonceMemory() *nonceMemory {
+	now := time.Now()
 	return &nonceMemory{
 		current: make(map[[nonceKeyLen]byte]nonceSeen), previous: make(map[[nonceKeyLen]byte]nonceSeen),
-		perDevice: make(map[string]nonceBucket), rotatedAt: time.Now(),
+		perDevice: make(map[string]nonceBucket), rotatedAt: now, newOfDevice: make(map[string]int), base: now,
 	}
+}
+
+// mono is now in the memory's time: nanoseconds since its start, by the monotonic clock (time.Now's)
+func (m *nonceMemory) mono(now time.Time) int64 {
+	return int64(now.Sub(m.base))
 }
 
 // nonceSight is a sight of a nonce taken by reserve: undone when the query's tag does not hold, kept when it does
 type nonceSight struct {
-	key   [nonceKeyLen]byte
-	fresh bool // the nonce was unseen
+	key [nonceKeyLen]byte
 }
 
 // what keep reports for the log
@@ -228,6 +242,30 @@ const (
 	nonceTurnedEarly
 )
 
+// nonceEvent is what keep reports for the log: its kind, and for an early turn the devices of the most new nonces in
+// the generation that filled, the most first
+type nonceEvent struct {
+	kind int
+	top  []deviceNonces
+}
+
+// deviceNonces is a device's count of new nonces in a generation
+type deviceNonces struct {
+	device string
+	count  int
+}
+
+// nonceTopDevices is how many devices the log of an early turn names
+const nonceTopDevices = 3
+
+func (e nonceEvent) topText() string {
+	parts := make([]string, 0, len(e.top))
+	for _, d := range e.top {
+		parts = append(parts, fmt.Sprintf("%s %d", d.device, d.count))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // reserve takes a sight of nonce for a query about to be checked, under the one lock: false when the nonce was seen 3
 // times, or first more than 30 s ago (a replay). An unseen one is taken in, to be undone or kept.
 func (m *nonceMemory) reserve(nonce []byte, now time.Time) (nonceSight, bool) {
@@ -235,12 +273,13 @@ func (m *nonceMemory) reserve(nonce []byte, now time.Time) (nonceSight, bool) {
 		return nonceSight{}, false
 	}
 	key := [nonceKeyLen]byte(nonce)
+	at := m.mono(now)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.turnLocked(now)
 	for _, generation := range []map[[nonceKeyLen]byte]nonceSeen{m.current, m.previous} {
 		if seen, ok := generation[key]; ok {
-			if seen.count >= nonceRepeats || now.UnixNano()-seen.first > int64(nonceRepeatWindow) {
+			if seen.count >= nonceRepeats || at-seen.first > int64(nonceRepeatWindow) {
 				return nonceSight{}, false
 			}
 			seen.count++
@@ -248,69 +287,108 @@ func (m *nonceMemory) reserve(nonce []byte, now time.Time) (nonceSight, bool) {
 			return nonceSight{key: key}, true
 		}
 	}
-	m.current[key] = nonceSeen{count: 1, first: now.UnixNano()}
-	return nonceSight{key: key, fresh: true}, true
+	m.current[key] = nonceSeen{count: 1, first: at}
+	return nonceSight{key: key}, true
 }
 
 // undo gives a sight back: its tag did not hold (or the scan's budget was spent); an unseen nonce leaves no trace
 func (m *nonceMemory) undo(sight nonceSight) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, generation := range []map[[nonceKeyLen]byte]nonceSeen{m.current, m.previous} {
-		if seen, ok := generation[sight.key]; ok {
-			if seen.count--; seen.count == 0 {
-				delete(generation, sight.key)
-			} else {
-				generation[sight.key] = seen
-			}
-			return
+	m.undoLocked(sight)
+}
+
+func (m *nonceMemory) undoLocked(sight nonceSight) {
+	if generation, seen, ok := m.findLocked(sight.key); ok {
+		if seen.count--; seen.count == 0 {
+			delete(generation, sight.key)
+		} else {
+			generation[sight.key] = seen
 		}
 	}
 }
 
-// keep keeps a sight whose tag held, device's: false when an unseen nonce finds the device's bucket empty (undone,
-// the query refused); the event to log, a bucket's emptying once until it fills up again
-func (m *nonceMemory) keep(sight nonceSight, device string, now time.Time) (bool, int) {
-	if !sight.fresh {
-		return true, nonceKept
+// findLocked is the generation that holds key, and its entry there
+func (m *nonceMemory) findLocked(key [nonceKeyLen]byte) (map[[nonceKeyLen]byte]nonceSeen, nonceSeen, bool) {
+	for _, generation := range []map[[nonceKeyLen]byte]nonceSeen{m.current, m.previous} {
+		if seen, ok := generation[key]; ok {
+			return generation, seen, true
+		}
 	}
+	return nil, nonceSeen{}, false
+}
+
+// keep keeps a sight whose tag held, device's. The nonce's first copy kept pays a token of the device's bucket for it,
+// and its copies after pass on that; while the bucket is empty, each copy is undone and refused (false), the ones
+// reserved at the same time as well, until one pays. The event to log: a bucket's emptying, once until it fills up
+// again; a generation turned early.
+func (m *nonceMemory) keep(sight nonceSight, device string, now time.Time) (bool, nonceEvent) {
+	at := m.mono(now)
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	generation, seen, found := m.findLocked(sight.key)
+	if found && seen.charged {
+		return true, nonceEvent{}
+	}
 	bucket, ok := m.perDevice[device]
 	if !ok {
-		bucket = nonceBucket{tokens: nonceDeviceBurst, at: now.UnixNano()}
+		bucket = nonceBucket{tokens: nonceDeviceBurst, at: at}
 	}
-	if elapsed := now.UnixNano() - bucket.at; elapsed > 0 {
+	// a query's time taken before another's that got the lock first: no refill, the later time kept
+	if elapsed := at - bucket.at; elapsed > 0 {
 		bucket.tokens = min(nonceDeviceBurst, bucket.tokens+nonceDeviceRate*float64(elapsed)/float64(time.Second))
-		bucket.at = now.UnixNano()
+		bucket.at = at
 	}
 	if bucket.tokens >= nonceDeviceBurst/2 {
 		bucket.spent = false
 	}
 	if bucket.tokens < 1 {
-		event := nonceKept
+		var event nonceEvent
 		if !bucket.spent {
-			bucket.spent, event = true, nonceQuotaReached
+			bucket.spent, event.kind = true, nonceQuotaReached
 		}
 		m.perDevice[device] = bucket
-		m.mu.Unlock()
-		m.undo(sight)
+		m.undoLocked(sight)
 		return false, event
 	}
 	bucket.tokens--
 	m.perDevice[device] = bucket
-	event := nonceKept
-	// the whole generation full, of many devices at their quota: it turns early, the sight going on into the new one
-	if len(m.current) > nonceGenerationCap {
-		seen, ok := m.current[sight.key]
-		m.turnNowLocked(now)
-		if ok {
-			delete(m.previous, sight.key)
-			m.current[sight.key] = seen
-		}
-		event = nonceTurnedEarly
+	m.newOfDevice[device]++
+	seen.charged = true
+	if !found {
+		// both generations turned since its sight (early, under a flood): it goes into the new one
+		generation, seen = m.current, nonceSeen{count: 1, charged: true, first: at}
 	}
-	m.mu.Unlock()
-	return true, event
+	generation[sight.key] = seen
+	// the whole generation full, of many devices at their burst: it turns early, the sight going on into the new one
+	if len(m.current) > nonceGenerationCap {
+		top := m.topDevicesLocked(nonceTopDevices)
+		m.turnNowLocked(now)
+		delete(m.previous, sight.key)
+		m.current[sight.key] = seen
+		return true, nonceEvent{kind: nonceTurnedEarly, top: top}
+	}
+	return true, nonceEvent{}
+}
+
+// topDevicesLocked are the n devices of the most new nonces in the current generation, the most first (by name for
+// the same count)
+func (m *nonceMemory) topDevicesLocked(n int) []deviceNonces {
+	top := make([]deviceNonces, 0, n+1)
+	for device, count := range m.newOfDevice {
+		i := len(top)
+		for i > 0 && (top[i-1].count < count || top[i-1].count == count && top[i-1].device > device) {
+			i--
+		}
+		if i >= n {
+			continue
+		}
+		top = slices.Insert(top, i, deviceNonces{device: device, count: count})
+		if len(top) > n {
+			top = top[:n]
+		}
+	}
+	return top
 }
 
 // turnLocked starts a new generation every nonceGeneration, the one before kept
@@ -322,9 +400,11 @@ func (m *nonceMemory) turnLocked(now time.Time) {
 
 func (m *nonceMemory) turnNowLocked(now time.Time) {
 	m.previous, m.current, m.rotatedAt = m.current, make(map[[nonceKeyLen]byte]nonceSeen), now
+	m.newOfDevice = make(map[string]int)
 	// the buckets full again by now leave the map: it holds the devices of the last half hour
+	at := m.mono(now)
 	for device, bucket := range m.perDevice {
-		if bucket.tokens+nonceDeviceRate*float64(now.UnixNano()-bucket.at)/float64(time.Second) >= nonceDeviceBurst {
+		if bucket.tokens+nonceDeviceRate*float64(at-bucket.at)/float64(time.Second) >= nonceDeviceBurst {
 			delete(m.perDevice, device)
 		}
 	}
