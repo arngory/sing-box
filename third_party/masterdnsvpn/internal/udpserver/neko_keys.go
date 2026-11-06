@@ -101,18 +101,23 @@ func (s *Server) SetKeys(texts []string) error {
 	for _, key := range next {
 		kept[key] = true
 	}
-	now := time.Now()
-	for _, id := range s.sessions.withKeyNotIn(kept) {
-		record, ok := s.sessions.Close(id, now, s.cfg.ClosedSessionRetention())
-		if !ok {
-			continue
-		}
-		s.cleanupClosedSession(id, record)
+	for _, closed := range s.sessions.closeKeysNotIn(kept, time.Now(), s.cfg.ClosedSessionRetention()) {
+		s.cleanupClosedSession(closed.ID, closed.record)
 		if s.log != nil {
-			s.log.Infof("\U0001F511 <yellow>Session Closed, its key taken out, Session: <cyan>%d</cyan></yellow>", id)
+			s.log.Infof("\U0001F511 <yellow>Session Closed, its key taken out, Session: <cyan>%d</cyan></yellow>", closed.ID)
 		}
 	}
 	return nil
+}
+
+// keyListed is whether key is one of the server's keys now (the session store asks it, sessionStore.keyListed).
+func (s *Server) keyListed(key *serviceKey) bool {
+	for _, listed := range s.currentKeys() {
+		if listed == key {
+			return true
+		}
+	}
+	return false
 }
 
 // KeyLength is the length of a key for method (1-5), in characters, as the key file holds it.

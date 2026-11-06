@@ -193,6 +193,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		},
 	}
 	server.keys.Store(&serviceKeys{{codec: codec}})
+	sessions.keyListed = server.keyListed
 	return server
 }
 

@@ -3,6 +3,7 @@ package udpserver
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
@@ -221,4 +222,36 @@ func TestNekoKeysChangeWhileServing(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+// neko: the review: a SESSION_INIT opened with a key that SetKeys took out before the session was made sets nothing
+// up (it would outlive the close of its key's sessions), and the close goes by the key, not by an ID read earlier
+func TestNekoKeysInitOnAKeyTakenOut(t *testing.T) {
+	server, _ := nekoTestServer(t, nil)
+	nekoSetKeys(t, server, nekoNewKey, nekoOldKey)
+	keys := server.currentKeys()
+	newKey, oldKey := keys[0], keys[1]
+	payload := make([]byte, sessionInitDataSize)
+	payload[2], payload[3], payload[4], payload[5] = 0, 150, 1, 144
+	payload[6] = 9
+	init := func(key *serviceKey) (*sessionRecord, error) {
+		record, _, _, err := server.sessions.findOrCreate(payload, 0, 0, 1, 1000, 1000, "", key, time.Minute)
+		return record, err
+	}
+	// the query opened with the old key while it was listed; the key goes before the session is made
+	nekoSetKeys(t, server, nekoNewKey)
+	if record, err := init(oldKey); record != nil || err != nil {
+		t.Fatalf("a session on a key taken out: %v %v", record, err)
+	}
+	kept, err := init(newKey)
+	if kept == nil || err != nil {
+		t.Fatalf("no session on the key kept: %v", err)
+	}
+	// closing by the key leaves the kept key's sessions, whatever slot they took
+	if closed := server.sessions.closeKeysNotIn(map[*serviceKey]bool{newKey: true}, time.Now(), time.Minute); len(closed) != 0 {
+		t.Fatalf("closed %d sessions of the key kept", len(closed))
+	}
+	if server.sessions.byID[kept.ID] == nil {
+		t.Fatal("the kept key's session is gone")
+	}
 }

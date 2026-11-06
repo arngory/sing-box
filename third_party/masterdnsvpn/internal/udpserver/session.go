@@ -228,7 +228,10 @@ type idleDeferredCleanup struct {
 }
 
 type sessionStore struct {
-	mu                     sync.RWMutex
+	mu sync.RWMutex
+	// keyListed is whether a service key is still the server's (neko: key rotation): a SESSION_INIT opened with a
+	// key taken out meanwhile sets nothing up. Asked under mu, as closeKeysNotIn closes under it
+	keyListed              func(*serviceKey) bool
 	nextID                 uint16
 	activeCount            uint16
 	nextReuseSweepUnixNano int64
@@ -323,6 +326,12 @@ func (s *sessionStore) findOrCreate(
 			}
 		}
 		delete(s.bySig, reuse)
+	}
+
+	// neko: the query's key taken out between its opening and here: no session on it (SetKeys closes the key's
+	// sessions under mu after it stored the new list, so a session made before that is closed, one after refused)
+	if s.keyListed != nil && !s.keyListed(key) {
+		return nil, false, nil, nil
 	}
 
 	// neko: a device at its limit gives its session silent longest up for the new one (dnsauth §3.5)
@@ -1218,15 +1227,19 @@ func (r *sessionRecord) enqueueOrphanReset(packetType uint8, streamID uint16, se
 	r.OrphanQueue.Push(0, key, packet)
 }
 
-// withKeyNotIn is the live sessions on a service key kept does not hold (neko: key rotation, SetKeys).
-func (s *sessionStore) withKeyNotIn(kept map[*serviceKey]bool) []uint8 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var ids []uint8
+// closeKeysNotIn closes the live sessions on a service key kept does not hold, in one hold of the lock (neko: key
+// rotation, SetKeys): no slot is taken by another session between the check and the close.
+func (s *sessionStore) closeKeysNotIn(kept map[*serviceKey]bool, now time.Time, retention time.Duration) []closedSessionCleanup {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var closed []closedSessionCleanup
 	for id, record := range s.byID {
-		if record != nil && !kept[record.Key] {
-			ids = append(ids, uint8(id))
+		if record == nil || kept[record.Key] {
+			continue
+		}
+		if record := s.closeLocked(uint8(id), now, retention); record != nil {
+			closed = append(closed, closedSessionCleanup{ID: uint8(id), record: record})
 		}
 	}
-	return ids
+	return closed
 }
