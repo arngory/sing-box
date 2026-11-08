@@ -223,6 +223,10 @@ type Hysteria2OutboundOptions struct {
 	Realm               *Hysteria2Realm `json:"realm,omitempty"`
 	// neko: common/udpdesync
 	UDPDesync *UDPDesyncOptions `json:"udp_desync,omitempty"`
+	// neko: a TCP dial returns after the server's answer to it, its outcome the server's own dial's (an honest
+	// connect). Only for a server that answers right after its dial: sing-box's, the Hysteria 2 server, niko-server
+	// from v0.14.1 (niko-ack=1 in raycontrol's links); niko-server before answered with the destination's first bytes
+	AwaitDial bool `json:"await_dial,omitempty"`
 }
 
 type HysteriaRealmUser struct {

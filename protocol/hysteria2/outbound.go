@@ -166,6 +166,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		BBRProfile:   options.BBRProfile,
 		ChromeParrot: !options.DisableChromeParrot,
 		RealmOptions: realmOptions,
+		AwaitDial:    options.AwaitDial,
 	})
 	if err != nil {
 		return nil, err

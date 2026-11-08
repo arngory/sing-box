@@ -53,6 +53,12 @@ type ClientOptions struct {
 	BBRProfile         string
 	ChromeParrot       bool
 	RealmOptions       *realm.Options
+	// AwaitDial (neko): DialConn sends the request at once and returns only after the server's answer, so the dial
+	// fails as the server's own dial did (an "honest connect": a TUN gives the app its SYN-ACK only then). Only for a
+	// server that answers right after its dial (sing-box's, the Hysteria 2 server, niko-server from v0.14.1): one that
+	// answers with the destination's first bytes (niko-server before) would wait for ever on a destination that
+	// speaks second.
+	AwaitDial bool
 }
 
 type Client struct {
@@ -77,6 +83,7 @@ type Client struct {
 	bbrProfile         congestion_meta2.Profile
 	realmOptions       *realm.Options
 	controlClient      *realm.ControlClient
+	awaitDial          bool
 
 	connAccess sync.Mutex
 	conn       *clientQUICConnection
@@ -168,6 +175,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		bbrProfile:         bbrProfile,
 		realmOptions:       options.RealmOptions,
 		controlClient:      controlClient,
+		awaitDial:          options.AwaitDial,
 	}, nil
 }
 
@@ -634,12 +642,19 @@ func (c *Client) DialConn(ctx context.Context, destination M.Socksaddr) (net.Con
 		conn.releaseStream(false)
 		return nil, err
 	}
-	return &clientConn{
+	clientConn := &clientConn{
 		Stream:      stream,
 		parent:      conn,
 		destination: destination,
 		keepSession: qtls.KeepSessionFromContext(ctx),
-	}, nil
+	}
+	if c.awaitDial {
+		if err := clientConn.awaitDial(ctx); err != nil {
+			clientConn.Close()
+			return nil, err
+		}
+	}
+	return clientConn, nil
 }
 
 func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
@@ -858,6 +873,42 @@ func (c *clientConn) Write(p []byte) (n int, err error) {
 	}
 	n, err = c.Stream.Write(p)
 	return n, qtls.WrapError(err)
+}
+
+// awaitDialTimeout bounds the wait for the server's answer without a deadline of the caller's: above the server's own
+// dial timeout (niko-server: 10 s), so its "timeout" arrives rather than ours
+const awaitDialTimeout = 15 * time.Second
+
+// awaitDial sends the request now, with no payload, and reads the server's answer to it (AwaitDial).
+func (c *clientConn) awaitDial(ctx context.Context) error {
+	buffer := protocol.WriteTCPRequest(c.destination.String(), nil)
+	_, err := c.Stream.Write(buffer.Bytes())
+	buffer.Release()
+	if err != nil {
+		return qtls.WrapError(err)
+	}
+	c.requestWritten = true
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > awaitDialTimeout {
+		deadline = time.Now().Add(awaitDialTimeout)
+	}
+	_ = c.Stream.SetReadDeadline(deadline)
+	// a canceled dial stops the read at once
+	stop := context.AfterFunc(ctx, func() { _ = c.Stream.SetReadDeadline(time.Unix(1, 0)) })
+	status, errorMessage, err := protocol.ReadTCPResponse(c.Stream)
+	if !stop() {
+		// the cancel may set its deadline after any reset here: the conn is not handed out
+		return E.Errors(ctx.Err(), err)
+	}
+	_ = c.Stream.SetReadDeadline(time.Time{})
+	if err != nil {
+		return qtls.WrapError(err)
+	}
+	if !status {
+		return E.New("remote error: ", errorMessage)
+	}
+	c.responseRead = true
+	return nil
 }
 
 // CloseWrite ends this side of the stream and keeps reading the answer (neko): without it the core closed the stream
