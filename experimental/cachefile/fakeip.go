@@ -2,13 +2,16 @@ package cachefile
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"time"
 
 	"github.com/sagernet/bbolt"
+	bboltErrors "github.com/sagernet/bbolt/errors"
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -214,13 +217,49 @@ func (c *CacheFile) unpendFakeIP(address netip.Addr, domain string) {
 // ClearFakeIP (neko) removes FakeDNS's addresses and the names they stand for from the cache file at path, which no
 // core may have open: they are kept for a restart of the core under a running VPN, and are a record of the names
 // asked. bbolt leaves a deleted bucket's bytes in its free pages, so what remains (rule-sets, selections) is copied
-// to a new file that replaces this one. No file, or no FakeDNS in it: nothing to do.
+// to a new file that replaces this one. The old file's blocks are freed, not overwritten: on flash (f2fs above all)
+// an overwrite goes elsewhere anyway. A file bbolt cannot read (it panics on corrupt pages) is removed, as the core
+// itself resets one: no FakeDNS data stays behind either way. No file, or no FakeDNS in it: nothing to do.
 func ClearFakeIP(path string) error {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	db, err := bbolt.Open(path, 0o666, &bbolt.Options{Timeout: time.Second})
+	compacted := path + ".compact"
+	err := clearFakeIP(path, compacted)
+	var corrupted corruptedError
+	if errors.As(err, &corrupted) {
+		_ = os.Remove(compacted)
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return E.Errors(err, rmErr)
+		}
+		return nil
+	}
+	return err
+}
+
+// corruptedError is a panic of bbolt's on the file: the file is beyond use.
+type corruptedError struct{ reason any }
+
+func (e corruptedError) Error() string { return fmt.Sprint("database corrupted: ", e.reason) }
+
+func clearFakeIP(path, compacted string) (err error) {
+	var db, dst *bbolt.DB
+	defer func() {
+		if r := recover(); r != nil {
+			if dst != nil {
+				_ = dst.Close()
+			}
+			if db != nil {
+				_ = db.Close()
+			}
+			err = corruptedError{r}
+		}
+	}()
+	db, err = bbolt.Open(path, 0o666, &bbolt.Options{Timeout: time.Second})
 	if err != nil {
+		if E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
+			return corruptedError{err}
+		}
 		return err
 	}
 	found := false
@@ -236,24 +275,33 @@ func ClearFakeIP(path string) error {
 		}
 		return nil
 	})
+	var panicErr bbolt.PanickedError
+	if errors.As(err, &panicErr) {
+		db.Close()
+		return corruptedError{panicErr.Reason}
+	}
 	if err != nil || !found {
 		db.Close()
 		return err
 	}
-	compacted := path + ".compact"
 	_ = os.Remove(compacted)
-	dst, err := bbolt.Open(compacted, 0o666, &bbolt.Options{Timeout: time.Second})
+	dst, err = bbolt.Open(compacted, 0o666, &bbolt.Options{Timeout: time.Second})
 	if err != nil {
 		db.Close()
 		return err
 	}
 	err = bbolt.Compact(dst, db, 0)
 	db.Close()
-	if closeErr := dst.Close(); err == nil {
+	closeErr := dst.Close()
+	dst = nil
+	if err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(compacted)
+		if errors.As(err, &panicErr) {
+			return corruptedError{panicErr.Reason}
+		}
 		return err
 	}
 	return os.Rename(compacted, path)

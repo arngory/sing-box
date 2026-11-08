@@ -2,6 +2,7 @@ package fakeip_test
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"os"
@@ -142,4 +143,63 @@ func TestNekoFakeIPCleared(t *testing.T) {
 	if got, ok := store.Lookup(address); ok {
 		t.Fatalf("%s still stands for %q", address, got)
 	}
+}
+
+// A cache file bbolt cannot read (corrupt pages make it panic): ClearFakeIP removes it, as the core resets one,
+// instead of a panic through gomobile at every start of the VPN.
+func TestNekoFakeIPClearCorrupted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, stop := nekoStore(t, path)
+	for i := range 20 {
+		store.Create(fmt.Sprintf("n%d.example", i), false)
+	}
+	stop()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := os.Getpagesize()
+	// every page after the meta pages garbage (bbolt's error at open), or each page but the meta and freelist ones
+	// (a panic of bbolt's reading the buckets)
+	for _, keep := range []func(n int) bool{
+		func(n int) bool { return n < 2 },
+		func(n int) bool { return n < 2 || nekoFreelistPage(raw, page) == n },
+	} {
+		bad := append([]byte(nil), raw...)
+		for i := 2 * page; i < len(bad); i++ {
+			if !keep(i / page) {
+				bad[i] = 0xa5
+			}
+		}
+		if err := os.WriteFile(path, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := cachefile.ClearFakeIP(path); err != nil {
+			t.Fatalf("a corrupt file: %v", err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			left, _ := os.ReadFile(path)
+			if strings.Contains(string(left), "n7.example") {
+				t.Fatal("a corrupt file left with the names in it")
+			}
+		}
+	}
+}
+
+// nekoFreelistPage is the freelist's page in the newer meta page of a bbolt file (meta: magic, version, page size,
+// flags, root bucket of 16 bytes, freelist, ... after the 16-byte page header), -1 when none.
+func nekoFreelistPage(raw []byte, page int) int {
+	freelist, txid := -1, uint64(0)
+	for m := 0; m < 2; m++ {
+		meta := raw[m*page+16:]
+		if len(meta) < 64 {
+			continue
+		}
+		id := binary.LittleEndian.Uint64(meta[48:56])
+		if id >= txid {
+			txid = id
+			freelist = int(binary.LittleEndian.Uint64(meta[32:40]))
+		}
+	}
+	return freelist
 }
