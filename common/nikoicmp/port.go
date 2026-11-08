@@ -112,9 +112,17 @@ func (p *Port) DetachReturn(returnPath tun.Return) error {
 func (p *Port) WritePackets(packets [][]byte) error {
 	for _, packet := range packets {
 		echo, ok := parseEcho(packet)
-		if !ok || len(echo.payload) > maxPayload {
-			// the node would reset the stream for a larger frame: such an echo goes unanswered, as on a path that
-			// drops it
+		if !ok {
+			continue
+		}
+		if len(echo.payload) > maxPayload {
+			// the node answers a longer echo with too big at its own largest packet, whatever the path: answered here,
+			// without its data on the stream (ping -s 1473 -M do finds 1480)
+			mtu := uint16(maxPacket4)
+			if echo.destination.Is6() {
+				mtu = maxPacket6
+			}
+			p.write(errorMessage(echo.destination, echo.source, kindTooBig, 0, mtu, slices.Clone(echo.quote)))
 			continue
 		}
 		// the TUN reuses the packet's buffer
@@ -262,11 +270,12 @@ func (p *Port) answer(frame serverFrame) {
 	case kindTimeExceeded:
 		packet = errorMessage(frame.from, echo.source, kindTimeExceeded, frame.code, 0, echo.quote)
 	case kindUnreachable:
-		var mtu uint16
-		if frame.code == codeTooBig && len(frame.payload) >= 2 {
-			mtu = binary.BigEndian.Uint16(frame.payload[:2])
+		packet = errorMessage(frame.from, echo.source, kindUnreachable, frame.code, 0, echo.quote)
+	case kindTooBig:
+		if len(frame.payload) != 2 {
+			return
 		}
-		packet = errorMessage(frame.from, echo.source, kindUnreachable, frame.code, mtu, echo.quote)
+		packet = errorMessage(frame.from, echo.source, kindTooBig, 0, binary.BigEndian.Uint16(frame.payload), echo.quote)
 	default:
 		return
 	}

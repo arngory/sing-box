@@ -16,13 +16,16 @@ const (
 
 	kindEcho         = 1 // client: echo request; server: echo reply
 	kindTimeExceeded = 2
-	kindUnreachable  = 3
+	// destination unreachable, the ICMP or ICMPv6 code as it came (IPv6 4 is port unreachable)
+	kindUnreachable = 3
+	// packet too big, both families: code 0, the payload a u16 MTU (the largest IP packet that passes; 0 from a router
+	// that said 0)
+	kindTooBig = 4
 
-	// unreachable, both families: the packet is larger than the node sends; the payload is a u16 MTU
-	codeTooBig = 4
-
-	// the largest echo data a frame carries
+	// the largest echo data a frame carries; a longer echo the node answers with too big at these MTUs
 	maxPayload = 1452
+	maxPacket4 = maxPayload + 8 + 20
+	maxPacket6 = maxPayload + 8 + 40
 )
 
 // clientFrame: [kind 1][af 4|6][dst 4|16][ttl, 0 = 64][id][seq][len][payload].
@@ -60,7 +63,7 @@ func readServerFrame(r io.Reader) (serverFrame, error) {
 		return serverFrame{}, err
 	}
 	frame := serverFrame{kind: head[0], code: head[1]}
-	if frame.kind < kindEcho || frame.kind > kindUnreachable {
+	if frame.kind < kindEcho || frame.kind > kindTooBig {
 		return serverFrame{}, E.New("icmp: unknown frame kind ", frame.kind)
 	}
 	var addr []byte

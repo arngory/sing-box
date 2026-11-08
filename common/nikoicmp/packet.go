@@ -105,33 +105,30 @@ func echoReply(from, to netip.Addr, id, seq uint16, payload []byte) []byte {
 	return ipPacket(from, to, body)
 }
 
-// errorMessage is an ICMP error to the app from the router that sent it: its type and code for the family, with the
-// app's own packet quoted (its IP header and first 8 bytes). mtu is for a packet too big.
+// errorMessage is an ICMP error to the app from the router that sent it, with the app's own packet quoted (its IP
+// header and first 8 bytes): time exceeded and destination unreachable with the code as it came; too big as IPv4
+// fragmentation needed or IPv6 Packet Too Big, with the MTU.
 func errorMessage(from, to netip.Addr, kind, code uint8, mtu uint16, quote []byte) []byte {
 	body := make([]byte, icmpHeader+len(quote))
 	if from.Is4() {
 		switch kind {
 		case kindTimeExceeded:
-			body[0] = icmpv4TimeExceeded
-		default:
-			body[0] = icmpv4Unreachable
-		}
-		body[1] = code
-		if kind == kindUnreachable && code == icmpv4FragNeeded {
+			body[0], body[1] = icmpv4TimeExceeded, code
+		case kindTooBig:
+			body[0], body[1] = icmpv4Unreachable, icmpv4FragNeeded
 			binary.BigEndian.PutUint16(body[6:8], mtu)
+		default:
+			body[0], body[1] = icmpv4Unreachable, code
 		}
 	} else {
-		switch {
-		case kind == kindTimeExceeded:
-			body[0] = icmpv6TimeExceeded
-			body[1] = code
-		case code == codeTooBig:
-			// icmp-v1: code 4 for both families is "too big"; for IPv6 that is Packet Too Big
+		switch kind {
+		case kindTimeExceeded:
+			body[0], body[1] = icmpv6TimeExceeded, code
+		case kindTooBig:
 			body[0] = icmpv6PacketTooBig
 			binary.BigEndian.PutUint32(body[4:8], uint32(mtu))
 		default:
-			body[0] = icmpv6Unreachable
-			body[1] = code
+			body[0], body[1] = icmpv6Unreachable, code
 		}
 	}
 	copy(body[icmpHeader:], quote)

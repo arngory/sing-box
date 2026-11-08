@@ -80,7 +80,7 @@ func TestParseAndBuild(t *testing.T) {
 		netip.AddrFrom4([4]byte(exceeded[12:16])) != hop4 {
 		t.Fatalf("v4 time exceeded: % x", exceeded)
 	}
-	tooBig := errorMessage(hop4, app4, kindUnreachable, codeTooBig, 1480, echo.quote)
+	tooBig := errorMessage(hop4, app4, kindTooBig, 0, 1480, echo.quote)
 	valid(t, tooBig)
 	if tooBig[ipv4HeaderMin] != icmpv4Unreachable || tooBig[ipv4HeaderMin+1] != icmpv4FragNeeded ||
 		binary.BigEndian.Uint16(tooBig[ipv4HeaderMin+6:]) != 1480 {
@@ -98,10 +98,21 @@ func TestParseAndBuild(t *testing.T) {
 	if reply[ipv6Header] != icmpv6EchoReply {
 		t.Fatalf("v6 reply: % x", reply)
 	}
-	tooBig = errorMessage(hop6, app6, kindUnreachable, codeTooBig, 1500, echo.quote)
+	tooBig = errorMessage(hop6, app6, kindTooBig, 0, 1500, echo.quote)
 	valid(t, tooBig)
 	if tooBig[ipv6Header] != icmpv6PacketTooBig || binary.BigEndian.Uint32(tooBig[ipv6Header+4:]) != 1500 {
 		t.Fatalf("v6 packet too big: % x", tooBig)
+	}
+	// destination unreachable keeps its code: IPv6 4 is port unreachable, not too big
+	portUnreachable := errorMessage(hop6, app6, kindUnreachable, 4, 0, echo.quote)
+	valid(t, portUnreachable)
+	if portUnreachable[ipv6Header] != icmpv6Unreachable || portUnreachable[ipv6Header+1] != 4 {
+		t.Fatalf("v6 port unreachable: % x", portUnreachable)
+	}
+	hostUnreachable := errorMessage(hop4, app4, kindUnreachable, 1, 0, request(t, app4, dst4, 64, 1, 1, "x")[:28])
+	valid(t, hostUnreachable)
+	if hostUnreachable[ipv4HeaderMin] != icmpv4Unreachable || hostUnreachable[ipv4HeaderMin+1] != 1 {
+		t.Fatalf("v4 host unreachable: % x", hostUnreachable)
 	}
 	prohibited := errorMessage(hop6, app6, kindUnreachable, 1, 0, echo.quote)
 	valid(t, prohibited)
@@ -212,6 +223,27 @@ func TestPortThroughTheNode(t *testing.T) {
 	if exceeded[ipv4HeaderMin] != icmpv4TimeExceeded || netip.AddrFrom4([4]byte(exceeded[12:16])) != hop ||
 		!bytes.Equal(exceeded[ipv4HeaderMin+icmpHeader:], probe[:ipv4HeaderMin+icmpHeader]) {
 		t.Fatalf("time exceeded % x", exceeded)
+	}
+	// too big from a router behind the node: fragmentation needed with its MTU
+	port.WritePackets([][]byte{request(t, app, dst, 64, 7, 3, "big")})
+	frame = make([]byte, len(clientFrame(echoRequest{destination: dst, payload: []byte("big")})))
+	if _, err := io.ReadFull(node, frame); err != nil {
+		t.Fatal(err)
+	}
+	answer(kindTooBig, 0, hop, 3, []byte{0x05, 0x78})
+	fragNeeded := back.wait(t)
+	valid(t, fragNeeded)
+	if fragNeeded[ipv4HeaderMin] != icmpv4Unreachable || fragNeeded[ipv4HeaderMin+1] != icmpv4FragNeeded ||
+		binary.BigEndian.Uint16(fragNeeded[ipv4HeaderMin+6:]) != 1400 {
+		t.Fatalf("fragmentation needed % x", fragNeeded)
+	}
+	// an echo longer than the node carries: too big at 1480 from the destination, answered here, nothing on the stream
+	port.WritePackets([][]byte{request(t, app, dst, 64, 7, 4, string(make([]byte, maxPayload+1)))})
+	long := back.wait(t)
+	valid(t, long)
+	if long[ipv4HeaderMin+1] != icmpv4FragNeeded || binary.BigEndian.Uint16(long[ipv4HeaderMin+6:]) != maxPacket4 ||
+		netip.AddrFrom4([4]byte(long[12:16])) != dst {
+		t.Fatalf("too big for the stream % x", long)
 	}
 	// an answer to nothing asked is not passed on
 	answer(kindEcho, 0, dst, 99, nil)
