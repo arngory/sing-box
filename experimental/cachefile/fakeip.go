@@ -1,6 +1,7 @@
 package cachefile
 
 import (
+	"errors"
 	"net/netip"
 	"os"
 	"time"
@@ -32,10 +33,8 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
 		if len(metadataBinary) == 0 {
 			return os.ErrInvalid
 		}
-		err := bucket.Delete(keyMetadata)
-		if err != nil {
-			return err
-		}
+		// neko: kept, not deleted on read: FakeIPStoreAsyncWithMetadata writes it in the transaction of each address,
+		// so it never lags what the file holds, an abrupt end of the core included
 		return metadata.UnmarshalBinary(metadataBinary)
 	})
 	if err != nil {
@@ -78,34 +77,112 @@ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
 
 func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
 	return c.batch(func(tx *bbolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
-		if err != nil {
-			return err
-		}
-		oldDomain := bucket.Get(address.AsSlice())
-		err = bucket.Put(address.AsSlice(), []byte(domain))
-		if err != nil {
-			return err
-		}
-		if address.Is4() {
-			bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain4)
-		} else {
-			bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain6)
-		}
-		if err != nil {
-			return err
-		}
-		if oldDomain != nil {
-			if err := bucket.Delete(oldDomain); err != nil {
-				return err
-			}
-		}
-		return bucket.Put([]byte(domain), address.AsSlice())
+		return putFakeIP(tx, address, domain)
 	})
 }
 
-func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger) {
+func putFakeIP(tx *bbolt.Tx, address netip.Addr, domain string) error {
+	bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
+	if err != nil {
+		return err
+	}
+	oldDomain := bucket.Get(address.AsSlice())
+	err = bucket.Put(address.AsSlice(), []byte(domain))
+	if err != nil {
+		return err
+	}
+	if address.Is4() {
+		bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain4)
+	} else {
+		bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain6)
+	}
+	if err != nil {
+		return err
+	}
+	if oldDomain != nil {
+		if err := bucket.Delete(oldDomain); err != nil {
+			return err
+		}
+	}
+	return bucket.Put([]byte(domain), address.AsSlice())
+}
+
+// neko: an address given and the store's range pointer after it, written by one writer in the order given
+type fakeIPWrite struct {
+	address  netip.Addr
+	domain   string
+	metadata *adapter.FakeIPMetadata
+}
+
+// FakeIPStoreAsyncWithMetadata (neko) keeps the address visible to lookups at once and writes it in the background
+// with metadata in one transaction, in the order the addresses were given: whatever ends the core, the file never
+// holds an address past the range pointer it holds, so the next core does not give that address to another name.
+func (c *CacheFile) FakeIPStoreAsyncWithMetadata(address netip.Addr, domain string, metadata *adapter.FakeIPMetadata, logger logger.Logger) {
 	c.saveFakeIPAccess.Lock()
+	c.pendFakeIP(address, domain)
+	if c.saveFakeIPClosing {
+		// the database is closing: kept for lookups until then, not written
+		c.saveFakeIPAccess.Unlock()
+		return
+	}
+	c.saveFakeIPQueue = append(c.saveFakeIPQueue, fakeIPWrite{address, domain, metadata})
+	start := !c.saveFakeIPWriting
+	if start {
+		c.saveFakeIPWriting = true
+		c.saveFakeIPWait.Add(1)
+	}
+	c.saveFakeIPAccess.Unlock()
+	if start {
+		go c.writeFakeIP(logger)
+	}
+}
+
+// writeFakeIP writes what is queued, all of it in one transaction, until the queue is empty.
+func (c *CacheFile) writeFakeIP(logger logger.Logger) {
+	defer c.saveFakeIPWait.Done()
+	for {
+		c.saveFakeIPAccess.Lock()
+		queue := c.saveFakeIPQueue
+		c.saveFakeIPQueue = nil
+		if len(queue) == 0 {
+			c.saveFakeIPWriting = false
+			c.saveFakeIPAccess.Unlock()
+			return
+		}
+		c.saveFakeIPAccess.Unlock()
+		err := c.update(func(tx *bbolt.Tx) error {
+			var metadata *adapter.FakeIPMetadata
+			for _, w := range queue {
+				if err := putFakeIP(tx, w.address, w.domain); err != nil {
+					return err
+				}
+				if w.metadata != nil {
+					metadata = w.metadata
+				}
+			}
+			if metadata == nil {
+				return nil
+			}
+			metadataBinary, err := metadata.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			return tx.Bucket(bucketFakeIP).Put(keyMetadata, metadataBinary)
+		})
+		if err != nil {
+			logger.Warn("save FakeIP cache: ", err)
+		}
+		c.saveFakeIPAccess.Lock()
+		for _, w := range queue {
+			c.unpendFakeIP(w.address, w.domain)
+		}
+		c.saveFakeIPAccess.Unlock()
+	}
+}
+
+// pendFakeIP and unpendFakeIP keep an address being written visible to lookups; under saveFakeIPAccess. An entry
+// a later address or name replaced stays.
+func (c *CacheFile) pendFakeIP(address netip.Addr, domain string) {
 	if oldDomain, loaded := c.saveDomain[address]; loaded {
 		if address.Is4() {
 			delete(c.saveAddress4, oldDomain)
@@ -119,30 +196,72 @@ func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger l
 	} else {
 		c.saveAddress6[domain] = address
 	}
-	closing := c.saveFakeIPClosing
-	if !closing {
-		c.saveFakeIPWait.Add(1)
-	}
-	c.saveFakeIPAccess.Unlock()
-	if closing {
-		// the database is closing: kept for lookups until then, not written
-		return
-	}
-	go func() {
-		defer c.saveFakeIPWait.Done()
-		err := c.FakeIPStore(address, domain)
-		if err != nil {
-			logger.Warn("save FakeIP cache: ", err)
-		}
-		c.saveFakeIPAccess.Lock()
+}
+
+func (c *CacheFile) unpendFakeIP(address netip.Addr, domain string) {
+	if c.saveDomain[address] == domain {
 		delete(c.saveDomain, address)
-		if address.Is4() {
+	}
+	if address.Is4() {
+		if c.saveAddress4[domain] == address {
 			delete(c.saveAddress4, domain)
-		} else {
-			delete(c.saveAddress6, domain)
 		}
-		c.saveFakeIPAccess.Unlock()
-	}()
+	} else if c.saveAddress6[domain] == address {
+		delete(c.saveAddress6, domain)
+	}
+}
+
+// ClearFakeIP (neko) removes FakeDNS's addresses and the names they stand for from the cache file at path, which no
+// core may have open: they are kept for a restart of the core under a running VPN, and are a record of the names
+// asked. bbolt leaves a deleted bucket's bytes in its free pages, so what remains (rule-sets, selections) is copied
+// to a new file that replaces this one. No file, or no FakeDNS in it: nothing to do.
+func ClearFakeIP(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	db, err := bbolt.Open(path, 0o666, &bbolt.Options{Timeout: time.Second})
+	if err != nil {
+		return err
+	}
+	found := false
+	err = db.Update(func(tx *bbolt.Tx) error {
+		for _, bucketName := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
+			if tx.Bucket(bucketName) == nil {
+				continue
+			}
+			found = true
+			if err := tx.DeleteBucket(bucketName); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil || !found {
+		db.Close()
+		return err
+	}
+	compacted := path + ".compact"
+	_ = os.Remove(compacted)
+	dst, err := bbolt.Open(compacted, 0o666, &bbolt.Options{Timeout: time.Second})
+	if err != nil {
+		db.Close()
+		return err
+	}
+	err = bbolt.Compact(dst, db, 0)
+	db.Close()
+	if closeErr := dst.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(compacted)
+		return err
+	}
+	return os.Rename(compacted, path)
+}
+
+func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger) {
+	// neko: the ordered writer, as FakeIPStoreAsyncWithMetadata
+	c.FakeIPStoreAsyncWithMetadata(address, domain, nil, logger)
 }
 
 func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {

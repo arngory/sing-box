@@ -63,6 +63,8 @@ type CacheFile struct {
 	saveAddress6       map[string]netip.Addr
 	saveFakeIPWait     sync.WaitGroup // neko: the FakeIP writes under way, waited for before the database closes
 	saveFakeIPClosing  bool           // neko: under saveFakeIPAccess; no write starts once the wait has
+	saveFakeIPQueue    []fakeIPWrite  // neko: under saveFakeIPAccess; the writes in the order given
+	saveFakeIPWriting  bool           // neko: under saveFakeIPAccess; writeFakeIP runs
 	saveRDRCAccess     sync.RWMutex
 	saveRDRC           map[saveCacheKey]bool
 	saveDNSCacheAccess sync.RWMutex

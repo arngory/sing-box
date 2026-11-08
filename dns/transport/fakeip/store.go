@@ -139,16 +139,28 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
 		s.inet6Current = nextAddress
 		address = nextAddress
 	}
-	// neko: written in the background, where the cache file keeps it visible to lookups until it is: under this lock
-	// a write waited for bbolt's batch delay and its fsync on every new name, and a page's names one after another
-	s.storage.FakeIPStoreAsync(address, domain, s.logger)
-	s.storage.FakeIPSaveMetadataAsync(&adapter.FakeIPMetadata{
+	metadata := &adapter.FakeIPMetadata{
 		Inet4Range:   s.inet4Range,
 		Inet6Range:   s.inet6Range,
 		Inet4Current: s.inet4Current,
 		Inet6Current: s.inet6Current,
-	})
+	}
+	// neko: written in the background, where the cache file keeps it visible to lookups until it is: under this lock
+	// a write waited for bbolt's batch delay and its fsync on every new name, and a page's names one after another.
+	// The cache file writes the range pointer with the address, in order: an abrupt end of the core leaves no address
+	// past it, for the next core to give to another name
+	if storage, ok := s.storage.(metadataStorage); ok {
+		storage.FakeIPStoreAsyncWithMetadata(address, domain, metadata, s.logger)
+	} else {
+		s.storage.FakeIPStoreAsync(address, domain, s.logger)
+		s.storage.FakeIPSaveMetadataAsync(metadata)
+	}
 	return address, nil
+}
+
+// metadataStorage (neko) writes the range pointer with each address (the cache file)
+type metadataStorage interface {
+	FakeIPStoreAsyncWithMetadata(address netip.Addr, domain string, metadata *adapter.FakeIPMetadata, logger logger.Logger)
 }
 
 func (s *Store) Lookup(address netip.Addr) (string, bool) {

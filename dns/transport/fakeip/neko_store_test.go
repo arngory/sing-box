@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,8 +19,14 @@ import (
 	"github.com/sagernet/sing/service"
 )
 
-// a store over the cache file at path, as a core starts it; close stops both as the core does (the store first)
+// a store over the cache file at path, as a core starts it; close stops both as the core does (the store first);
+// crash closes the file only, once its writes are in, as a core ended without the store's own save
 func nekoStore(t *testing.T, path string) (*fakeip.Store, func()) {
+	store, stop, _ := nekoStoreCrash(t, path)
+	return store, stop
+}
+
+func nekoStoreCrash(t *testing.T, path string) (*fakeip.Store, func(), func()) {
 	t.Helper()
 	cacheFile := cachefile.New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
 	ctx := service.ContextWith[adapter.CacheFile](context.Background(), cacheFile)
@@ -31,9 +39,11 @@ func nekoStore(t *testing.T, path string) (*fakeip.Store, func()) {
 		t.Fatal(err)
 	}
 	return store, func() {
-		store.Close()
-		scope.Close()
-	}
+			store.Close()
+			scope.Close()
+		}, func() {
+			scope.Close()
+		}
 }
 
 // New names are given at once (the write goes on in the background), looked up before the write lands, and found
@@ -74,5 +84,62 @@ func TestNekoFakeIPStoredAcrossRestart(t *testing.T) {
 	fresh, _ := store.Create("fresh.example", false)
 	if _, taken := given[fresh]; taken {
 		t.Fatalf("fresh.example got %s, an address the last core gave", fresh)
+	}
+}
+
+// The core ended without the store's own save (killed, OOM) right after new names: the range pointer went to the
+// file with each address, so the next core gives none of those addresses to another name.
+func TestNekoFakeIPAbruptEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, _, crash := nekoStoreCrash(t, path)
+	given := map[netip.Addr]string{}
+	for i := range 50 {
+		domain := fmt.Sprintf("n%d.example", i)
+		address, err := store.Create(domain, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		given[address] = domain
+	}
+	crash()
+
+	store, stop := nekoStore(t, path)
+	defer stop()
+	for address, domain := range given {
+		if got, ok := store.Lookup(address); !ok || got != domain {
+			t.Fatalf("%s after an abrupt end: %q %v, want %s", address, got, ok, domain)
+		}
+	}
+	for i := range 50 {
+		fresh, _ := store.Create(fmt.Sprintf("fresh%d.example", i), false)
+		if old, taken := given[fresh]; taken {
+			t.Fatalf("fresh%d.example got %s, %s's address before the abrupt end", i, fresh, old)
+		}
+	}
+}
+
+// ClearFakeIP: the names asked leave the file when the VPN stops; a core started on it begins the range anew.
+func TestNekoFakeIPCleared(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	if err := cachefile.ClearFakeIP(path); err != nil {
+		t.Fatalf("no file yet: %v", err)
+	}
+	store, stop := nekoStore(t, path)
+	address, _ := store.Create("secret.example", false)
+	stop()
+	if err := cachefile.ClearFakeIP(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret.example") {
+		t.Fatal("the name is still in the file's bytes")
+	}
+	store, stop = nekoStore(t, path)
+	defer stop()
+	if got, ok := store.Lookup(address); ok {
+		t.Fatalf("%s still stands for %q", address, got)
 	}
 }
