@@ -123,3 +123,80 @@ func nekoSocksReply(t *testing.T, port int, target *net.TCPAddr) (byte, net.Conn
 	conn.SetDeadline(time.Time{})
 	return reply[3], conn
 }
+
+// neko: await_dial gives way when no answer has begun in 4 s (a server that answers only with the destination's
+// first bytes, as niko-server before v0.14.1 under links that still say niko-ack=1, or a slow dial): the dial
+// returns, the app's data goes, the answer is read with the destination's. Here the server's own dial takes 6 s (a
+// SOCKS proxy that answers late).
+func TestNekoHysteria2AwaitDialGivesWay(t *testing.T) {
+	echo := nekoServe(t, func(conn net.Conn) {
+		buf := make([]byte, 64)
+		n, _ := conn.Read(buf)
+		conn.Write(append([]byte("echo "), buf[:n]...))
+	})
+	slow, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { slow.Close() })
+	go func() {
+		for {
+			conn, err := slow.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				greeting := make([]byte, 3)
+				if _, err := io.ReadFull(conn, greeting); err != nil {
+					return
+				}
+				conn.Write([]byte{5, 0})
+				request := make([]byte, 10)
+				if _, err := io.ReadFull(conn, request); err != nil {
+					return
+				}
+				time.Sleep(6 * time.Second)
+				target, err := net.Dial("tcp", net.JoinHostPort(net.IP(request[4:8]).String(), fmt.Sprint(binary.BigEndian.Uint16(request[8:10]))))
+				if err != nil {
+					conn.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0})
+					return
+				}
+				defer target.Close()
+				conn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
+				go io.Copy(target, conn)
+				io.Copy(conn, target)
+			}()
+		}
+	}()
+
+	certificate, key := nekoSelfSigned(t)
+	serverPort, socksPort := nekoFreePort(t, "udp"), nekoFreePort(t, "tcp")
+	nekoStartBox(t, fmt.Sprintf(`{"log":{"level":"error"},
+		"inbounds":[{"type":"hysteria2","listen":"127.0.0.1","listen_port":%d,"users":[{"password":"neko"}],
+			"tls":{"enabled":true,"certificate":%s,"key":%s}}],
+		"outbounds":[{"type":"socks","server":"127.0.0.1","server_port":%d}]}`,
+		serverPort, nekoLines(certificate), nekoLines(key), slow.Addr().(*net.TCPAddr).Port))
+	nekoStartBox(t, fmt.Sprintf(`{"log":{"level":"error"},
+		"inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":%d}],
+		"outbounds":[{"type":"hysteria2","server":"127.0.0.1","server_port":%d,"password":"neko","await_dial":true,
+			"tls":{"enabled":true,"server_name":"localhost","insecure":true}}]}`, socksPort, serverPort))
+
+	start := time.Now()
+	reply, conn := nekoSocksReply(t, socksPort, echo)
+	elapsed := time.Since(start)
+	if reply != 0 {
+		t.Fatalf("no answer in time: the dial must give way, reply %d", reply)
+	}
+	defer conn.Close()
+	if elapsed < 3*time.Second || elapsed > 5500*time.Millisecond {
+		t.Fatalf("the dial gave way after %v, want about 4 s (before the server's 6 s)", elapsed)
+	}
+	conn.Write([]byte("ping"))
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	got := make([]byte, 64)
+	n, err := io.ReadAtLeast(conn, got, len("echo ping"))
+	if string(got[:n]) != "echo ping" {
+		t.Fatalf("after giving way: %q %v", got[:n], err)
+	}
+}

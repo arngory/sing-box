@@ -1,7 +1,9 @@
 package hysteria2
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -879,6 +881,12 @@ func (c *clientConn) Write(p []byte) (n int, err error) {
 // dial timeout (niko-server: 10 s), so its "timeout" arrives rather than ours
 const awaitDialTimeout = 15 * time.Second
 
+// awaitDialFallback: no answer begun by then, the conn goes as without AwaitDial (its answer read with the first
+// data). A server that answers only with the destination's first bytes (niko-server before v0.14.1: a node rolled
+// back under links that still say niko-ack=1) would otherwise hold every connection to the limit; a slow destination
+// is let through too, without its honest refusal.
+const awaitDialFallback = 4 * time.Second
+
 // awaitDial sends the request now, with no payload, and reads the server's answer to it (AwaitDial).
 func (c *clientConn) awaitDial(ctx context.Context) error {
 	buffer := protocol.WriteTCPRequest(c.destination.String(), nil)
@@ -888,23 +896,42 @@ func (c *clientConn) awaitDial(ctx context.Context) error {
 		return qtls.WrapError(err)
 	}
 	c.requestWritten = true
-	deadline, ok := ctx.Deadline()
-	if !ok || time.Until(deadline) > awaitDialTimeout {
-		deadline = time.Now().Add(awaitDialTimeout)
+	limit, ok := ctx.Deadline()
+	if !ok || time.Until(limit) > awaitDialTimeout {
+		limit = time.Now().Add(awaitDialTimeout)
 	}
-	_ = c.Stream.SetReadDeadline(deadline)
+	fallback := time.Now().Add(awaitDialFallback)
+	if fallback.After(limit) {
+		fallback = limit
+	}
+	_ = c.Stream.SetReadDeadline(fallback)
 	// a canceled dial stops the read at once
 	stop := context.AfterFunc(ctx, func() { _ = c.Stream.SetReadDeadline(time.Unix(1, 0)) })
-	status, errorMessage, err := protocol.ReadTCPResponse(c.Stream)
+	// the answer's first byte, then the rest: a wait cut before the first byte leaves the stream as it was
+	var status [1]byte
+	_, err = io.ReadFull(c.Stream, status[:])
+	if err != nil {
+		if !stop() {
+			// the cancel may set its deadline after any reset here: the conn is not handed out
+			return E.Errors(ctx.Err(), err)
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() && fallback.Before(limit) {
+			_ = c.Stream.SetReadDeadline(time.Time{})
+			return nil
+		}
+		return qtls.WrapError(err)
+	}
+	_ = c.Stream.SetReadDeadline(limit)
+	status0, errorMessage, err := protocol.ReadTCPResponse(io.MultiReader(bytes.NewReader(status[:]), c.Stream))
 	if !stop() {
-		// the cancel may set its deadline after any reset here: the conn is not handed out
 		return E.Errors(ctx.Err(), err)
 	}
 	_ = c.Stream.SetReadDeadline(time.Time{})
 	if err != nil {
 		return qtls.WrapError(err)
 	}
-	if !status {
+	if !status0 {
 		return E.New("remote error: ", errorMessage)
 	}
 	c.responseRead = true
