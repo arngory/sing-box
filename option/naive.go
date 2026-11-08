@@ -27,4 +27,7 @@ type NaiveOutboundOptions struct {
 	QUICCongestionControl    string                   `json:"quic_congestion_control,omitempty" enum:"bbr,bbr2,cubic,reno"`
 	QUICSessionReceiveWindow *byteformats.MemoryBytes `json:"quic_session_receive_window,omitempty"`
 	OutboundTLSOptionsContainer
+	// neko: ping and traceroute through the node (raycontrol icmp-v1, icmp=1 in its links): the TUN hands the app's
+	// echo requests to the outbound, which carries them on a stream to icmp.niko.arpa:0
+	ICMP bool `json:"icmp,omitempty"`
 }

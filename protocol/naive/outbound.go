@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/pem"
 	"net"
+	"net/netip"
 	"strings"
 
 	"github.com/sagernet/cronet-go"
@@ -13,10 +14,12 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/nikoicmp"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -41,7 +44,11 @@ type Outbound struct {
 	logger    logger.ContextLogger
 	client    *cronet.NaiveClient
 	uotClient *uot.Client
+	// neko: icmp-v1, nil without the icmp option
+	icmp *nikoicmp.Port
 }
+
+var _ adapter.FlowOutbound = (*Outbound)(nil)
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.NaiveOutboundOptions) (adapter.Outbound, error) {
 	if options.TLS == nil || !options.TLS.Enabled {
@@ -214,14 +221,43 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	} else {
 		networks = []string{N.NetworkTCP}
 	}
-	return &Outbound{
+	if options.ICMP {
+		networks = append(networks, N.NetworkICMP)
+	}
+	naiveOutbound := &Outbound{
 		Adapter:   outbound.NewAdapterWithDialerOptions(C.TypeNaive, tag, networks, options.DialerOptions),
 		ctx:       ctx,
 		logger:    logger,
 		client:    client,
 		uotClient: uotClient,
-	}, nil
+	}
+	if options.ICMP {
+		naiveOutbound.icmp = nikoicmp.NewPort(ctx, logger, func(ctx context.Context) (net.Conn, error) {
+			return client.DialEarly(ctx, M.Socksaddr{Fqdn: nikoicmp.Name})
+		})
+	}
+	return naiveOutbound, nil
 }
+
+// neko: ICMP echo through the node (icmp-v1): a flow of the TUN's, while the node takes it; else the TUN answers
+// itself, as without it
+
+func (h *Outbound) PreMatchFlow(network string, _ netip.Addr) adapter.PreMatchAction {
+	if network == N.NetworkICMP && h.icmp != nil && h.icmp.Available() {
+		return adapter.PreMatchFlow
+	}
+	return adapter.PreMatchContinue
+}
+
+func (h *Outbound) PortAddresses() (netip.Addr, netip.Addr) { return h.icmp.PortAddresses() }
+
+func (h *Outbound) PortMTU() uint32 { return h.icmp.PortMTU() }
+
+func (h *Outbound) AttachReturn(returnPath tun.Return) error { return h.icmp.AttachReturn(returnPath) }
+
+func (h *Outbound) DetachReturn(returnPath tun.Return) error { return h.icmp.DetachReturn(returnPath) }
+
+func (h *Outbound) WritePackets(packets [][]byte) error { return h.icmp.WritePackets(packets) }
 
 func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
@@ -232,6 +268,9 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		return err
 	}
 	scope.Add(h.client.Close)
+	if h.icmp != nil {
+		scope.Add(h.icmp.Close)
+	}
 	h.logger.Info("NaiveProxy started, version: ", h.client.Engine().Version())
 	return nil
 }
