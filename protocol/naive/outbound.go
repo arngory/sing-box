@@ -242,8 +242,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 // neko: ICMP echo through the node (icmp-v1): a flow of the TUN's, while the node takes it; else the TUN answers
 // itself, as without it
 
-func (h *Outbound) PreMatchFlow(network string, _ netip.Addr) adapter.PreMatchAction {
-	if network == N.NetworkICMP && h.icmp != nil && h.icmp.Available() {
+func (h *Outbound) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
+	// a name (FakeDNS) is no address to ping: the router would refuse the flow without one resolved here, so the
+	// TUN answers it, as without icmp
+	if network == N.NetworkICMP && destination.IsValid() && h.icmp != nil && h.icmp.Available() {
 		return adapter.PreMatchFlow
 	}
 	return adapter.PreMatchContinue
