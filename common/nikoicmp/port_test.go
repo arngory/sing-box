@@ -237,8 +237,19 @@ func TestPortThroughTheNode(t *testing.T) {
 		binary.BigEndian.Uint16(fragNeeded[ipv4HeaderMin+6:]) != 1400 {
 		t.Fatalf("fragmentation needed % x", fragNeeded)
 	}
-	// an echo longer than the node carries: too big at 1480 from the destination, answered here, nothing on the stream
+	// an echo longer than the node carries, without DF: unanswered, never "fragmentation needed and DF set"
 	port.WritePackets([][]byte{request(t, app, dst, 64, 7, 4, string(make([]byte, maxPayload+1)))})
+	select {
+	case <-back.got:
+		t.Fatal("a long echo without DF was answered with too big")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// with DF: too big at 1480 from the destination, answered here, nothing on the stream
+	withDF := request(t, app, dst, 64, 7, 4, string(make([]byte, maxPayload+1)))
+	withDF[6] |= 0x40
+	binary.BigEndian.PutUint16(withDF[10:12], 0)
+	binary.BigEndian.PutUint16(withDF[10:12], checksum(withDF[:ipv4HeaderMin], 0))
+	port.WritePackets([][]byte{withDF})
 	long := back.wait(t)
 	valid(t, long)
 	if long[ipv4HeaderMin+1] != icmpv4FragNeeded || binary.BigEndian.Uint16(long[ipv4HeaderMin+6:]) != maxPacket4 ||

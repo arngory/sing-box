@@ -11,7 +11,10 @@ import (
 type echoRequest struct {
 	source, destination netip.Addr
 	// the IP TTL or hop limit the app sent with: traceroute's probe
-	ttl     uint8
+	ttl uint8
+	// IPv4 don't fragment: only such a packet may be answered with fragmentation needed (IPv6 never fragments on
+	// the way, so it is always true there)
+	df      bool
 	id, seq uint16
 	payload []byte
 	// the IP header and the first 8 bytes of ICMP: what an ICMP error to the app quotes
@@ -61,6 +64,7 @@ func parseEcho(packet []byte) (echoRequest, bool) {
 			source:      netip.AddrFrom4([4]byte(packet[12:16])),
 			destination: netip.AddrFrom4([4]byte(packet[16:20])),
 			ttl:         packet[8],
+			df:          packet[6]&0x40 != 0,
 			id:          binary.BigEndian.Uint16(icmp[4:6]),
 			seq:         binary.BigEndian.Uint16(icmp[6:8]),
 			payload:     icmp[icmpHeader:],
@@ -82,6 +86,7 @@ func parseEcho(packet []byte) (echoRequest, bool) {
 			source:      netip.AddrFrom16([16]byte(packet[8:24])),
 			destination: netip.AddrFrom16([16]byte(packet[24:40])),
 			ttl:         packet[7],
+			df:          true,
 			id:          binary.BigEndian.Uint16(icmp[4:6]),
 			seq:         binary.BigEndian.Uint16(icmp[6:8]),
 			payload:     icmp[icmpHeader:],

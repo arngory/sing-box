@@ -117,7 +117,11 @@ func (p *Port) WritePackets(packets [][]byte) error {
 		}
 		if len(echo.payload) > maxPayload {
 			// the node answers a longer echo with too big at its own largest packet, whatever the path: answered here,
-			// without its data on the stream (ping -s 1473 -M do finds 1480)
+			// without its data on the stream (ping -s 1473 -M do finds 1480). An IPv4 echo without DF may not be
+			// answered so: it goes unanswered, as on a path that drops it
+			if !echo.df {
+				continue
+			}
 			mtu := uint16(maxPacket4)
 			if echo.destination.Is6() {
 				mtu = maxPacket6
