@@ -62,6 +62,8 @@ type pendingEcho struct {
 	source, destination netip.Addr
 	quote               []byte
 	at                  time.Time
+	// the app's IPv4 echo said don't fragment (always for IPv6)
+	df bool
 }
 
 func NewPort(ctx context.Context, logger logger.ContextLogger, dial Dialer) *Port {
@@ -173,7 +175,7 @@ func (p *Port) send(echo echoRequest) {
 	}
 	if len(p.pending) < pendingMax {
 		p.pending[pendingKey{echo.destination.Is6(), echo.id, echo.seq}] = pendingEcho{
-			source: echo.source, destination: echo.destination, quote: echo.quote, at: now,
+			source: echo.source, destination: echo.destination, quote: echo.quote, at: now, df: echo.df,
 		}
 	}
 	p.access.Unlock()
@@ -276,7 +278,10 @@ func (p *Port) answer(frame serverFrame) {
 	case kindUnreachable:
 		packet = errorMessage(frame.from, echo.source, kindUnreachable, frame.code, 0, echo.quote)
 	case kindTooBig:
-		if len(frame.payload) != 2 {
+		// the node never fragments: it answers too big for an echo larger than its path whatever the app asked; to an
+		// IPv4 echo without DF "fragmentation needed and DF set" would be false, it goes unanswered as on a path that
+		// drops it
+		if len(frame.payload) != 2 || !echo.df {
 			return
 		}
 		packet = errorMessage(frame.from, echo.source, kindTooBig, 0, binary.BigEndian.Uint16(frame.payload), echo.quote)

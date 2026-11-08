@@ -224,8 +224,24 @@ func TestPortThroughTheNode(t *testing.T) {
 		!bytes.Equal(exceeded[ipv4HeaderMin+icmpHeader:], probe[:ipv4HeaderMin+icmpHeader]) {
 		t.Fatalf("time exceeded % x", exceeded)
 	}
-	// too big from a router behind the node: fragmentation needed with its MTU
-	port.WritePackets([][]byte{request(t, app, dst, 64, 7, 3, "big")})
+	// too big for an echo without DF: not passed on as fragmentation needed
+	port.WritePackets([][]byte{request(t, app, dst, 64, 7, 5, "nodf")})
+	frame = make([]byte, len(clientFrame(echoRequest{destination: dst, payload: []byte("nodf")})))
+	if _, err := io.ReadFull(node, frame); err != nil {
+		t.Fatal(err)
+	}
+	answer(kindTooBig, 0, hop, 5, []byte{0x05, 0x78})
+	select {
+	case <-back.got:
+		t.Fatal("too big passed on for an echo without DF")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// too big from a router behind the node for an echo with DF: fragmentation needed with its MTU
+	big := request(t, app, dst, 64, 7, 3, "big")
+	big[6] |= 0x40
+	binary.BigEndian.PutUint16(big[10:12], 0)
+	binary.BigEndian.PutUint16(big[10:12], checksum(big[:ipv4HeaderMin], 0))
+	port.WritePackets([][]byte{big})
 	frame = make([]byte, len(clientFrame(echoRequest{destination: dst, payload: []byte("big")})))
 	if _, err := io.ReadFull(node, frame); err != nil {
 		t.Fatal(err)
