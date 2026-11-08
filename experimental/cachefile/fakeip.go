@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/sagernet/bbolt"
@@ -243,6 +244,10 @@ type corruptedError struct{ reason any }
 func (e corruptedError) Error() string { return fmt.Sprint("database corrupted: ", e.reason) }
 
 func clearFakeIP(path, compacted string) (err error) {
+	// bbolt reads pages straight from its mapping and never checks a page id against the file's size: a garbled id
+	// faults (SIGBUS past the file's end, SIGSEGV past the mapping), which ends the process unless this goroutine
+	// turns faults into panics, as bbolt does for its freelist and Check (restored after the recover below)
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 	var db, dst *bbolt.DB
 	defer func() {
 		if r := recover(); r != nil {

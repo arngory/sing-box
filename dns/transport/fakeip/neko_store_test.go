@@ -203,3 +203,92 @@ func nekoFreelistPage(raw []byte, page int) int {
 	}
 	return freelist
 }
+
+// A cache file cut short (a crash mid-write, a full disk): bbolt reads pages past its end, inside the mapping, and
+// the read faults (SIGBUS); ClearFakeIP removes the file instead of the process dying.
+func TestNekoFakeIPClearTruncated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	store, stop := nekoStore(t, path)
+	for i := range 3000 {
+		store.Create(fmt.Sprintf("name-%d.example", i), false)
+	}
+	stop()
+	whole, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := os.Getpagesize()
+	for _, pages := range []int{3, 4, 6, len(whole) / page / 2, len(whole)/page - 1} {
+		if pages < 3 || pages*page >= len(whole) {
+			continue
+		}
+		if err := os.WriteFile(path, whole[:pages*page], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := cachefile.ClearFakeIP(path); err != nil {
+			t.Logf("cut at %d pages: %v", pages, err)
+		}
+		if _, err := os.Stat(path); err == nil {
+			left, _ := os.ReadFile(path)
+			if strings.Contains(string(left), "name-7.example") {
+				t.Fatalf("cut at %d pages: the names left in the file", pages)
+			}
+		}
+	}
+}
+
+// A branch page whose child is past the file's end, inside bbolt's mapping (the file cut short after a crash; bbolt
+// maps it rounded up to a power of two and never checks a page id against its size): the read faults (SIGBUS),
+// which only SetPanicOnFault turns into a panic recover sees; ClearFakeIP removes the file.
+func TestNekoFakeIPClearFaulting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, stop := nekoStore(t, path)
+	for i := range 3000 {
+		store.Create(fmt.Sprintf("name-%d.example", i), false)
+	}
+	stop()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := os.Getpagesize()
+	pages := len(raw) / page
+	// cut after the freelist (bbolt loads it at open, under its own SetPanicOnFault) at a size the mapping exceeds
+	cut := max(nekoFreelistPage(raw, page)+1, 3)
+	for cut < pages && (cut*page)&(cut*page-1) == 0 {
+		cut++
+	}
+	if cut >= pages {
+		t.Skipf("no cut below %d pages", pages)
+	}
+	child := uint64(cut)
+	raw = raw[:cut*page]
+	pages = cut
+	branches := 0
+	for n := 2; n < pages; n++ {
+		p := raw[n*page:]
+		// page header: id (8), flags (2, branch 0x01), count (2), overflow (4); a branch element: pos (4),
+		// ksize (4), pgid (8)
+		if binary.LittleEndian.Uint64(p) != uint64(n) || binary.LittleEndian.Uint16(p[8:]) != 0x01 || binary.LittleEndian.Uint16(p[10:]) == 0 {
+			continue
+		}
+		binary.LittleEndian.PutUint64(p[16+8:], child)
+		branches++
+	}
+	if branches == 0 {
+		t.Skipf("no branch page in %d pages", pages)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cachefile.ClearFakeIP(path); err != nil {
+		t.Fatalf("a faulting file: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		left, _ := os.ReadFile(path)
+		if strings.Contains(string(left), "name-7.example") {
+			t.Fatal("a faulting file left with the names in it")
+		}
+	}
+}
