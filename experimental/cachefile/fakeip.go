@@ -119,8 +119,17 @@ func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger l
 	} else {
 		c.saveAddress6[domain] = address
 	}
+	closing := c.saveFakeIPClosing
+	if !closing {
+		c.saveFakeIPWait.Add(1)
+	}
 	c.saveFakeIPAccess.Unlock()
+	if closing {
+		// the database is closing: kept for lookups until then, not written
+		return
+	}
 	go func() {
+		defer c.saveFakeIPWait.Done()
 		err := c.FakeIPStore(address, domain)
 		if err != nil {
 			logger.Warn("save FakeIP cache: ", err)

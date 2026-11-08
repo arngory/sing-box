@@ -139,10 +139,9 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
 		s.inet6Current = nextAddress
 		address = nextAddress
 	}
-	err := s.storage.FakeIPStore(address, domain)
-	if err != nil {
-		s.logger.Warn("save FakeIP cache: ", err)
-	}
+	// neko: written in the background, where the cache file keeps it visible to lookups until it is: under this lock
+	// a write waited for bbolt's batch delay and its fsync on every new name, and a page's names one after another
+	s.storage.FakeIPStoreAsync(address, domain, s.logger)
 	s.storage.FakeIPSaveMetadataAsync(&adapter.FakeIPMetadata{
 		Inet4Range:   s.inet4Range,
 		Inet6Range:   s.inet6Range,

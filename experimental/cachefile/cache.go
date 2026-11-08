@@ -61,6 +61,8 @@ type CacheFile struct {
 	saveDomain         map[netip.Addr]string
 	saveAddress4       map[string]netip.Addr
 	saveAddress6       map[string]netip.Addr
+	saveFakeIPWait     sync.WaitGroup // neko: the FakeIP writes under way, waited for before the database closes
+	saveFakeIPClosing  bool           // neko: under saveFakeIPAccess; no write starts once the wait has
 	saveRDRCAccess     sync.RWMutex
 	saveRDRC           map[saveCacheKey]bool
 	saveDNSCacheAccess sync.RWMutex
@@ -148,6 +150,11 @@ func (c *CacheFile) Start(stage adapter.StartStage, scope *adapter.Scope) error 
 			return err
 		}
 		scope.Add(func() error {
+			// neko: a restart of the core opens the file again and must find every address the last one gave
+			c.saveFakeIPAccess.Lock()
+			c.saveFakeIPClosing = true
+			c.saveFakeIPAccess.Unlock()
+			c.saveFakeIPWait.Wait()
 			return c.database().Close()
 		})
 	case adapter.StartStateStart:
