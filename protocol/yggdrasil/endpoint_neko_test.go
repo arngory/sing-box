@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/json"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/address"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
@@ -185,4 +188,46 @@ func TestNekoYggdrasilChromeLink(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("no link up: %+v", client.GetPeers())
+}
+
+// inbound_sources: unset takes every flow to this node's address for the route rules; set, a flow from an address
+// it does not list is dropped before its handshake (no reset), and an empty list drops every one. A flow to any
+// other address is refused as before.
+func TestNekoYggdrasilInboundSources(t *testing.T) {
+	self := netip.MustParseAddr("200:1111::1")
+	neighbour := netip.MustParseAddr("201:2222::2")
+	stranger := netip.MustParseAddr("202:3333::3")
+	verdict := func(options string, source, destination netip.Addr) tun.FlowAction {
+		t.Helper()
+		var parsed option.YggdrasilEndpointOptions
+		if err := json.Unmarshal([]byte(options), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		e := &Endpoint{address: self}
+		if parsed.InboundSources != nil {
+			e.inboundListed, e.inboundSources = true, *parsed.InboundSources
+		}
+		return e.JudgeFlow(6, netip.AddrPortFrom(source, 40000), netip.AddrPortFrom(destination, 22), nil).Action
+	}
+	for _, c := range []struct {
+		options             string
+		source, destination netip.Addr
+		want                tun.FlowAction
+	}{
+		{`{}`, stranger, self, tun.ActionAccept},
+		{`{}`, neighbour, stranger, tun.ActionReject},
+		{`{"inbound_sources": []}`, neighbour, self, tun.ActionDrop},
+		{`{"inbound_sources": ["201:2222::2/128"]}`, neighbour, self, tun.ActionAccept},
+		{`{"inbound_sources": ["201:2222::2/128"]}`, stranger, self, tun.ActionDrop},
+		{`{"inbound_sources": "201:2222::2/128"}`, neighbour, self, tun.ActionAccept},
+		{`{"inbound_sources": ["201:2222::2/128"]}`, neighbour, stranger, tun.ActionReject},
+	} {
+		if got := verdict(c.options, c.source, c.destination); got != c.want {
+			t.Errorf("%s, %s → %s: %v, want %v", c.options, c.source, c.destination, got, c.want)
+		}
+	}
+	var parsed option.YggdrasilEndpointOptions
+	if err := json.Unmarshal([]byte(`{"inbound_sources": ["201:2222::2"]}`), &parsed); err == nil {
+		t.Fatal("an address without its prefix length taken")
+	}
 }

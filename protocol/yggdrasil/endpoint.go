@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -67,6 +68,9 @@ type Endpoint struct {
 	closed    chan struct{}
 	dnsRouter adapter.DNSRouter
 	peers     []*url.URL
+	// inboundListed: only flows from inboundSources reach the stack (neko)
+	inboundListed  bool
+	inboundSources []netip.Prefix
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.YggdrasilEndpointOptions) (adapter.Endpoint, error) {
@@ -102,6 +106,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			TLSClient: tlsClient,
 		},
 		core.NodeInfoPrivacy(options.NodeInfoPrivacy),
+		core.DebugPrivacy(options.DebugPrivacy),
 	}
 	if len(options.NodeInfo) > 0 {
 		setup = append(setup, core.NodeInfo(options.NodeInfo))
@@ -143,6 +148,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		closed:    make(chan struct{}),
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
 		peers:     peers,
+	}
+	if options.InboundSources != nil {
+		ep.inboundListed = true
+		ep.inboundSources = *options.InboundSources
 	}
 	udpTimeout := time.Duration(options.UDPTimeout)
 	if udpTimeout == 0 {
@@ -332,10 +341,16 @@ func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 // tun.Handler: connections from the mesh to this node's address
 
 func (e *Endpoint) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
-	if destination.Addr() == e.address {
-		return tun.FlowVerdict{Action: tun.ActionAccept}
+	if destination.Addr() != e.address {
+		return tun.FlowVerdict{Action: tun.ActionReject}
 	}
-	return tun.FlowVerdict{Action: tun.ActionReject}
+	// from an address not listed: no answer at all, not even a reset, so a scan learns nothing of this node (neko)
+	if e.inboundListed && !slices.ContainsFunc(e.inboundSources, func(prefix netip.Prefix) bool {
+		return prefix.Contains(source.Addr())
+	}) {
+		return tun.FlowVerdict{Action: tun.ActionDrop}
+	}
+	return tun.FlowVerdict{Action: tun.ActionAccept}
 }
 
 func (e *Endpoint) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {

@@ -1,6 +1,10 @@
 package option
 
-import "github.com/sagernet/sing/common/json/badoption"
+import (
+	"net/netip"
+
+	"github.com/sagernet/sing/common/json/badoption"
+)
 
 // YggdrasilEndpointOptions joins the Yggdrasil mesh network (neko): outbound to 200::/7
 // addresses, inbound for connections to this node's address.
@@ -12,11 +16,18 @@ type YggdrasilEndpointOptions struct {
 	// peer URIs: tls://host:port, tcp://, quic://, ws://, wss://, socks://
 	Peers []string `json:"peers,omitempty"`
 	// listen URIs for incoming peering, e.g. tls://0.0.0.0:0
-	Listen            []string           `json:"listen,omitempty"`
-	AllowedPublicKeys []string           `json:"allowed_public_keys,omitempty"`
-	NodeInfo          map[string]any     `json:"node_info,omitempty"`
-	NodeInfoPrivacy   bool               `json:"node_info_privacy,omitempty"`
-	UDPTimeout        badoption.Duration `json:"udp_timeout,omitempty"`
+	Listen            []string       `json:"listen,omitempty"`
+	AllowedPublicKeys []string       `json:"allowed_public_keys,omitempty"`
+	NodeInfo          map[string]any `json:"node_info,omitempty"`
+	NodeInfoPrivacy   bool           `json:"node_info_privacy,omitempty"`
+	// DebugPrivacy leaves the mesh's remote getSelf, getPeers and getTree unanswered: a node with a session to this
+	// one does not learn its peers (neko, yggdrasil-go fork)
+	DebugPrivacy bool `json:"debug_privacy,omitempty"`
+	// InboundSources are the mesh addresses a connection to this node may come from (neko): set, a flow from any
+	// other is dropped before its handshake, with no answer; an empty list drops every one. Unset: every one is
+	// taken, for the route rules to decide
+	InboundSources *badoption.Listable[netip.Prefix] `json:"inbound_sources,omitempty"`
+	UDPTimeout     badoption.Duration                `json:"udp_timeout,omitempty"`
 	// TLSFingerprint is the ClientHello of outgoing tls:// links: "" or "chrome" (uTLS, a browser
 	// ClientHello), "go" (crypto/tls, as yggdrasil-go sends it)
 	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
