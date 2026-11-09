@@ -42,6 +42,8 @@ type Outbound struct {
 	tlsConfig       tls.Config
 	tlsDialer       tls.Dialer
 	transport       adapter.V2RayClientTransport
+	goShadowsocks   *trojan.GoShadowsocks // neko
+	goMux           *trojan.GoMuxClient   // neko
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TrojanOutboundOptions) (adapter.Outbound, error) {
@@ -63,7 +65,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			ServerAddress: options.Server,
 			Options:       common.PtrValueOrDefault(options.TLS),
 			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
-				!common.PtrValueOrDefault(options.Multiplex).Enabled,
+				!common.PtrValueOrDefault(options.Multiplex).Enabled &&
+				options.TrojanGoShadowsocks == nil && !options.TrojanGoMux, // neko
 		})
 		if err != nil {
 			return nil, err
@@ -76,6 +79,20 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, E.Cause(err, "create client transport: ", options.Transport.Type)
 		}
 	}
+	// neko: Trojan-Go extras
+	if options.TrojanGoShadowsocks != nil {
+		outbound.goShadowsocks, err = trojan.NewGoShadowsocks(options.TrojanGoShadowsocks.Method, options.TrojanGoShadowsocks.Password)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.TrojanGoMux {
+		if common.PtrValueOrDefault(options.Multiplex).Enabled {
+			return nil, E.New("trojan_go_mux and multiplex are exclusive")
+		}
+		outbound.goMux = trojan.NewGoMuxClient((*trojanDialer)(outbound).dialServer, outbound.key)
+		return outbound, nil
+	}
 	outbound.multiplexDialer, err = mux.NewClientWithOptions((*trojanDialer)(outbound), logger, common.PtrValueOrDefault(options.Multiplex))
 	if err != nil {
 		return nil, err
@@ -84,6 +101,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 }
 
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if h.goMux != nil {
+		switch N.NetworkName(network) {
+		case N.NetworkTCP:
+			h.logger.InfoContext(ctx, "outbound trojan-go mux connection to ", destination)
+		case N.NetworkUDP:
+			h.logger.InfoContext(ctx, "outbound trojan-go mux packet connection to ", destination)
+		}
+		return h.goMux.DialContext(ctx, network, destination)
+	}
 	if h.multiplexDialer == nil {
 		switch N.NetworkName(network) {
 		case N.NetworkTCP:
@@ -104,6 +130,10 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	if h.goMux != nil {
+		h.logger.InfoContext(ctx, "outbound trojan-go mux packet connection to ", destination)
+		return h.goMux.ListenPacket(ctx, destination)
+	}
 	if h.multiplexDialer == nil {
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 		return (*trojanDialer)(h).ListenPacket(ctx, destination)
@@ -114,7 +144,7 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 }
 
 func (h *Outbound) MultiplexEnabled() bool {
-	if h.multiplexDialer != nil {
+	if h.multiplexDialer != nil || h.goMux != nil {
 		return true
 	}
 	multiplexTransport, isMultiplexTransport := h.transport.(adapter.V2RayMultiplexClientTransport)
@@ -128,6 +158,9 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	if h.multiplexDialer != nil {
 		h.multiplexDialer.Reset()
 	}
+	if h.goMux != nil {
+		h.goMux.Reset()
+	}
 }
 
 func (h *Outbound) SetKeepIdleConnections(keep bool) {
@@ -138,6 +171,9 @@ func (h *Outbound) SetKeepIdleConnections(keep bool) {
 	if h.multiplexDialer != nil {
 		h.multiplexDialer.SetKeepIdleConnections(keep)
 	}
+	if h.goMux != nil {
+		h.goMux.SetKeepIdleConnections(keep)
+	}
 }
 
 func (h *Outbound) CloseIdleConnections() {
@@ -147,6 +183,9 @@ func (h *Outbound) CloseIdleConnections() {
 	}
 	if h.multiplexDialer != nil {
 		h.multiplexDialer.CloseIdleConnections()
+	}
+	if h.goMux != nil {
+		h.goMux.CloseIdleConnections()
 	}
 }
 
@@ -160,6 +199,9 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if h.multiplexDialer != nil {
 		scope.Add(h.multiplexDialer.Close)
 	}
+	if h.goMux != nil {
+		scope.Add(h.goMux.Close)
+	}
 	return nil
 }
 
@@ -169,6 +211,23 @@ func (h *trojanDialer) DialContext(ctx context.Context, network string, destinat
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
+	conn, err := h.dialServer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switch N.NetworkName(network) {
+	case N.NetworkTCP:
+		return trojan.NewClientConn(conn, h.key, destination), nil
+	case N.NetworkUDP:
+		return bufio.NewBindPacketConn(trojan.NewClientPacketConn(conn, h.key), destination), nil
+	default:
+		conn.Close()
+		return nil, E.Extend(N.ErrUnknownNetwork, network)
+	}
+}
+
+// dialServer gives the connection Trojan's request goes on: TLS, the transport, then (neko) Trojan-Go's shadowsocks layer.
+func (h *trojanDialer) dialServer(ctx context.Context) (net.Conn, error) {
 	var conn net.Conn
 	var err error
 	if h.transport != nil {
@@ -182,14 +241,10 @@ func (h *trojanDialer) DialContext(ctx context.Context, network string, destinat
 		common.Close(conn)
 		return nil, err
 	}
-	switch N.NetworkName(network) {
-	case N.NetworkTCP:
-		return trojan.NewClientConn(conn, h.key, destination), nil
-	case N.NetworkUDP:
-		return bufio.NewBindPacketConn(trojan.NewClientPacketConn(conn, h.key), destination), nil
-	default:
-		return nil, E.Extend(N.ErrUnknownNetwork, network)
+	if h.goShadowsocks != nil {
+		conn = h.goShadowsocks.Conn(conn)
 	}
+	return conn, nil
 }
 
 func (h *trojanDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

@@ -23,4 +23,14 @@ type TrojanOutboundOptions struct {
 	OutboundTLSOptionsContainer
 	Multiplex *OutboundMultiplexOptions `json:"multiplex,omitempty"`
 	Transport *V2RayTransportOptions    `json:"transport,omitempty"`
+
+	// neko: Trojan-Go extras
+	TrojanGoShadowsocks *TrojanGoShadowsocksOptions `json:"trojan_go_shadowsocks,omitempty"`
+	TrojanGoMux         bool                        `json:"trojan_go_mux,omitempty"`
+}
+
+// TrojanGoShadowsocksOptions is Trojan-Go's shadowsocks AEAD layer, under Trojan and over TLS/the transport.
+type TrojanGoShadowsocksOptions struct {
+	Method   string `json:"method,omitempty"`
+	Password string `json:"password"`
 }
