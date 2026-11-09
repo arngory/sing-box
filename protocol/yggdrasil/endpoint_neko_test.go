@@ -267,3 +267,32 @@ func TestNekoYggdrasilAdmits(t *testing.T) {
 		t.Fatal("a dialled address opened a flow")
 	}
 }
+
+// A dialled address answers while this node still talks to it, and no longer once it has been quiet for dialedFor;
+// the list holds at most dialedMax.
+func TestNekoYggdrasilDialedBounded(t *testing.T) {
+	server := netip.MustParseAddr("202:4444::4")
+	e := &Endpoint{inboundListed: true}
+	e.noteDialed(server)
+	if !e.answering(server) {
+		t.Fatal("a dialled address not answered")
+	}
+	e.dialed[server] = time.Now().Add(-dialedFor - time.Second)
+	out := make([]byte, 60)
+	out[0] = 0x60
+	copy(out[24:40], server.AsSlice())
+	e.sending(out)
+	if !e.answering(server) {
+		t.Fatal("a packet out did not renew it")
+	}
+	e.dialed[server] = time.Now().Add(-dialedFor - time.Second)
+	if e.answering(server) {
+		t.Fatal("quiet past dialedFor and still answered")
+	}
+	for i := 0; i < dialedMax+100; i++ {
+		e.noteDialed(netip.AddrFrom16([16]byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, byte(i >> 8), byte(i)}))
+	}
+	if len(e.dialed) > dialedMax {
+		t.Fatalf("%d dialled addresses held", len(e.dialed))
+	}
+}

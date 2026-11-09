@@ -73,8 +73,16 @@ type Endpoint struct {
 	// ([dialed]: netip.Addr → struct{}), never a new flow from those (neko)
 	inboundListed  bool
 	inboundSources []netip.Prefix
-	dialed         sync.Map
+	dialedAccess   sync.RWMutex
+	dialed         map[netip.Addr]time.Time
 }
+
+const (
+	// an address this node dialled: its answers come in for this long after the last packet this node sent it (a
+	// connection that runs for hours keeps it), and at most this many at once (neko)
+	dialedFor = 10 * time.Minute
+	dialedMax = 4096
+)
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.YggdrasilEndpointOptions) (adapter.Endpoint, error) {
 	privateKey, err := parsePrivateKey(options.PrivateKey)
@@ -266,6 +274,7 @@ func (e *Endpoint) pumpOut() {
 		if count == 0 {
 			continue
 		}
+		e.sending(bufs[0][:sizes[0]])
 		if _, err = e.rwc.Write(bufs[0][:sizes[0]]); err != nil {
 			select {
 			case <-e.closed:
@@ -352,9 +361,54 @@ func (e *Endpoint) noteDialed(addresses ...netip.Addr) {
 	if !e.inboundListed {
 		return
 	}
-	for _, address := range addresses {
-		e.dialed.Store(address.Unmap(), struct{}{})
+	now := time.Now()
+	e.dialedAccess.Lock()
+	defer e.dialedAccess.Unlock()
+	if e.dialed == nil {
+		e.dialed = make(map[netip.Addr]time.Time)
 	}
+	if len(e.dialed)+len(addresses) > dialedMax {
+		for address, at := range e.dialed {
+			if now.Sub(at) > dialedFor {
+				delete(e.dialed, address)
+			}
+		}
+	}
+	for _, address := range addresses {
+		if len(e.dialed) >= dialedMax {
+			break
+		}
+		e.dialed[address.Unmap()] = now
+	}
+}
+
+// answering: an address this node dialled within dialedFor.
+func (e *Endpoint) answering(address netip.Addr) bool {
+	e.dialedAccess.RLock()
+	defer e.dialedAccess.RUnlock()
+	at, ok := e.dialed[address]
+	return ok && time.Since(at) <= dialedFor
+}
+
+// sending renews a dialled address this node sends a packet to, at most once a minute: what it still talks to
+// stays answered (neko).
+func (e *Endpoint) sending(packet []byte) {
+	if !e.inboundListed || len(packet) < 40 || packet[0]>>4 != 6 {
+		return
+	}
+	destination := netip.AddrFrom16([16]byte(packet[24:40]))
+	now := time.Now()
+	e.dialedAccess.RLock()
+	at, ok := e.dialed[destination]
+	e.dialedAccess.RUnlock()
+	if !ok || now.Sub(at) < time.Minute {
+		return
+	}
+	e.dialedAccess.Lock()
+	if _, ok = e.dialed[destination]; ok {
+		e.dialed[destination] = now
+	}
+	e.dialedAccess.Unlock()
 }
 
 // listed: inbound_sources has the address.
@@ -376,8 +430,7 @@ func (e *Endpoint) admits(packet []byte) bool {
 	if e.listed(source) {
 		return true
 	}
-	_, dialed := e.dialed.Load(source)
-	return dialed
+	return e.answering(source)
 }
 
 // tun.Handler: connections from the mesh to this node's address
