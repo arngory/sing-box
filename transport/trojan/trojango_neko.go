@@ -183,6 +183,8 @@ type GoMuxClient struct {
 }
 
 type goMuxSession struct {
+	// streams being opened on it, not yet counted by the session (under the client's access)
+	opening    int
 	session    *smux.Session
 	lastActive time.Time
 }
@@ -248,12 +250,24 @@ func (c *GoMuxClient) openStream(ctx context.Context) (net.Conn, error) {
 			continue
 		}
 		sessions = append(sessions, s)
-		if picked == nil && (c.concurrency <= 0 || s.session.NumStreams() < c.concurrency) {
+		// the streams being opened on it count too: parallel dials do not all pile onto one session (neko)
+		if picked == nil && (c.concurrency <= 0 || s.session.NumStreams()+s.opening < c.concurrency) {
 			picked = s
 		}
 	}
 	c.sessions = sessions
+	if picked != nil {
+		picked.opening++
+	}
 	c.access.Unlock()
+	if picked != nil {
+		reserved := picked
+		defer func() {
+			c.access.Lock()
+			reserved.opening--
+			c.access.Unlock()
+		}()
+	}
 	fresh := picked == nil
 	if fresh {
 		var err error

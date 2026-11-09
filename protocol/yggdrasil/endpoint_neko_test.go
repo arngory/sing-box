@@ -295,4 +295,10 @@ func TestNekoYggdrasilDialedBounded(t *testing.T) {
 	if len(e.dialed) > dialedMax {
 		t.Fatalf("%d dialled addresses held", len(e.dialed))
 	}
+	// full, the newest dial is still answered (the longest quiet one went)
+	newest := netip.MustParseAddr("203:ffff::1")
+	e.noteDialed(newest)
+	if !e.answering(newest) || len(e.dialed) > dialedMax {
+		t.Fatal("a dial into a full list not answered")
+	}
 }

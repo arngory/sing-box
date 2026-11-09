@@ -229,6 +229,11 @@ func (h *Outbound) dial(ctx context.Context, network string, destination M.Socks
 	select {
 	case result := <-done:
 		if result.err != nil {
+			// a refused or unanswered handshake comes with its stream (PostDialHandshake): closed here, or it
+			// stays in the client's session for good
+			if result.conn != nil {
+				result.conn.Close()
+			}
 			return nil, E.Cause(result.err, "mieru: dial ", destination)
 		}
 		return result.conn, nil

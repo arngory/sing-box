@@ -375,10 +375,19 @@ func (e *Endpoint) noteDialed(addresses ...netip.Addr) {
 		}
 	}
 	for _, address := range addresses {
-		if len(e.dialed) >= dialedMax {
-			break
+		address = address.Unmap()
+		if _, ok := e.dialed[address]; !ok && len(e.dialed) >= dialedMax {
+			// full of addresses dialled within dialedFor: the one longest quiet goes, the new dial is answered
+			var oldest netip.Addr
+			var oldestAt time.Time
+			for a, at := range e.dialed {
+				if !oldest.IsValid() || at.Before(oldestAt) {
+					oldest, oldestAt = a, at
+				}
+			}
+			delete(e.dialed, oldest)
 		}
-		e.dialed[address.Unmap()] = now
+		e.dialed[address] = now
 	}
 }
 
