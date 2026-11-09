@@ -152,10 +152,8 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
 		peers:     peers,
 	}
-	if options.InboundSources != nil {
-		ep.inboundListed = true
-		ep.inboundSources = *options.InboundSources
-	}
+	ep.inboundListed = options.InboundListed
+	ep.inboundSources = options.InboundSources
 	udpTimeout := time.Duration(options.UDPTimeout)
 	if udpTimeout == 0 {
 		udpTimeout = C.UDPTimeout

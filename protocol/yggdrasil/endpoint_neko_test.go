@@ -190,9 +190,9 @@ func TestNekoYggdrasilChromeLink(t *testing.T) {
 	t.Fatalf("no link up: %+v", client.GetPeers())
 }
 
-// inbound_sources: unset takes every flow to this node's address for the route rules; set, a flow from an address
-// it does not list is dropped before its handshake (no reset), and an empty list drops every one. A flow to any
-// other address is refused as before.
+// inbound_listed: off takes every flow to this node's address for the route rules; on, a flow from an address
+// inbound_sources does not list is dropped before its handshake (no reset), and with no sources every one. A flow
+// from a listed address to any other address is refused as before.
 func TestNekoYggdrasilInboundSources(t *testing.T) {
 	self := netip.MustParseAddr("200:1111::1")
 	neighbour := netip.MustParseAddr("201:2222::2")
@@ -203,10 +203,7 @@ func TestNekoYggdrasilInboundSources(t *testing.T) {
 		if err := json.Unmarshal([]byte(options), &parsed); err != nil {
 			t.Fatal(err)
 		}
-		e := &Endpoint{address: self}
-		if parsed.InboundSources != nil {
-			e.inboundListed, e.inboundSources = true, *parsed.InboundSources
-		}
+		e := &Endpoint{address: self, inboundListed: parsed.InboundListed, inboundSources: parsed.InboundSources}
 		return e.JudgeFlow(6, netip.AddrPortFrom(source, 40000), netip.AddrPortFrom(destination, 22), nil).Action
 	}
 	for _, c := range []struct {
@@ -216,14 +213,16 @@ func TestNekoYggdrasilInboundSources(t *testing.T) {
 	}{
 		{`{}`, stranger, self, tun.ActionAccept},
 		{`{}`, neighbour, stranger, tun.ActionReject},
-		{`{"inbound_sources": []}`, neighbour, self, tun.ActionDrop},
-		{`{"inbound_sources": ["201:2222::2/128"]}`, neighbour, self, tun.ActionAccept},
-		{`{"inbound_sources": ["201:2222::2/128"]}`, stranger, self, tun.ActionDrop},
-		{`{"inbound_sources": "201:2222::2/128"}`, neighbour, self, tun.ActionAccept},
-		{`{"inbound_sources": ["201:2222::2/128"]}`, neighbour, stranger, tun.ActionReject},
+		{`{"inbound_listed": true}`, neighbour, self, tun.ActionDrop},
+		{`{"inbound_listed": true, "inbound_sources": ["201:2222::2/128"]}`, neighbour, self, tun.ActionAccept},
+		{`{"inbound_listed": true, "inbound_sources": ["201:2222::2/128"]}`, stranger, self, tun.ActionDrop},
+		{`{"inbound_listed": true, "inbound_sources": "201:2222::2/128"}`, neighbour, self, tun.ActionAccept},
+		{`{"inbound_listed": true, "inbound_sources": ["201:2222::2/128"]}`, neighbour, stranger, tun.ActionReject},
 		// an unlisted sender gets nothing, also at another address of this node (its /64): no reject to tell it apart
-		{`{"inbound_sources": ["201:2222::2/128"]}`, stranger, stranger, tun.ActionDrop},
-		{`{"inbound_sources": []}`, stranger, stranger, tun.ActionDrop},
+		{`{"inbound_listed": true, "inbound_sources": ["201:2222::2/128"]}`, stranger, stranger, tun.ActionDrop},
+		{`{"inbound_listed": true, "inbound_sources": []}`, stranger, stranger, tun.ActionDrop},
+		// sources without the flag: taken as before, the route rules decide
+		{`{"inbound_sources": ["201:2222::2/128"]}`, stranger, self, tun.ActionAccept},
 	} {
 		if got := verdict(c.options, c.source, c.destination); got != c.want {
 			t.Errorf("%s, %s → %s: %v, want %v", c.options, c.source, c.destination, got, c.want)
