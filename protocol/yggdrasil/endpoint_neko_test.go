@@ -221,6 +221,9 @@ func TestNekoYggdrasilInboundSources(t *testing.T) {
 		{`{"inbound_sources": ["201:2222::2/128"]}`, stranger, self, tun.ActionDrop},
 		{`{"inbound_sources": "201:2222::2/128"}`, neighbour, self, tun.ActionAccept},
 		{`{"inbound_sources": ["201:2222::2/128"]}`, neighbour, stranger, tun.ActionReject},
+		// an unlisted sender gets nothing, also at another address of this node (its /64): no reject to tell it apart
+		{`{"inbound_sources": ["201:2222::2/128"]}`, stranger, stranger, tun.ActionDrop},
+		{`{"inbound_sources": []}`, stranger, stranger, tun.ActionDrop},
 	} {
 		if got := verdict(c.options, c.source, c.destination); got != c.want {
 			t.Errorf("%s, %s → %s: %v, want %v", c.options, c.source, c.destination, got, c.want)
@@ -229,5 +232,39 @@ func TestNekoYggdrasilInboundSources(t *testing.T) {
 	var parsed option.YggdrasilEndpointOptions
 	if err := json.Unmarshal([]byte(`{"inbound_sources": ["201:2222::2"]}`), &parsed); err == nil {
 		t.Fatal("an address without its prefix length taken")
+	}
+}
+
+// With inbound_sources, the mesh's packets reach the stack only from a listed address or one this node dialled: an
+// unlisted sender's ACK or echo request gets no reset or reply from the stack, a dialled one's answers come in.
+func TestNekoYggdrasilAdmits(t *testing.T) {
+	neighbour := netip.MustParseAddr("201:2222::2")
+	server := netip.MustParseAddr("202:4444::4")
+	stranger := netip.MustParseAddr("202:3333::3")
+	packet := func(source netip.Addr) []byte {
+		p := make([]byte, 60)
+		p[0] = 0x60
+		p[6] = 6
+		copy(p[8:24], source.AsSlice())
+		return p
+	}
+	open := &Endpoint{}
+	if !open.admits(packet(stranger)) || !open.admits([]byte{0x45}) {
+		t.Fatal("without inbound_sources every packet goes to the stack")
+	}
+	e := &Endpoint{inboundListed: true, inboundSources: []netip.Prefix{netip.PrefixFrom(neighbour, 128)}}
+	if !e.admits(packet(neighbour)) {
+		t.Fatal("a listed neighbour's packet dropped")
+	}
+	if e.admits(packet(server)) || e.admits(packet(stranger)) || e.admits(packet(neighbour)[:20]) {
+		t.Fatal("an unlisted sender's packet (or a broken one) admitted")
+	}
+	e.noteDialed(server)
+	if !e.admits(packet(server)) || e.admits(packet(stranger)) {
+		t.Fatal("the answers of what this node dialled, and only those")
+	}
+	// a dialled address does not open flows itself
+	if e.JudgeFlow(6, netip.AddrPortFrom(server, 443), netip.AddrPortFrom(netip.MustParseAddr("200:1111::1"), 22), nil).Action != tun.ActionDrop {
+		t.Fatal("a dialled address opened a flow")
 	}
 }

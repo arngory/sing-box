@@ -23,9 +23,10 @@ type YggdrasilEndpointOptions struct {
 	// DebugPrivacy leaves the mesh's remote getSelf, getPeers and getTree unanswered: a node with a session to this
 	// one does not learn its peers (neko, yggdrasil-go fork)
 	DebugPrivacy bool `json:"debug_privacy,omitempty"`
-	// InboundSources are the mesh addresses a connection to this node may come from (neko): set, a flow from any
-	// other is dropped before its handshake, with no answer; an empty list drops every one. Unset: every one is
-	// taken, for the route rules to decide
+	// InboundSources are the mesh addresses a connection to this node may come from (neko): set, any other sender
+	// gets no answer at all (its packets never reach the stack, but the answers to what this node dialled), and a
+	// new flow from it is dropped before its handshake; an empty list lets in none. Unset: every flow is taken, for
+	// the route rules to decide
 	InboundSources *badoption.Listable[netip.Prefix] `json:"inbound_sources,omitempty"`
 	UDPTimeout     badoption.Duration                `json:"udp_timeout,omitempty"`
 	// TLSFingerprint is the ClientHello of outgoing tls:// links: "" or "chrome" (uTLS, a browser

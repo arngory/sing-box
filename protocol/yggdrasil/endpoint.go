@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -68,9 +69,11 @@ type Endpoint struct {
 	closed    chan struct{}
 	dnsRouter adapter.DNSRouter
 	peers     []*url.URL
-	// inboundListed: only flows from inboundSources reach the stack (neko)
+	// inboundListed: only packets from inboundSources reach the stack, and the answers to what this node dialled
+	// ([dialed]: netip.Addr → struct{}), never a new flow from those (neko)
 	inboundListed  bool
 	inboundSources []netip.Prefix
+	dialed         sync.Map
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.YggdrasilEndpointOptions) (adapter.Endpoint, error) {
@@ -286,6 +289,9 @@ func (e *Endpoint) pumpIn() {
 		if err != nil {
 			return
 		}
+		if !e.admits(buf[:n]) {
+			continue
+		}
 		packets[0] = buf[:n]
 		if _, err = e.device.Write(packets, 0); err != nil {
 			e.logger.Debug("yggdrasil: deliver: ", err)
@@ -321,12 +327,14 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 		if err != nil {
 			return nil, err
 		}
+		e.noteDialed(addresses...)
 		return N.DialSerial(ctx, e.device, network, destination, addresses)
 	}
 	if !yggdrasilPrefix.Contains(destination.Addr) {
 		return nil, E.New("yggdrasil: ", destination.Addr, " is not a Yggdrasil address (200::/7)")
 	}
 	e.logger.InfoContext(ctx, "outbound connection to ", destination)
+	e.noteDialed(destination.Addr)
 	return e.device.DialContext(ctx, network, destination)
 }
 
@@ -335,20 +343,55 @@ func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		return nil, E.New("Yggdrasil is not ready yet")
 	}
 	e.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+	if destination.IsIP() {
+		e.noteDialed(destination.Addr)
+	}
 	return e.device.ListenPacket(ctx, destination)
+}
+
+// noteDialed keeps the addresses this node dials: with inbound_sources their answers still come in (neko).
+func (e *Endpoint) noteDialed(addresses ...netip.Addr) {
+	if !e.inboundListed {
+		return
+	}
+	for _, address := range addresses {
+		e.dialed.Store(address.Unmap(), struct{}{})
+	}
+}
+
+// listed: inbound_sources has the address.
+func (e *Endpoint) listed(address netip.Addr) bool {
+	return slices.ContainsFunc(e.inboundSources, func(prefix netip.Prefix) bool { return prefix.Contains(address) })
+}
+
+// admits a packet from the mesh to the stack (neko): with inbound_sources, only from a listed address or one this
+// node dialled. Any other sender gets no answer at all, not to a SYN (JudgeFlow), nor to a segment of no connection
+// (the stack's reset) or an echo request, also at the node's /64.
+func (e *Endpoint) admits(packet []byte) bool {
+	if !e.inboundListed {
+		return true
+	}
+	if len(packet) < 40 || packet[0]>>4 != 6 {
+		return false
+	}
+	source := netip.AddrFrom16([16]byte(packet[8:24]))
+	if e.listed(source) {
+		return true
+	}
+	_, dialed := e.dialed.Load(source)
+	return dialed
 }
 
 // tun.Handler: connections from the mesh to this node's address
 
 func (e *Endpoint) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+	// from an address not listed, to any address of this node, the one this node dialled too: no answer at all,
+	// not even a reset (neko)
+	if e.inboundListed && !e.listed(source.Addr()) {
+		return tun.FlowVerdict{Action: tun.ActionDrop}
+	}
 	if destination.Addr() != e.address {
 		return tun.FlowVerdict{Action: tun.ActionReject}
-	}
-	// from an address not listed: no answer at all, not even a reset, so a scan learns nothing of this node (neko)
-	if e.inboundListed && !slices.ContainsFunc(e.inboundSources, func(prefix netip.Prefix) bool {
-		return prefix.Contains(source.Addr())
-	}) {
-		return tun.FlowVerdict{Action: tun.ActionDrop}
 	}
 	return tun.FlowVerdict{Action: tun.ActionAccept}
 }
