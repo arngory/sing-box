@@ -102,3 +102,62 @@ func TestNekoNaiveStatusAccepted(t *testing.T) {
 		t.Fatalf("a stream that failed before its answer: %v", err)
 	}
 }
+
+// The stream's end and its headers are both there when a refused stream's read comes back, and the wait for headers
+// takes either: asked again, the status is found.
+func TestNekoNaiveStatusBesideTheEnd(t *testing.T) {
+	asked := 0
+	conn := &statusConn{
+		Conn: &scriptedConn{reads: []func(p []byte) (int, error){fails(io.EOF)}}, ctx: context.Background(),
+		logger: logger.NOP(), headers: func(ctx context.Context) (map[string]string, error) {
+			asked++
+			if asked < 7 {
+				return nil, io.EOF
+			}
+			return map[string]string{":status": "429"}, nil
+		},
+	}
+	if _, err := conn.Read(make([]byte, 16)); err == nil || !strings.HasSuffix(err.Error(), "unexpected response status: 429") {
+		t.Fatalf("the end taken six times before the headers: read gave %v after %d looks", err, asked)
+	}
+	// no answer at all: the looks end, the stream's own error stays
+	asked = 0
+	conn = &statusConn{
+		Conn: &scriptedConn{reads: []func(p []byte) (int, error){fails(io.EOF)}}, ctx: context.Background(),
+		logger: logger.NOP(), headers: func(ctx context.Context) (map[string]string, error) {
+			asked++
+			return nil, io.EOF
+		},
+	}
+	if _, err := conn.Read(make([]byte, 16)); err != io.EOF || asked != answerTries {
+		t.Fatalf("no answer: read gave %v after %d looks", err, asked)
+	}
+}
+
+type wrapsConn struct {
+	net.Conn
+	under any
+}
+
+func (c *wrapsConn) Upstream() any { return c.under }
+
+// The stream is two wrappers under what cronet's early dial returns (its tracked connection, the naive one); what
+// names no upstream ends the search.
+func TestNekoNaiveUpstreamOf(t *testing.T) {
+	stream := &scriptedConn{}
+	dialed := &wrapsConn{under: &wrapsConn{under: stream}}
+	if found, ok := upstreamOf[*scriptedConn](dialed); !ok || found != stream {
+		t.Fatalf("the stream two wrappers down: %v, %v", found, ok)
+	}
+	if found, ok := upstreamOf[*scriptedConn](stream); !ok || found != stream {
+		t.Fatalf("the stream itself: %v, %v", found, ok)
+	}
+	if _, ok := upstreamOf[*scriptedConn](&wrapsConn{under: &net.TCPConn{}}); ok {
+		t.Fatal("found a stream under a connection that has none")
+	}
+	loop := &wrapsConn{}
+	loop.under = loop
+	if _, ok := upstreamOf[*scriptedConn](loop); ok {
+		t.Fatal("found a stream in a wrapper of itself")
+	}
+}

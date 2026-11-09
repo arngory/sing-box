@@ -28,7 +28,7 @@ type statusConn struct {
 
 type statusError struct{ error }
 
-// statusWait bounds the look at headers a read has already passed: they are there, or the stream is over.
+// statusWait bounds a look at headers a read has already passed: they are there, or the stream is over.
 const statusWait = time.Second
 
 func (c *statusConn) Read(p []byte) (int, error) {
@@ -44,10 +44,7 @@ func (c *statusConn) Read(p []byte) (int, error) {
 		return n, err
 	}
 	c.checked.Store(true)
-	// not the dial's context, which may be over by now: the headers and its end would both be ready, either taken
-	ctx, cancel := context.WithTimeout(context.Background(), statusWait)
-	headers, headersErr := c.headers(ctx)
-	cancel()
+	headers, headersErr := c.answer()
 	if headersErr != nil {
 		return n, err
 	}
@@ -58,6 +55,40 @@ func (c *statusConn) Read(p []byte) (int, error) {
 		return 0, refused.error
 	}
 	return n, err
+}
+
+// answerTries: how often the headers are asked for. A refused stream is over by the time its read comes back, and
+// the wait for headers takes either of two things that are both there, the headers or the stream's end: asked
+// again, the headers are missed once in 2^32 refusals. A stream that failed before any answer says so every time.
+const answerTries = 32
+
+func (c *statusConn) answer() (headers map[string]string, err error) {
+	for range answerTries {
+		// not the dial's context, which may be over by now and would be a third thing there
+		ctx, cancel := context.WithTimeout(context.Background(), statusWait)
+		headers, err = c.headers(ctx)
+		cancel()
+		if err == nil {
+			return headers, nil
+		}
+	}
+	return nil, err
+}
+
+// upstreamOf looks for a T under conn, through the wrappers that name what they wrap (Upstream): the stream under
+// cronet's tracked naive connection is two of them down.
+func upstreamOf[T any](conn any) (found T, ok bool) {
+	for range 8 {
+		if found, ok = conn.(T); ok {
+			return found, true
+		}
+		wrapper, isWrapper := conn.(interface{ Upstream() any })
+		if !isWrapper {
+			break
+		}
+		conn = wrapper.Upstream()
+	}
+	return found, false
 }
 
 func (c *statusConn) Upstream() any { return c.Conn }

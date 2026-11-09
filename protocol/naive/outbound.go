@@ -287,12 +287,10 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		}
 		// the stream comes before the proxy's answer: a refusal (429: the node's connection limit) is told on the
 		// first read, where it would read as a stream that ends (neko)
-		upstream, _ := conn.(interface{ Upstream() any })
-		if upstream == nil {
-			return conn, nil
-		}
-		stream, isStream := upstream.Upstream().(*cronet.BidirectionalConn)
+		stream, isStream := upstreamOf[*cronet.BidirectionalConn](conn)
 		if !isStream {
+			// a cronet that wraps its stream another way: said aloud, the refusals read as before
+			h.logger.WarnContext(ctx, "naive: no stream under the connection, a refused CONNECT will read as its end")
 			return conn, nil
 		}
 		return &statusConn{Conn: conn, ctx: ctx, logger: h.logger, headers: stream.WaitForHeadersContext}, nil
