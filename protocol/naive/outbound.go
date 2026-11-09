@@ -281,7 +281,21 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		return h.client.DialEarly(ctx, destination)
+		conn, err := h.client.DialEarly(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
+		// the stream comes before the proxy's answer: a refusal (429: the node's connection limit) is told on the
+		// first read, where it would read as a stream that ends (neko)
+		upstream, _ := conn.(interface{ Upstream() any })
+		if upstream == nil {
+			return conn, nil
+		}
+		stream, isStream := upstream.Upstream().(*cronet.BidirectionalConn)
+		if !isStream {
+			return conn, nil
+		}
+		return &statusConn{Conn: conn, ctx: ctx, logger: h.logger, headers: stream.WaitForHeadersContext}, nil
 	case N.NetworkUDP:
 		if h.uotClient == nil {
 			return nil, E.New("UDP is not supported unless UDP over TCP is enabled")

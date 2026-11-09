@@ -1,0 +1,68 @@
+package naive
+
+import (
+	"context"
+	"errors"
+	"net"
+	"os"
+	"sync/atomic"
+	"time"
+
+	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/logger"
+)
+
+// statusConn gives a refused CONNECT its status. An early dial hands the stream over before the proxy's answer and
+// never looks at it: a 429 (raycontrol conn-limit-v1 §3.1: the user's connection limit), a 404 or a 407 read as a
+// stream that just ends. The first read that comes back checks the answer once, and a status other than 200 is the
+// read's error from then on (neko).
+type statusConn struct {
+	net.Conn
+	ctx    context.Context
+	logger logger.ContextLogger
+	// the answer's headers once they are there, as cronet's BidirectionalConn.WaitForHeadersContext
+	headers func(ctx context.Context) (map[string]string, error)
+	checked atomic.Bool
+	refused atomic.Pointer[statusError]
+}
+
+type statusError struct{ error }
+
+// statusWait bounds the look at headers a read has already passed: they are there, or the stream is over.
+const statusWait = time.Second
+
+func (c *statusConn) Read(p []byte) (int, error) {
+	if refused := c.refused.Load(); refused != nil {
+		return 0, refused.error
+	}
+	n, err := c.Conn.Read(p)
+	if c.checked.Load() {
+		return n, err
+	}
+	// a deadline or a close of this side says nothing of the answer: the next read looks again
+	if err != nil && (errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, net.ErrClosed)) {
+		return n, err
+	}
+	c.checked.Store(true)
+	// not the dial's context, which may be over by now: the headers and its end would both be ready, either taken
+	ctx, cancel := context.WithTimeout(context.Background(), statusWait)
+	headers, headersErr := c.headers(ctx)
+	cancel()
+	if headersErr != nil {
+		return n, err
+	}
+	if status := headers[":status"]; status != "200" {
+		refused := &statusError{E.New("unexpected response status: ", status)}
+		c.refused.Store(refused)
+		c.logger.WarnContext(c.ctx, "handshake failed: ", refused.error)
+		return 0, refused.error
+	}
+	return n, err
+}
+
+func (c *statusConn) Upstream() any { return c.Conn }
+
+// ReaderReplaceable: only once the answer is known to be a 200 may a copy read past this.
+func (c *statusConn) ReaderReplaceable() bool { return c.checked.Load() && c.refused.Load() == nil }
+
+func (c *statusConn) WriterReplaceable() bool { return true }
