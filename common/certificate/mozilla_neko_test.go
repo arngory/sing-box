@@ -53,3 +53,55 @@ func TestNekoMozillaPublicKeyHashes(t *testing.T) {
 		t.Fatalf("only %d of Chrome's %d roots have a key in Mozilla's list: a profile under both would lose most public sites", shared, chrome)
 	}
 }
+
+// The roots Chromium 158 carries in its own store (root_store.certs, store version 43, the port at 1d6fa422) and
+// this core's list of Chrome's roots does not: the list's generator leaves out roots CCADB marks China, and
+// Chromium's store has them. The naive outbound, which is Chromium, takes them where the rest of the core does not;
+// a naive profile held to the core's list by its key pins must not find them there. The list is of one Chromium
+// version: with the next library it is counted again (the hashes are the library builder's, SHA-256 of the SPKI).
+var chromiumOnlyRoots = map[string]string{
+	"CFCA EV ROOT":                 "3V7RwJD59EgGG6qUprsRAXVE6e76ogzHFM5sYz9dxik=",
+	"GDCA TrustAUTH R5 ROOT":       "zrGUEcZQUsdX+UHrgmyWlB5NCNCWx9t+fqPE+ME/GhM=",
+	"Hongkong Post Root CA 3":      "JUHlO6WzsHrL5wl6xKA+BAwRz3ptSmfLIT1Vi1AWegY=",
+	"TrustAsia TLS ECC Root CA":    "9GMuWHAcC9fa/H44MTVexDP8E3d94oZoPo7FCWTfBFI=",
+	"TrustAsia TLS RSA Root CA":    "ViiHLiRf5mFIuAut6snED2JS5kL6lZWuzks+ili4/UY=",
+	"UCA Extended Validation Root": "XEGnOrLDXfzXcfb9bj6PrJtGnThsrdpWqVtkbrSMyjQ=",
+	"UCA Global G2 Root":           "ElXKvoFS+mTflC96R0F+KflsHOEb+MhOy+KBXMEoCBA=",
+	"vTrus ECC Root CA":            "oka4Ivls/swVUVblR2lXhFSSrPMhh+yKLvEtiWGNcR0=",
+	"vTrus Root CA":                "4GZH5SYQFgw+g8QtIuOaqHUMWE1sJK+u1UphFkdCAAo=",
+}
+
+func TestNekoChromeListLeavesOutChromiumOnlyRoots(t *testing.T) {
+	inChrome := map[string]bool{}
+	rest := []byte(chromeIncludedPEM())
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		root, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(root.RawSubjectPublicKeyInfo)
+		inChrome[base64.StdEncoding.EncodeToString(hash[:])] = true
+	}
+	inMozilla := 0
+	for name, hash := range chromiumOnlyRoots {
+		raw, err := base64.StdEncoding.DecodeString(hash)
+		if err != nil || len(raw) != sha256.Size {
+			t.Fatalf("%s: not a SHA-256: %q", name, hash)
+		}
+		if inChrome[hash] {
+			t.Errorf("%s is in the core's list of Chrome's roots now: the lists moved, count again", name)
+		}
+		for _, h := range MozillaPublicKeyHashes() {
+			if bytes.Equal(h, raw) {
+				inMozilla++
+				t.Logf("%s has a key in Mozilla's list", name)
+			}
+		}
+	}
+	t.Logf("%d roots of Chromium's own store are not in the core's list of Chrome's; %d of them have a key in Mozilla's", len(chromiumOnlyRoots), inMozilla)
+}
