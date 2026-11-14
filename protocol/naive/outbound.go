@@ -203,6 +203,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		QUIC:                     options.QUIC,
 		QUICCongestionControl:    quicCongestionControl,
 		QUICSessionReceiveWindow: options.QUICSessionReceiveWindow.Value(),
+		// neko: the server's certificate pinned by its key (tls.certificate_public_key_sha256, as the other
+		// outbounds take it; raycontrol's niko-pin). Chromium checks the pins besides the chain, where Go's TLS
+		// takes them in place of it, and against every key of the chain: pin the leaf's. An address for a name
+		// or a hash of another length fails here
+		CertificatePublicKeySHA256: [][]byte(options.TLS.CertificatePublicKeySHA256),
 	})
 	if err != nil {
 		return nil, err
