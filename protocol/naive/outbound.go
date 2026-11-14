@@ -129,9 +129,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 
 	// neko: Chromium is held to the list of the core's certificate store besides its own verification
-	// (certificate.StorePublicKeyHashes): it verifies as it does, and a key of a root of that list has to be in the
-	// chain. Under "chrome" that is Chrome's list as the rest of the core takes it (Chromium's own store has roots
-	// the core's list leaves out), under "mozilla" what the two lists share; under the system's store, nothing.
+	// (certificate.StorePublicKeyHashes): it verifies as it does, and a key of that list has to be in the chain: of
+	// a root, or of an intermediate Chromium ends a chain at (an anchor of its store under a root of the list).
+	// Under "chrome" that is Chrome's list as the rest of the core takes it (Chromium's own store has roots the
+	// core's list leaves out), under "mozilla" what the two lists share; under the system's store, nothing.
 	// Only where nothing of the profile's own decides already: its pins are stricter and stay alone (a root's key
 	// beside them would let any root of the list pass for the pinned leaf), its own certificate takes the place of
 	// every list and is in none, and Chromium pins a name, never an address
@@ -141,8 +142,9 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			publicKeyPins = certificate.StorePublicKeyHashes(store.StoreKind())
 			if len(publicKeyPins) > 0 {
 				// said once per outbound: a server Chromium would take and this refuses is refused here
-				logger.Info("the server's chain is held to the ", len(publicKeyPins), " roots of the ", store.StoreKind(),
-					" list besides Chromium's own")
+				logger.Info("the server's chain is held to the ", store.StoreKind(), " list besides Chromium's own (",
+					len(publicKeyPins), " keys: its roots, and Chromium ", certificate.ChromiumAnchorsVersion,
+					"'s intermediate anchors under them)")
 			}
 		}
 	}

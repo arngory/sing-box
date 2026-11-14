@@ -17,8 +17,12 @@ import (
 func TestNekoMozillaPublicKeyHashes(t *testing.T) {
 	hashes := MozillaPublicKeyHashes()
 	roots := bytes.Count([]byte(mozillaIncludedPEM()), []byte("BEGIN CERTIFICATE"))
-	if len(hashes) != roots || roots < 100 {
-		t.Fatalf("%d hashes for %d roots of Mozilla's list", len(hashes), roots)
+	if ofRoots := len(publicKeyHashes(mozillaIncludedPEM())); ofRoots != roots || roots < 100 {
+		t.Fatalf("%d hashes for %d roots of Mozilla's list", ofRoots, roots)
+	}
+	// and the intermediates Chromium has as anchors, all of them under roots Mozilla's list has
+	if len(hashes) != roots+len(chromiumIntermediateAnchors) {
+		t.Fatalf("%d hashes for %d roots of Mozilla's list and %d intermediate anchors of Chromium's", len(hashes), roots, len(chromiumIntermediateAnchors))
 	}
 	has := func(hash []byte) bool {
 		for _, h := range hashes {
@@ -83,8 +87,8 @@ func TestNekoChromeListLeavesOutChromiumOnlyRoots(t *testing.T) {
 	for _, hash := range StorePublicKeyHashes(C.CertificateStoreChrome) {
 		inChrome[base64.StdEncoding.EncodeToString(hash)] = true
 	}
-	if roots := bytes.Count([]byte(chromeIncludedPEM()), []byte("BEGIN CERTIFICATE")); len(inChrome) != roots || roots < 50 {
-		t.Fatalf("%d hashes for %d roots of Chrome's list", len(inChrome), roots)
+	if roots := bytes.Count([]byte(chromeIncludedPEM()), []byte("BEGIN CERTIFICATE")); len(inChrome) != roots+len(chromiumIntermediateAnchors) || roots < 50 {
+		t.Fatalf("%d hashes for %d roots of Chrome's list and %d intermediate anchors of Chromium's", len(inChrome), roots, len(chromiumIntermediateAnchors))
 	}
 	if len(StorePublicKeyHashes(C.CertificateStoreMozilla)) != len(MozillaPublicKeyHashes()) ||
 		StorePublicKeyHashes(C.CertificateStoreSystem) != nil || StorePublicKeyHashes(C.CertificateStoreNone) != nil ||
@@ -116,4 +120,62 @@ func TestNekoChromeListLeavesOutChromiumOnlyRoots(t *testing.T) {
 		}
 	}
 	t.Logf("%d roots of Chromium's own store are not in the core's list of Chrome's; %d of them have a key in Mozilla's", len(chromiumOnlyRoots), inMozilla)
+}
+
+// A chain Chromium verified ends at the first certificate its store has as a trust anchor, and the store has
+// intermediates as anchors: the chain of a Google site is its leaf and WE2, with no root in it. The pins of a list
+// have to hold the keys of those intermediates, or naive refuses every server whose certificate is of Google Trust
+// Services or of Let's Encrypt's current intermediates (1.50.0 before its release: www.gstatic.com refused with
+// "ssl pinned key not in cert chain").
+//
+// The two hashes are not the generator's: real Chrome logged them as the last key of the chains it verified for
+// www.gstatic.com and www.cloudflare.com (the app repository's Chrome workflow, run 43644246996).
+func TestNekoStoreHashesHaveChromiumIntermediateAnchors(t *testing.T) {
+	if ChromiumAnchorsVersion == "" || len(chromiumIntermediateAnchors) == 0 {
+		t.Fatal("no intermediate anchors of Chromium's: generate them for the library's Chromium release")
+	}
+	logged := map[string]string{
+		"WE2": "vh78KSg1Ry4NaqGDV10w/cTb9VH3BQUZoCWNa93W/EY=",
+		"WE1": "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+	}
+	for _, kind := range []string{C.CertificateStoreChrome, C.CertificateStoreMozilla} {
+		has := map[string]bool{}
+		for _, hash := range StorePublicKeyHashes(kind) {
+			if len(hash) != sha256.Size {
+				t.Fatalf("%s: a hash of %d bytes", kind, len(hash))
+			}
+			has[base64.StdEncoding.EncodeToString(hash)] = true
+		}
+		for name, hash := range logged {
+			if !has[hash] {
+				t.Errorf("%s: the key of %s, where Chrome ends a chain, is not among the hashes", kind, name)
+			}
+		}
+		for _, anchor := range chromiumIntermediateAnchors {
+			if !has[anchor.rootKey] {
+				t.Errorf("%s: the root %s of an intermediate anchor is not in the list: the lists moved, count again", kind, anchor.rootKey)
+			} else if !has[anchor.key] {
+				t.Errorf("%s: the intermediate %s is not among the hashes, its root is", kind, anchor.key)
+			}
+		}
+	}
+	// an intermediate goes where its root goes: of a root the list does not have, it stays out
+	root, other, key := bytes.Repeat([]byte{1}, sha256.Size), bytes.Repeat([]byte{2}, sha256.Size), bytes.Repeat([]byte{3}, sha256.Size)
+	encode := base64.StdEncoding.EncodeToString
+	with := withIntermediateAnchors([][]byte{root}, []chromiumIntermediateAnchor{
+		{key: encode(key), rootKey: encode(other)},
+		{key: "not base64", rootKey: encode(root)},
+		{key: encode(key[:5]), rootKey: encode(root)},
+	})
+	if len(with) != 1 {
+		t.Fatalf("%d hashes for one root and no intermediate of it", len(with))
+	}
+	with = withIntermediateAnchors([][]byte{root}, []chromiumIntermediateAnchor{
+		{key: encode(key), rootKey: encode(root)},
+		{key: encode(key), rootKey: encode(root)},
+		{key: encode(root), rootKey: encode(root)},
+	})
+	if len(with) != 2 || !bytes.Equal(with[1], key) {
+		t.Fatalf("%d hashes for one root and one intermediate of it, named twice", len(with))
+	}
 }
