@@ -329,6 +329,20 @@ func (s *StdNetBind) SetIOActivityFuncs(onRead func(size int), onWrite func(size
 	s.onWrite = onWrite
 }
 
+// singleMessage makes msg carry buf alone to addr, with no control data but the source's.
+//
+// neko: a GSO attempt that failed (Send's retry) left its coalesced iovecs in the message, which would glue the next
+// datagrams to this one, and its UDP_SEGMENT cmsg, which setSrcControl leaves where it does nothing (Android): the
+// retry failed the same way, and the first batch, the handshake, was lost on a device without UDP GSO
+// (throneproj/wireguard-go e200848, e117875).
+func singleMessage(msg *ipv6.Message, buf []byte, addr net.Addr, ep *StdNetEndpoint) {
+	clear(msg.Buffers[1:])
+	msg.Buffers = append(msg.Buffers[:0], buf)
+	msg.OOB = msg.OOB[:0]
+	msg.Addr = addr
+	setSrcControl(&msg.OOB, ep)
+}
+
 func (s *StdNetBind) putMessages(msgs *[]ipv6.Message) {
 	for i := range *msgs {
 		buffers := (*msgs)[i].Buffers
@@ -568,9 +582,7 @@ retry:
 		}
 	} else {
 		for i := range bufs {
-			(*msgs)[i].Addr = ua
-			(*msgs)[i].Buffers[0] = bufs[i][offset:]
-			setSrcControl(&(*msgs)[i].OOB, standardEndpoint)
+			singleMessage(&(*msgs)[i], bufs[i][offset:], ua, standardEndpoint)
 		}
 		err = s.send(conn, br, (*msgs)[:len(bufs)])
 	}
