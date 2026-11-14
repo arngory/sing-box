@@ -13,6 +13,7 @@ import (
 	_ "github.com/sagernet/cronet-go/all"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	"github.com/sagernet/sing-box/common/certificate"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/nikoicmp"
 	C "github.com/sagernet/sing-box/constant"
@@ -127,6 +128,19 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		trustedRootCertificates = string(content)
 	}
 
+	// neko: under the certificate store "mozilla" Chromium is held to both lists (certificate.MozillaPublicKeyHashes):
+	// it verifies as it does, against Chrome's list, and a key of a Mozilla root has to be in the chain. Only where
+	// nothing of the profile's own decides already: its pins are stricter and stay alone (a root's key beside them
+	// would let any Mozilla root pass for the pinned leaf), its own certificate takes the place of every list and
+	// is in none, and Chromium pins a name, never an address
+	publicKeyPins := [][]byte(options.TLS.CertificatePublicKeySHA256)
+	if _, addressErr := netip.ParseAddr(serverName); len(publicKeyPins) == 0 && trustedRootCertificates == "" && addressErr != nil {
+		if store, isStore := service.FromContext[adapter.CertificateStore](ctx).(interface{ StoreKind() string }); isStore &&
+			store.StoreKind() == C.CertificateStoreMozilla {
+			publicKeyPins = certificate.MozillaPublicKeyHashes()
+		}
+	}
+
 	extraHeaders := make(map[string]string)
 	for key, values := range options.ExtraHeaders.Build() {
 		if len(values) > 0 {
@@ -213,7 +227,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		// outbounds take it; raycontrol's niko-pin). Chromium checks the pins besides the chain, where Go's TLS
 		// takes them in place of it, and against every key of the chain: pin the leaf's. An address for a name
 		// or a hash of another length fails here
-		CertificatePublicKeySHA256: [][]byte(options.TLS.CertificatePublicKeySHA256),
+		// Without pins of the profile's, under the store "mozilla": the keys of Mozilla's roots (above)
+		CertificatePublicKeySHA256: publicKeyPins,
 	})
 	if err != nil {
 		return nil, err
