@@ -64,33 +64,54 @@ func entries(textproto []byte) ([]entry, string, error) {
 	var (
 		list    []entry
 		current *entry
+		// blocks open inside the entry's own (constraints { … }): their closing brace is not the entry's, and
+		// their fields are not the entry's
+		depth   int
 		subject string
 		version string
+		// what the file says by plain count, against what was read: an entry or a field lost to a format this
+		// does not know stops the generation, where it would leave an anchor out of the table without a word
+		anchorLines int
 	)
 	scanner := bufio.NewScanner(bytes.NewReader(textproto))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		switch {
-		case strings.HasPrefix(line, `# "`) && strings.HasSuffix(line, `"`):
+		if strings.HasPrefix(line, `# "`) && strings.HasSuffix(line, `"`) {
 			subject = strings.TrimSuffix(strings.TrimPrefix(line, `# "`), `"`)
-		case strings.HasPrefix(line, "version_major:"):
+			continue
+		}
+		line, _, _ = strings.Cut(line, "#")
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "tls_trust_anchor:") && strings.TrimSpace(strings.TrimPrefix(line, "tls_trust_anchor:")) == "true" {
+			anchorLines++
+		}
+		switch {
+		case line == "":
+		case current == nil && strings.HasPrefix(line, "version_major:"):
 			version = strings.TrimSpace(strings.TrimPrefix(line, "version_major:"))
 		case line == "trust_anchors {" || line == "additional_certs {":
 			if current != nil {
 				return nil, "", fmt.Errorf("a block inside a block at %q", subject)
 			}
 			current = &entry{subject: subject, additional: line == "additional_certs {"}
-		case line == "}" && current != nil:
+		case current == nil:
+			if strings.HasSuffix(line, "{") || line == "}" {
+				return nil, "", fmt.Errorf("a block this does not know, outside the entries: %q", line)
+			}
+		case strings.HasSuffix(line, "{"):
+			depth++
+		case line == "}" && depth > 0:
+			depth--
+		case line == "}":
 			if current.fingerprint == "" {
 				return nil, "", fmt.Errorf("a block without sha256_hex at %q", current.subject)
 			}
 			list = append(list, *current)
 			current = nil
-		case current != nil:
+		case depth == 0:
 			name, value, _ := strings.Cut(line, ":")
-			value, _, _ = strings.Cut(value, "#")
 			value = strings.Trim(strings.TrimSpace(value), `"`)
-			switch name {
+			switch strings.TrimSpace(name) {
 			case "sha256_hex":
 				current.fingerprint = strings.ToLower(value)
 			case "crs_root_id":
@@ -100,7 +121,25 @@ func entries(textproto []byte) ([]entry, string, error) {
 			}
 		}
 	}
-	return list, version, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, "", err
+	}
+	if current != nil {
+		return nil, "", fmt.Errorf("the block at %q is not closed", current.subject)
+	}
+	anchors := 0
+	for _, e := range list {
+		if e.tlsAnchor && !e.additional {
+			return nil, "", fmt.Errorf("the root %q is marked tls_trust_anchor: the store's format has changed", e.subject)
+		}
+		if e.tlsAnchor {
+			anchors++
+		}
+	}
+	if anchors != anchorLines {
+		return nil, "", fmt.Errorf("%d lines say tls_trust_anchor: true, %d entries were read with it: the store's format has changed", anchorLines, anchors)
+	}
+	return list, version, nil
 }
 
 // certificates by the SHA-256 of their encoding, as the textproto names them
