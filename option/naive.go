@@ -35,4 +35,9 @@ type NaiveOutboundOptions struct {
 	// links): a refused or unreachable destination fails the dial with its reason. The header goes with every
 	// CONNECT
 	AwaitDial bool `json:"await_dial,omitempty"`
+	// neko: over QUIC, take a server whose chain verifies against a locally trusted root, one of the file the
+	// SSL_CERT_FILE environment variable names (Linux, Android). Without it Chromium wants a root of its own list
+	// over QUIC, as Chrome does, while over HTTP/2 it takes such a root either way. The chain, the name and the
+	// key pins are checked as before; with tls.certificate it changes nothing.
+	QUICLocallyTrustedRoots bool `json:"quic_locally_trusted_roots,omitempty"`
 }
