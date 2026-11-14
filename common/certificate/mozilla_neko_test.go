@@ -56,9 +56,14 @@ func TestNekoMozillaPublicKeyHashes(t *testing.T) {
 
 // The roots Chromium 158 carries in its own store (root_store.certs, store version 43, the port at 1d6fa422) and
 // this core's list of Chrome's roots does not: the list's generator leaves out roots CCADB marks China, and
-// Chromium's store has them. The naive outbound, which is Chromium, takes them where the rest of the core does not;
-// a naive profile held to the core's list by its key pins must not find them there. The list is of one Chromium
-// version: with the next library it is counted again (the hashes are the library builder's, SHA-256 of the SPKI).
+// Chromium's store has them. This is a gap, not a guard: under the store "chrome" the naive outbound, which is
+// Chromium and gets no key pins there, takes all nine where the rest of the core takes none; under "mozilla" its pins
+// leave it the three that have a key in Mozilla's list. Whether naive is to be held to the core's list under
+// "chrome" as well is the owner's to decide. The test keeps the count honest: it fails when the lists move.
+//
+// The hashes are the library builder's (SHA-256 of the SPKI), of one Chromium version, counted again with the next
+// library. Three of them are checked here against Mozilla's list; the other six have nothing in this repository to
+// be checked against (Chromium's store is not in it).
 var chromiumOnlyRoots = map[string]string{
 	"CFCA EV ROOT":                 "3V7RwJD59EgGG6qUprsRAXVE6e76ogzHFM5sYz9dxik=",
 	"GDCA TrustAUTH R5 ROOT":       "zrGUEcZQUsdX+UHrgmyWlB5NCNCWx9t+fqPE+ME/GhM=",
@@ -87,6 +92,10 @@ func TestNekoChromeListLeavesOutChromiumOnlyRoots(t *testing.T) {
 		hash := sha256.Sum256(root.RawSubjectPublicKeyInfo)
 		inChrome[base64.StdEncoding.EncodeToString(hash[:])] = true
 	}
+	// the three of them Mozilla's list has: their hashes are of real keys, or they would match nothing
+	wantInMozilla := map[string]bool{
+		"Hongkong Post Root CA 3": true, "TrustAsia TLS ECC Root CA": true, "TrustAsia TLS RSA Root CA": true,
+	}
 	inMozilla := 0
 	for name, hash := range chromiumOnlyRoots {
 		raw, err := base64.StdEncoding.DecodeString(hash)
@@ -96,11 +105,15 @@ func TestNekoChromeListLeavesOutChromiumOnlyRoots(t *testing.T) {
 		if inChrome[hash] {
 			t.Errorf("%s is in the core's list of Chrome's roots now: the lists moved, count again", name)
 		}
+		found := false
 		for _, h := range MozillaPublicKeyHashes() {
 			if bytes.Equal(h, raw) {
+				found = true
 				inMozilla++
-				t.Logf("%s has a key in Mozilla's list", name)
 			}
+		}
+		if found != wantInMozilla[name] {
+			t.Errorf("%s: a key in Mozilla's list: %v, want %v (a hash that is not the key's, or the lists moved)", name, found, wantInMozilla[name])
 		}
 	}
 	t.Logf("%d roots of Chromium's own store are not in the core's list of Chrome's; %d of them have a key in Mozilla's", len(chromiumOnlyRoots), inMozilla)
