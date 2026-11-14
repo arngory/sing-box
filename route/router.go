@@ -36,6 +36,8 @@ type Router struct {
 	httpClientManager adapter.HTTPClientManager
 	rules             []adapter.Rule
 	needFindProcess   bool
+	// neko: route.icmp_no_local_reply
+	icmpNoLocalReply  bool
 	needFindNeighbor  bool
 	leaseFiles        []string
 	ruleSets          []adapter.RuleSet
@@ -62,6 +64,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		httpClientManager: service.FromContext[adapter.HTTPClientManager](ctx),
 		rules:             make([]adapter.Rule, 0, len(options.Rules)),
 		ruleSetMap:        make(map[string]adapter.RuleSet),
+		icmpNoLocalReply:  options.ICMPNoLocalReply,
 		needFindProcess:   hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
 		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
 		leaseFiles:        options.DHCPLeaseFiles,

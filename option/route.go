@@ -21,6 +21,9 @@ type RouteOptions struct {
 	DefaultFallbackNetworkType badoption.Listable[InterfaceType] `json:"default_fallback_network_type,omitempty"`
 	DefaultFallbackDelay       badoption.Duration                `json:"default_fallback_delay,omitempty"`
 	DefaultHTTPClient          string                            `json:"default_http_client,omitempty"`
+	// neko: an echo request no outbound carries is refused. Without it the TUN answers it itself, in the name of
+	// the destination: a ping through a proxy then shows the device's own delay and no hop, whatever the server
+	ICMPNoLocalReply bool `json:"icmp_no_local_reply,omitempty"`
 }
 
 type GeoIPOptions struct {
