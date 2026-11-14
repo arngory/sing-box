@@ -10,8 +10,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-// The SHA-256 of the public key (SubjectPublicKeyInfo) of every root of a list this core carries, and of the
-// intermediates Chromium takes as trust anchors under those roots.
+// The SHA-256 of the public key (SubjectPublicKeyInfo) of every root of a list this core carries.
 //
 // neko: the naive outbound is Chromium, which verifies against the store it was built with and can be given another
 // list only in place of it, without certificate transparency and Chrome's limits on roots. And Chromium's own store
@@ -22,55 +21,76 @@ import (
 //
 // The chain Chromium verified does not always reach a root: its store has intermediates as trust anchors of their
 // own (Google Trust Services' and Let's Encrypt's in Chromium 158), and a chain through one ends there, with no
-// root's key in it. So each such intermediate is in the hashes of a list that has its root
-// (chromium_anchors_neko_generated.go, of the Chromium release the library is built from).
+// root's key in it. So the pins of a list also hold each such intermediate whose root the list has
+// (StorePublicKeyHashes). Which intermediates those are is the library's to say: its store is the one it verifies
+// with (cronet.ChromeRootStoreAnchors in the naive outbound). The table here, generated from Chromium's own
+// repository at the library's release (chromium_anchors_neko_generated.go), is the check of that: the two have to
+// agree (protocol/naive's tests), and the app's build stops when its release is not the library's.
 var (
-	ChromePublicKeyHashes  = sync.OnceValue(func() [][]byte { return storeHashes(chromeIncludedPEM()) })
-	MozillaPublicKeyHashes = sync.OnceValue(func() [][]byte { return storeHashes(mozillaIncludedPEM()) })
+	ChromePublicKeyHashes  = sync.OnceValue(func() [][]byte { return publicKeyHashes(chromeIncludedPEM()) })
+	MozillaPublicKeyHashes = sync.OnceValue(func() [][]byte { return publicKeyHashes(mozillaIncludedPEM()) })
 )
 
-// StorePublicKeyHashes are the hashes for a store by its kind: nil for a kind that is no list of this core's (the
-// system's store, none), where naive is held to nothing besides Chromium's own verification.
-func StorePublicKeyHashes(kind string) [][]byte {
-	switch kind {
-	case C.CertificateStoreChrome:
-		return ChromePublicKeyHashes()
-	case C.CertificateStoreMozilla:
-		return MozillaPublicKeyHashes()
-	}
-	return nil
+// IntermediateAnchor is an intermediate a verifier's store has as a trust anchor of its own: the SHA-256 of its key
+// and of its root's key.
+type IntermediateAnchor struct {
+	Key     [sha256.Size]byte
+	RootKey [sha256.Size]byte
 }
 
-// chromiumIntermediateAnchor is an intermediate Chromium's store has as a trust anchor: the hash of its key and of
-// its root's, in base64.
+// StorePublicKeyHashes are the pins for a store by its kind: the keys of the list's roots and of the [anchors]
+// whose root is among them. Nil for a kind that is no list of this core's (the system's store, none), where naive is
+// held to nothing besides Chromium's own verification.
+func StorePublicKeyHashes(kind string, anchors []IntermediateAnchor) [][]byte {
+	var roots [][]byte
+	switch kind {
+	case C.CertificateStoreChrome:
+		roots = ChromePublicKeyHashes()
+	case C.CertificateStoreMozilla:
+		roots = MozillaPublicKeyHashes()
+	default:
+		return nil
+	}
+	return withIntermediateAnchors(roots, anchors)
+}
+
+// ChromiumIntermediateAnchors are the intermediate anchors of Chromium's store at the release of
+// ChromiumAnchorsVersion, from its own repository: the check of the library's table.
+func ChromiumIntermediateAnchors() []IntermediateAnchor {
+	anchors := make([]IntermediateAnchor, 0, len(chromiumIntermediateAnchors))
+	for _, anchor := range chromiumIntermediateAnchors {
+		key, keyErr := base64.StdEncoding.DecodeString(anchor.key)
+		rootKey, rootErr := base64.StdEncoding.DecodeString(anchor.rootKey)
+		if keyErr != nil || rootErr != nil || len(key) != sha256.Size || len(rootKey) != sha256.Size {
+			// generated: a test fails on it (TestNekoStoreHashesHaveChromiumIntermediateAnchors)
+			continue
+		}
+		anchors = append(anchors, IntermediateAnchor{Key: [sha256.Size]byte(key), RootKey: [sha256.Size]byte(rootKey)})
+	}
+	return anchors
+}
+
+// chromiumIntermediateAnchor is a row of the generated table: the hashes in base64.
 type chromiumIntermediateAnchor struct {
 	key     string
 	rootKey string
 }
 
-func storeHashes(list string) [][]byte {
-	return withIntermediateAnchors(publicKeyHashes(list), chromiumIntermediateAnchors)
-}
-
 // withIntermediateAnchors adds to the hashes of a list's roots those of the intermediates whose root is among them:
-// an intermediate of a root the list does not have stays out, as its root does.
-func withIntermediateAnchors(roots [][]byte, anchors []chromiumIntermediateAnchor) [][]byte {
+// an intermediate of a root the list does not have stays out, as its root does. The roots' slice is not changed.
+func withIntermediateAnchors(roots [][]byte, anchors []IntermediateAnchor) [][]byte {
 	listed := make(map[string]bool, len(roots))
 	for _, hash := range roots {
 		listed[string(hash)] = true
 	}
-	hashes := roots
+	hashes := append(make([][]byte, 0, len(roots)+len(anchors)), roots...)
 	for _, anchor := range anchors {
-		rootKey, err := base64.StdEncoding.DecodeString(anchor.rootKey)
-		if err != nil || !listed[string(rootKey)] {
+		if !listed[string(anchor.RootKey[:])] || listed[string(anchor.Key[:])] {
 			continue
 		}
-		key, err := base64.StdEncoding.DecodeString(anchor.key)
-		if err != nil || len(key) != sha256.Size || listed[string(key)] {
-			continue
-		}
-		listed[string(key)] = true
-		hashes = append(hashes, key)
+		listed[string(anchor.Key[:])] = true
+		key := anchor.Key
+		hashes = append(hashes, key[:])
 	}
 	return hashes
 }

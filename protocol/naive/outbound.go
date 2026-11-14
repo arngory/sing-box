@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 
 	"github.com/sagernet/cronet-go"
 	_ "github.com/sagernet/cronet-go/all"
@@ -130,7 +131,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 
 	// neko: Chromium is held to the list of the core's certificate store besides its own verification
 	// (certificate.StorePublicKeyHashes): it verifies as it does, and a key of that list has to be in the chain: of
-	// a root, or of an intermediate Chromium ends a chain at (an anchor of its store under a root of the list).
+	// a root, or of an intermediate Chromium ends a chain at (an anchor of the library's store under a root of the
+	// list, libraryAnchors).
 	// Under "chrome" that is Chrome's list as the rest of the core takes it (Chromium's own store has roots the
 	// core's list leaves out), under "mozilla" what the two lists share; under the system's store, nothing.
 	// Only where nothing of the profile's own decides already: its pins are stricter and stay alone (a root's key
@@ -139,12 +141,12 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	publicKeyPins := [][]byte(options.TLS.CertificatePublicKeySHA256)
 	if _, addressErr := netip.ParseAddr(serverName); len(publicKeyPins) == 0 && trustedRootCertificates == "" && addressErr != nil {
 		if store, isStore := service.FromContext[adapter.CertificateStore](ctx).(interface{ StoreKind() string }); isStore {
-			publicKeyPins = certificate.StorePublicKeyHashes(store.StoreKind())
+			publicKeyPins = certificate.StorePublicKeyHashes(store.StoreKind(), libraryAnchors())
 			if len(publicKeyPins) > 0 {
 				// said once per outbound: a server Chromium would take and this refuses is refused here
 				logger.Info("the server's chain is held to the ", store.StoreKind(), " list besides Chromium's own (",
-					len(publicKeyPins), " keys: its roots, and Chromium ", certificate.ChromiumAnchorsVersion,
-					"'s intermediate anchors under them)")
+					len(publicKeyPins), " keys: its roots, and the intermediate anchors under them of the library's store ",
+					cronet.ChromeRootStoreVersion, ")")
 			}
 		}
 	}
@@ -376,3 +378,24 @@ type naiveDialer struct {
 func (d *naiveDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	return d.NaiveClient.DialEarly(ctx, destination)
 }
+
+// libraryAnchors are the intermediates the library's own store has as trust anchors, each with its root's key: the
+// store the library verifies with, from the Chromium source it is built from (neko). An intermediate whose root the
+// table does not hold is left out; the tests say so (anchors_neko_test.go).
+var libraryAnchors = sync.OnceValue(func() []certificate.IntermediateAnchor {
+	all := cronet.ChromeRootStoreAnchors()
+	rootKeys := make(map[int][32]byte)
+	for _, anchor := range all {
+		if !anchor.Intermediate {
+			rootKeys[anchor.RootID] = anchor.PublicKeySHA256
+		}
+	}
+	var anchors []certificate.IntermediateAnchor
+	for _, anchor := range all {
+		rootKey, hasRoot := rootKeys[anchor.RootID]
+		if anchor.Intermediate && hasRoot {
+			anchors = append(anchors, certificate.IntermediateAnchor{Key: anchor.PublicKeySHA256, RootKey: rootKey})
+		}
+	}
+	return anchors
+})
