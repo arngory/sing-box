@@ -139,6 +139,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if _, addressErr := netip.ParseAddr(serverName); len(publicKeyPins) == 0 && trustedRootCertificates == "" && addressErr != nil {
 		if store, isStore := service.FromContext[adapter.CertificateStore](ctx).(interface{ StoreKind() string }); isStore {
 			publicKeyPins = certificate.StorePublicKeyHashes(store.StoreKind())
+			if len(publicKeyPins) > 0 {
+				// said once per outbound: a server Chromium would take and this refuses is refused here
+				logger.Info("the server's chain is held to the ", len(publicKeyPins), " roots of the ", store.StoreKind(),
+					" list besides Chromium's own")
+			}
 		}
 	}
 
