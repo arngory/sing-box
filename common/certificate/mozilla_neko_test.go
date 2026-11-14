@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"testing"
+
+	C "github.com/sagernet/sing-box/constant"
 )
 
 // The keys of Mozilla's roots, for the naive outbound's pins under the store "mozilla": one hash per root of the
@@ -56,10 +58,9 @@ func TestNekoMozillaPublicKeyHashes(t *testing.T) {
 
 // The roots Chromium 158 carries in its own store (root_store.certs, store version 43, the port at 1d6fa422) and
 // this core's list of Chrome's roots does not: the list's generator leaves out roots CCADB marks China, and
-// Chromium's store has them. This is a gap, not a guard: under the store "chrome" the naive outbound, which is
-// Chromium and gets no key pins there, takes all nine where the rest of the core takes none; under "mozilla" its pins
-// leave it the three that have a key in Mozilla's list. Whether naive is to be held to the core's list under
-// "chrome" as well is the owner's to decide. The test keeps the count honest: it fails when the lists move.
+// Chromium's store has them. A naive outbound without pins or a certificate of its own is held to the core's list by
+// key pins (StorePublicKeyHashes), so under "chrome" none of the nine passes, and under "mozilla" the three that
+// have a key in Mozilla's list do. The test fails when the lists move.
 //
 // The hashes are the library builder's (SHA-256 of the SPKI), of one Chromium version, counted again with the next
 // library. Three of them are checked here against Mozilla's list; the other six have nothing in this repository to
@@ -77,20 +78,18 @@ var chromiumOnlyRoots = map[string]string{
 }
 
 func TestNekoChromeListLeavesOutChromiumOnlyRoots(t *testing.T) {
+	// what a naive outbound is pinned to under each store
 	inChrome := map[string]bool{}
-	rest := []byte(chromeIncludedPEM())
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		root, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		hash := sha256.Sum256(root.RawSubjectPublicKeyInfo)
-		inChrome[base64.StdEncoding.EncodeToString(hash[:])] = true
+	for _, hash := range StorePublicKeyHashes(C.CertificateStoreChrome) {
+		inChrome[base64.StdEncoding.EncodeToString(hash)] = true
+	}
+	if roots := bytes.Count([]byte(chromeIncludedPEM()), []byte("BEGIN CERTIFICATE")); len(inChrome) != roots || roots < 50 {
+		t.Fatalf("%d hashes for %d roots of Chrome's list", len(inChrome), roots)
+	}
+	if len(StorePublicKeyHashes(C.CertificateStoreMozilla)) != len(MozillaPublicKeyHashes()) ||
+		StorePublicKeyHashes(C.CertificateStoreSystem) != nil || StorePublicKeyHashes(C.CertificateStoreNone) != nil ||
+		StorePublicKeyHashes("") != nil {
+		t.Fatal("which stores hold naive to a list")
 	}
 	// the three of them Mozilla's list has: their hashes are of real keys, or they would match nothing
 	wantInMozilla := map[string]bool{
