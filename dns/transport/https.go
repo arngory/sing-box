@@ -237,7 +237,8 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, E.New("unexpected status: ", response.Status)
+		// neko: the code readable (dns.HTTPStatusError), the text as before
+		return nil, &dns.HTTPStatusError{StatusCode: response.StatusCode, Status: response.Status}
 	}
 	var responseMessage mDNS.Msg
 	if response.ContentLength > 0 {
