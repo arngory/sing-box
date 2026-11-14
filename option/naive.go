@@ -30,4 +30,9 @@ type NaiveOutboundOptions struct {
 	// neko: ping and traceroute through the node (raycontrol icmp-v1, icmp=1 in its links): the TUN hands the app's
 	// echo requests to the outbound, which carries them on a stream to icmp.niko.arpa:0
 	ICMP bool `json:"icmp,omitempty"`
+	// neko: a TCP dial returns only after the proxy's answer to its CONNECT, which a server that takes the request
+	// header niko-ack: 1 sends once it has reached the destination (raycontrol naive-uot-v1 §4.1, niko-ack=1 in its
+	// links): a refused or unreachable destination fails the dial with its reason. The header goes with every
+	// CONNECT
+	AwaitDial bool `json:"await_dial,omitempty"`
 }

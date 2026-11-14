@@ -46,6 +46,8 @@ type Outbound struct {
 	uotClient *uot.Client
 	// neko: icmp-v1, nil without the icmp option
 	icmp *nikoicmp.Port
+	// neko: a TCP dial waits for the proxy's answer (the await_dial option)
+	awaitDial bool
 }
 
 var _ adapter.FlowOutbound = (*Outbound)(nil)
@@ -130,6 +132,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if len(values) > 0 {
 			extraHeaders[key] = values[0]
 		}
+	}
+	if options.AwaitDial {
+		// asks the server to answer a CONNECT after its dial, not before (neko)
+		extraHeaders[ackHeader] = "1"
 	}
 
 	dnsRouter := service.FromContext[adapter.DNSRouter](ctx)
@@ -235,6 +241,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		logger:    logger,
 		client:    client,
 		uotClient: uotClient,
+		awaitDial: options.AwaitDial,
 	}
 	if options.ICMP {
 		naiveOutbound.icmp = nikoicmp.NewPort(ctx, logger, func(ctx context.Context) (net.Conn, error) {
@@ -298,7 +305,15 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 			h.logger.WarnContext(ctx, "naive: no stream under the connection, a refused CONNECT will read as its end")
 			return conn, nil
 		}
-		return &statusConn{Conn: conn, ctx: ctx, logger: h.logger, headers: stream.WaitForHeadersContext}, nil
+		checked := &statusConn{Conn: conn, ctx: ctx, logger: h.logger, headers: stream.WaitForHeadersContext, ack: h.awaitDial}
+		if h.awaitDial {
+			// the dial's outcome at the destination before the connection is handed out (neko)
+			if err = checked.await(ctx); err != nil {
+				conn.Close()
+				return nil, err
+			}
+		}
+		return checked, nil
 	case N.NetworkUDP:
 		if h.uotClient == nil {
 			return nil, E.New("UDP is not supported unless UDP over TCP is enabled")

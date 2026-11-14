@@ -24,7 +24,22 @@ type statusConn struct {
 	headers func(ctx context.Context) (map[string]string, error)
 	checked atomic.Bool
 	refused atomic.Pointer[statusError]
+	// the CONNECT asked for an answer after the server's dial (niko-ack: 1): a 502 or a 504 is the destination's
+	ack bool
 }
+
+// ackHeader asks a server for its answer after it has dialed the destination, and in a 502 names why the dial
+// failed: refused, unreachable or denied (raycontrol naive-uot-v1 §4.1).
+const ackHeader = "niko-ack"
+
+// awaitLimit bounds the wait for the answer of a dial without a deadline of the caller's: above the server's own
+// dial timeout (rayd naive: 10 s), so its 504 arrives rather than ours.
+var awaitLimit = 15 * time.Second
+
+// awaitFallback: no answer by then, the connection goes as without the wait, its answer checked with the first
+// read. A destination that is slow to take the connection is let through, without its honest refusal: as Hysteria2's
+// await dial does.
+var awaitFallback = 4 * time.Second
 
 type statusError struct{ error }
 
@@ -48,13 +63,74 @@ func (c *statusConn) Read(p []byte) (int, error) {
 	if headersErr != nil {
 		return n, err
 	}
-	if status := headers[":status"]; status != "200" {
-		refused := &statusError{E.New("unexpected response status: ", status)}
-		c.refused.Store(refused)
-		c.logger.WarnContext(c.ctx, "handshake failed: ", refused.error)
-		return 0, refused.error
+	if refusal := c.refusal(headers); refusal != nil {
+		return 0, refusal
 	}
 	return n, err
+}
+
+// refusal keeps the error of an answer other than 200, nil for a 200. A server asked for its answer after the dial
+// says what became of the dial: a 502 with the reason, a 504 for a destination silent to the server's timeout. Any
+// other status is the proxy's own refusal (429: the user's connection limit; 404, 407: the credentials).
+func (c *statusConn) refusal(headers map[string]string) error {
+	status := headers[":status"]
+	if status == "200" {
+		return nil
+	}
+	var err error
+	if c.ack {
+		switch {
+		case status == "502" && headers[ackHeader] == "refused":
+			err = E.New("remote error: connection refused")
+		case status == "502" && headers[ackHeader] == "unreachable":
+			err = E.New("remote error: host is unreachable")
+		case status == "502" && headers[ackHeader] == "denied":
+			err = E.New("remote error: destination denied by the server")
+		case status == "504":
+			err = E.New("remote error: connect timed out")
+		}
+	}
+	if err == nil {
+		err = E.New("unexpected response status: ", status)
+		c.logger.WarnContext(c.ctx, "handshake failed: ", err)
+	}
+	c.refused.Store(&statusError{err})
+	return err
+}
+
+// await holds a dial until the proxy has answered its CONNECT (await_dial): nil for a 200, the refusal otherwise,
+// and nil too when no answer came in awaitFallback, the first read checking it then. A dial with less time than
+// that fails at its deadline.
+func (c *statusConn) await(ctx context.Context) error {
+	limit := time.Now().Add(awaitLimit)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(limit) {
+		limit = deadline
+	}
+	wait, handOver := time.Now().Add(awaitFallback), true
+	if !wait.Before(limit) {
+		wait, handOver = limit, false
+	}
+	waitCtx, cancel := context.WithDeadline(ctx, wait)
+	headers, err := c.headers(waitCtx)
+	expired := waitCtx.Err() != nil
+	cancel()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if expired {
+			if handOver {
+				return nil
+			}
+			return E.Cause(context.DeadlineExceeded, "no answer to the connect")
+		}
+		// the stream is over: a refusal ends it, and the wait may take its end before the answer that is there
+		if headers, err = c.answer(); err != nil {
+			return err
+		}
+	}
+	c.checked.Store(true)
+	return c.refusal(headers)
 }
 
 // answerTries: how often the headers are asked for. A refused stream is over by the time its read comes back, and

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing/common/logger"
 )
@@ -159,5 +160,130 @@ func TestNekoNaiveUpstreamOf(t *testing.T) {
 	loop.under = loop
 	if _, ok := upstreamOf[*scriptedConn](loop); ok {
 		t.Fatal("found a stream in a wrapper of itself")
+	}
+}
+
+func answeredWith(headers map[string]string) func(ctx context.Context) (map[string]string, error) {
+	return func(ctx context.Context) (map[string]string, error) { return headers, nil }
+}
+
+// await_dial: the dial waits for the server's answer after its own dial (niko-ack: 1, raycontrol naive-uot-v1 §4.1).
+// A 200 hands the connection out, checked; a 502 is the destination's refusal with the server's reason, a 504 a
+// destination silent to the server's timeout; any other status stays the proxy's own.
+func TestNekoNaiveAwaitDial(t *testing.T) {
+	asked := 0
+	conn := &statusConn{
+		Conn: &scriptedConn{reads: []func(p []byte) (int, error){data("hello")}}, ctx: context.Background(),
+		logger: logger.NOP(), headers: answered("200", &asked), ack: true,
+	}
+	if err := conn.await(context.Background()); err != nil {
+		t.Fatalf("a 200: %v", err)
+	}
+	p := make([]byte, 16)
+	if n, err := conn.Read(p); err != nil || string(p[:n]) != "hello" || asked != 1 || !conn.ReaderReplaceable() {
+		t.Fatalf("after a 200: %q, %v, headers asked %d times", p[:n], err, asked)
+	}
+
+	for _, c := range []struct {
+		headers map[string]string
+		want    string
+	}{
+		{map[string]string{":status": "502", "niko-ack": "refused"}, "remote error: connection refused"},
+		{map[string]string{":status": "502", "niko-ack": "unreachable"}, "remote error: host is unreachable"},
+		{map[string]string{":status": "502", "niko-ack": "denied"}, "remote error: destination denied by the server"},
+		{map[string]string{":status": "504"}, "remote error: connect timed out"},
+		// not the dial's outcome: the user's limit, the credentials, a 502 of the proxy's own
+		{map[string]string{":status": "429"}, "unexpected response status: 429"},
+		{map[string]string{":status": "404"}, "unexpected response status: 404"},
+		{map[string]string{":status": "502"}, "unexpected response status: 502"},
+		{map[string]string{":status": "502", "niko-ack": "something new"}, "unexpected response status: 502"},
+	} {
+		conn = &statusConn{
+			Conn: &scriptedConn{}, ctx: context.Background(), logger: logger.NOP(), headers: answeredWith(c.headers), ack: true,
+		}
+		err := conn.await(context.Background())
+		if err == nil || err.Error() != c.want {
+			t.Fatalf("%v: the dial gave %v, want %s", c.headers, err, c.want)
+		}
+		if conn.ReaderReplaceable() {
+			t.Fatalf("%v: a copy may read past the refusal", c.headers)
+		}
+		// a connection handed out all the same (the fallback) reads the same refusal
+		if _, readErr := conn.Read(p); readErr == nil || readErr.Error() != c.want {
+			t.Fatalf("%v: a read gave %v", c.headers, readErr)
+		}
+	}
+
+	// without the request header a 502 or a 504 is not the destination's: a server that was not asked
+	conn = &statusConn{
+		Conn: &scriptedConn{reads: []func(p []byte) (int, error){fails(io.EOF)}}, ctx: context.Background(),
+		logger: logger.NOP(), headers: answeredWith(map[string]string{":status": "502", "niko-ack": "refused"}),
+	}
+	if _, err := conn.Read(p); err == nil || err.Error() != "unexpected response status: 502" {
+		t.Fatalf("a 502 unasked: %v", err)
+	}
+}
+
+// The waits of await_dial: no answer in awaitFallback hands the connection out, the first read checking it then; a
+// dial with less time than that fails at its deadline; a canceled dial ends at once; a refusal whose stream end
+// was taken before its answer is still found.
+func TestNekoNaiveAwaitDialWaits(t *testing.T) {
+	fallback, limit := awaitFallback, awaitLimit
+	awaitFallback, awaitLimit = 50*time.Millisecond, 200*time.Millisecond
+	defer func() { awaitFallback, awaitLimit = fallback, limit }()
+
+	silent := func(ctx context.Context) (map[string]string, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	conn := &statusConn{Conn: &scriptedConn{}, ctx: context.Background(), logger: logger.NOP(), headers: silent, ack: true}
+	started := time.Now()
+	if err := conn.await(context.Background()); err != nil || time.Since(started) < awaitFallback || conn.checked.Load() {
+		t.Fatalf("no answer in the fallback: %v after %v, checked %v", err, time.Since(started), conn.checked.Load())
+	}
+	// handed out unchecked: the answer that comes later is read with the first data
+	conn.Conn = &scriptedConn{reads: []func(p []byte) (int, error){fails(io.EOF)}}
+	conn.headers = answeredWith(map[string]string{":status": "504"})
+	if _, err := conn.Read(make([]byte, 16)); err == nil || err.Error() != "remote error: connect timed out" {
+		t.Fatalf("the answer after the fallback: %v", err)
+	}
+
+	conn = &statusConn{Conn: &scriptedConn{}, ctx: context.Background(), logger: logger.NOP(), headers: silent, ack: true}
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := conn.await(short)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a dial with less time than the fallback: %v", err)
+	}
+
+	conn = &statusConn{Conn: &scriptedConn{}, ctx: context.Background(), logger: logger.NOP(), headers: silent, ack: true}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err = conn.await(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a canceled dial: %v", err)
+	}
+
+	asked := 0
+	conn = &statusConn{
+		Conn: &scriptedConn{}, ctx: context.Background(), logger: logger.NOP(), ack: true,
+		headers: func(ctx context.Context) (map[string]string, error) {
+			asked++
+			if asked < 3 {
+				return nil, io.EOF
+			}
+			return map[string]string{":status": "502", "niko-ack": "refused"}, nil
+		},
+	}
+	if err = conn.await(context.Background()); err == nil || err.Error() != "remote error: connection refused" {
+		t.Fatalf("the end taken before the answer: %v after %d looks", err, asked)
+	}
+	// a stream that failed before any answer keeps its own error
+	broken := errors.New("stream reset")
+	conn = &statusConn{
+		Conn: &scriptedConn{}, ctx: context.Background(), logger: logger.NOP(), ack: true,
+		headers: func(ctx context.Context) (map[string]string, error) { return nil, broken },
+	}
+	if err = conn.await(context.Background()); err != broken {
+		t.Fatalf("a stream that failed before its answer: %v", err)
 	}
 }
