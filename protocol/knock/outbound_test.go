@@ -455,3 +455,17 @@ func TestTCPAttemptEndsBeforeRetransmit(t *testing.T) {
 		}
 	}
 }
+
+// A session starts with no read: its creation is not an answer. Where the clock is coarse (Windows) a write right
+// after the dial fell in the tick of the creation and looked answered, so the first silence was never knocked for.
+func TestWatchdogStartsUnread(t *testing.T) {
+	outbound := newSilenceBox(t, &recorder{})
+	w := outbound.newWatchdog(M.ParseSocksaddrHostPort("127.0.0.1", 9))
+	if w.lastRead.Load() != 0 {
+		t.Fatal("a new session counts as read")
+	}
+	w.onRead()
+	if w.lastRead.Load() == 0 {
+		t.Fatal("a read is not noted")
+	}
+}

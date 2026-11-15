@@ -693,9 +693,10 @@ type watchdog struct {
 }
 
 func (o *Outbound) newWatchdog(destination M.Socksaddr) *watchdog {
-	w := &watchdog{outbound: o, destination: destination}
-	w.lastRead.Store(time.Now().UnixNano())
-	return w
+	// neko: no read yet. The time of creation stood here, and where the clock is coarse (Windows) a write right
+	// after the dial (WireGuard's handshake) fell in the same tick: it looked answered, and the first silence of the
+	// session was never knocked for
+	return &watchdog{outbound: o, destination: destination}
 }
 
 func (w *watchdog) onRead() {

@@ -41,17 +41,3 @@ func setTTL(conn net.Conn, ttl int) (func(), error) {
 		raw.Control(func(fd uintptr) { syscall.SetsockoptInt(int(fd), level, option, old) })
 	}, nil
 }
-
-func findSyscallConn(conn any) (syscall.Conn, bool) {
-	for i := 0; i < 8 && conn != nil; i++ {
-		if c, ok := conn.(syscall.Conn); ok {
-			return c, true
-		}
-		upstream, ok := conn.(interface{ Upstream() any })
-		if !ok {
-			return nil, false
-		}
-		conn = upstream.Upstream()
-	}
-	return nil, false
-}
