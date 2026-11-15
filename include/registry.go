@@ -25,6 +25,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
+	"github.com/sagernet/sing-box/protocol/knock"
 	"github.com/sagernet/sing-box/protocol/mieru"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/naive"
@@ -102,6 +103,7 @@ func OutboundRegistry() *outbound.Registry {
 	vless.RegisterOutbound(registry)
 	anytls.RegisterOutbound(registry)
 	mieru.RegisterOutbound(registry) // neko
+	knock.Register(registry)         // neko: port knocking (SPA) before a profile's own dial, raycontrol nodes
 
 	registerQUICOutbounds(registry)
 	registerDNSTTOutbound(registry)
