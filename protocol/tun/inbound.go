@@ -491,6 +491,8 @@ func (t *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		if err != nil {
 			return E.Cause(err, "starting tun stack")
 		}
+		// before the interface starts: no connection made yet (neko)
+		nekoTCPBuffers(t.tunStack, t.logger)
 		monitor.Start("starting tun interface")
 		err = t.tunIf.Start()
 		monitor.Finish()
