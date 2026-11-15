@@ -36,9 +36,10 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-// The naive outbound on Windows (neko): libcronet.dll of the fork's cronet-go, loaded with purego from PATH (the
-// desktop workflow puts the module's directory there). Server and client run in this process on loopback, the server
-// being the core's own naive inbound; what the outbound carries is echoed back.
+// The naive outbound on Windows (neko): libcronet.dll of the fork's cronet-go, loaded with purego from beside the
+// executable (the desktop workflow builds the test and puts the library there, as beside the desktop's). Server and
+// client run in this process on loopback, the server being the core's own naive inbound; what the outbound carries is
+// echoed back.
 
 const nekoNaiveName = "naive.test"
 
