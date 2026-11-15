@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -789,11 +790,15 @@ func TestSPA2Hosts(t *testing.T) {
 	dial(newBox(t, Options{SPAv2: &options, Hosts: []string{"node.invalid"}}), "127.0.0.1", false)
 	// the node by its address
 	dial(newBox(t, Options{SPAv2: &options, Hosts: []string{"node.invalid", "127.0.0.1"}}), "127.0.0.1", true)
-	// the node by name, and by the address a caller resolved its name to
-	node := newBox(t, Options{SPAv2: &options, Hosts: []string{"localhost"}})
-	dial(node, "localhost", true)
-	node.forget(M.ParseSocksaddrHostPort("127.0.0.1", server))
-	dial(node, "127.0.0.1", true)
+	// the node by name, and by the address a caller resolved its name to. The name is localhost, resolved by the
+	// core's own local transport: from the hosts file, which on Windows has no localhost (its lines are comments
+	// there), and then the adapter's DNS servers. Not on Windows, as the core's hosts tests
+	if runtime.GOOS != "windows" {
+		node := newBox(t, Options{SPAv2: &options, Hosts: []string{"localhost"}})
+		dial(node, "localhost", true)
+		node.forget(M.ParseSocksaddrHostPort("127.0.0.1", server))
+		dial(node, "127.0.0.1", true)
+	}
 	// without a list, everything is knocked at
 	dial(newBox(t, Options{SPAv2: &options}), "127.0.0.1", true)
 
