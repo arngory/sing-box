@@ -238,6 +238,13 @@ func TestNekoDatagramWriteRules(t *testing.T) {
 	if !fake.closed {
 		t.Error("a request the node stopped reading was left open")
 	}
+	// a request that has ended already is not closed by the write: its error is watch's
+	ended := newFakeDatagramConn()
+	ended.writeErr, ended.err = errDatagramClosed, errors.New("net error -3")
+	close(ended.done)
+	if _, err := newDatagramPacketConn(ended).WriteTo([]byte("x"), dns); !errors.Is(err, errDatagramClosed) || ended.closed {
+		t.Errorf("an ended request: %v, closed by the write %v", err, ended.closed)
+	}
 	fake.writeErr = nil
 	if _, err := conn.WriteTo([]byte("x"), M.Socksaddr{Port: 53}); err == nil {
 		t.Error("a destination with no address was written")
@@ -399,6 +406,16 @@ func TestNekoDatagramWatch(t *testing.T) {
 	refusedOnce(d, 503)
 	if !d.usable() || d.refusedInARow.Load() != 1 {
 		t.Errorf("the last network's refusals counted on this one: %d", d.refusedInARow.Load())
+	}
+
+	// a request that ended with an error and was closed before watch read its answer: the error counts
+	d = newClient()
+	fake = newFakeDatagramConn()
+	fake.readyErr, fake.err = net.ErrClosed, errors.New("net error -2")
+	close(fake.done)
+	d.watch(context.Background(), fake, d.generation.Load())
+	if d.usable() {
+		t.Error("a failed request hidden by its close kept datagrams")
 	}
 
 	// the app closed the socket before the answer: not the path's fault

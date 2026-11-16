@@ -195,9 +195,14 @@ func (c *datagramPacketConn) write(destination M.Socksaddr, payload []byte, fram
 	}
 	err = c.conn.WriteDatagram(frame(header))
 	if errors.Is(err, errDatagramClosed) {
-		// the node stopped reading the request (STOP_SENDING) while it may go on sending: the socket ends here, so
-		// its reads end too and the app's next packet opens a new request, instead of one that only reads
-		c.conn.Close()
+		select {
+		case <-c.conn.Done():
+			// the request has ended: its error is for watch to read, which a close here could hide
+		default:
+			// the node stopped reading the request (STOP_SENDING) while it may go on sending: the socket ends here,
+			// so its reads end too and the app's next packet opens a new request, instead of one that only reads
+			c.conn.Close()
+		}
 	}
 	switch {
 	case err == nil,
@@ -496,6 +501,16 @@ func (d *datagramClient) headers() map[string]string {
 // new sockets back to UoT (§9.4 step 4). A socket the app closed, or one the node ended cleanly, says nothing.
 func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generation uint64) {
 	status, headers, err := conn.WaitReady(ctx)
+	if errors.Is(err, net.ErrClosed) {
+		// a request that ended before it was closed: its own end is the answer, not the close
+		select {
+		case <-conn.Done():
+			if ended := conn.Err(); ended != nil && !errors.Is(ended, net.ErrClosed) {
+				err = ended
+			}
+		default:
+		}
+	}
 	switch {
 	case err == nil && datagramAccepted(status, headers):
 	case err == nil && datagramRefusedOnce(status):
