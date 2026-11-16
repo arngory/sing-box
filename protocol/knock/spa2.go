@@ -430,8 +430,8 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	return conn, nil
 }
 
-// dialPeer dials the service; a UDP service with a rotating port (spa-v2.md §11)
-// gets one socket that follows the slot port.
+// dialPeer dials the service; a UDP flow to a service with a rotating port
+// (spa-v2.md §11) goes to the current slot's port and keeps it.
 func (o *Outbound) dialPeer(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	schedule := o.udpPorts[destination.Port]
 	if schedule == nil || N.NetworkName(network) != N.NetworkUDP || !destination.IsIP() {
@@ -441,19 +441,9 @@ func (o *Outbound) dialPeer(ctx context.Context, network string, destination M.S
 	if err != nil {
 		return nil, err
 	}
-	// each slot's socket is opened when the slot turns, long after this dial's context may have ended
-	listenCtx := context.WithoutCancel(ctx)
-	conn := newRotatingUDPConn(packetConn, destination, schedule, func() (net.PacketConn, error) {
-		return o.dialer.ListenPacket(listenCtx, destination)
-	})
-	conn.onTurn = func(from, to uint16, err error) {
-		if err != nil {
-			o.logger.Warn("UDP ", destination.AddrString(), ":", destination.Port, ": slot port ", from, " -> ", to, " on the same socket, no new one: ", err)
-			return
-		}
-		o.logger.Debug("UDP ", destination.AddrString(), ":", destination.Port, ": slot port ", from, " -> ", to, ", from a new socket")
-	}
-	o.logger.DebugContext(ctx, "UDP ", destination, " goes to the slot port ", schedule.port(time.Now()))
+	port := schedule.port(time.Now())
+	o.logger.DebugContext(ctx, "UDP ", destination, " goes to the slot port ", port, " for this flow's life")
+	conn := newSlotUDPConn(packetConn, destination, port)
 	return conn, nil
 }
 
