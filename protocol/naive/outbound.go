@@ -386,6 +386,7 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	if packetConn := h.datagramPacketConn(ctx, destination); packetConn != nil {
 		return packetConn, nil
 	}
+	h.logger.InfoContext(ctx, "outbound UoT packet connection to ", destination)
 	return h.uotClient.ListenPacket(ctx, destination)
 }
 
