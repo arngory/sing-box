@@ -441,11 +441,19 @@ func (o *Outbound) dialPeer(ctx context.Context, network string, destination M.S
 	if err != nil {
 		return nil, err
 	}
-	conn := newRotatingUDPConn(packetConn, destination, schedule)
-	conn.onTurn = func(from, to uint16) {
-		o.logger.Debug("UDP ", destination.AddrString(), ":", destination.Port, ": slot port ", from, " -> ", to)
+	// each slot's socket is opened when the slot turns, long after this dial's context may have ended
+	listenCtx := context.WithoutCancel(ctx)
+	conn := newRotatingUDPConn(packetConn, destination, schedule, func() (net.PacketConn, error) {
+		return o.dialer.ListenPacket(listenCtx, destination)
+	})
+	conn.onTurn = func(from, to uint16, err error) {
+		if err != nil {
+			o.logger.Warn("UDP ", destination.AddrString(), ":", destination.Port, ": slot port ", from, " -> ", to, " on the same socket, no new one: ", err)
+			return
+		}
+		o.logger.Debug("UDP ", destination.AddrString(), ":", destination.Port, ": slot port ", from, " -> ", to, ", from a new socket")
 	}
-	o.logger.DebugContext(ctx, "UDP ", destination, " goes to the slot port ", conn.current().Port)
+	o.logger.DebugContext(ctx, "UDP ", destination, " goes to the slot port ", schedule.port(time.Now()))
 	return conn, nil
 }
 

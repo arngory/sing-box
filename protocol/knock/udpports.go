@@ -6,12 +6,16 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/pipe"
 )
 
 // UDPPortSchedule is a UDP service of a raycontrol node whose port rotates
@@ -77,64 +81,203 @@ func (s *portSchedule) port(now time.Time) uint16 {
 	return port
 }
 
+// rotatingQuiet is how long an earlier socket of a rotating flow may hear
+// nothing before it is closed: longer than any QUIC idle timeout, so a live
+// connection has had a packet on it if the server still answers there.
+const rotatingQuiet = 2 * time.Minute
+
 // rotatingUDPConn is a connected-looking UDP flow to a service whose port
-// rotates. One socket sends every datagram to the port of the current slot, so
-// the node (which maps slot ports to the service, NAT keeps the client's
-// address) sees one flow and QUIC goes on across slots. Replies come from the
-// slot port; they are reported as coming from the service's own address, so
-// the protocol above never sees the remote address change.
+// rotates (spa-v2.md §11). Datagrams go to the port of the current slot; at a
+// slot's turn the flow moves to a socket of its own, a new client port. The
+// node redirects slot ports to the service with NAT, and a second redirect of
+// the same client address and port has the reply tuple of the first, which
+// conntrack drops while the first lives: one socket across a turn went silent
+// for a minute and more. The earlier sockets are still read, since the server
+// answers the address it knows until it moves to the new one (to QUIC the move
+// is a NAT rebinding); one that has heard nothing for rotatingQuiet is closed,
+// though never the last one heard from. Replies are reported as coming from
+// the service's own address, so the protocol above never sees it change.
 type rotatingUDPConn struct {
-	conn   net.PacketConn
+	// listen opens the socket of a new slot
+	listen func() (net.PacketConn, error)
 	remote *net.UDPAddr
 	nodeIP netip.Addr
 	// the slot port at a time
 	portAt func(time.Time) uint16
 	now    func() time.Time
+	quiet  time.Duration
+	// a slot turned: err says why the flow stayed on its socket
+	onTurn func(from, to uint16, err error)
 
-	access sync.Mutex
-	port   uint16
-	target *net.UDPAddr
-	onTurn func(from, to uint16)
+	access        sync.Mutex
+	port          uint16
+	target        *net.UDPAddr
+	current       *rotatingSocket
+	sockets       []*rotatingSocket // every open one, the current last
+	writeDeadline time.Time
+	closed        bool
+
+	start        sync.Once
+	reads        chan []byte
+	failed       chan error
+	done         chan struct{}
+	readDeadline pipe.Deadline
 }
 
-func newRotatingUDPConn(conn net.PacketConn, destination M.Socksaddr, schedule *portSchedule) *rotatingUDPConn {
-	return &rotatingUDPConn{
-		conn:   conn,
-		remote: destination.UDPAddr(),
-		nodeIP: destination.Addr.Unmap(),
-		portAt: schedule.port,
-		now:    time.Now,
+type rotatingSocket struct {
+	net.PacketConn
+	// when it last heard from the node (opening counts), unix nanoseconds
+	heard   atomic.Int64
+	retired atomic.Bool
+}
+
+func newRotatingUDPConn(conn net.PacketConn, destination M.Socksaddr, schedule *portSchedule, listen func() (net.PacketConn, error)) *rotatingUDPConn {
+	c := &rotatingUDPConn{
+		listen:       listen,
+		remote:       destination.UDPAddr(),
+		nodeIP:       destination.Addr.Unmap(),
+		portAt:       schedule.port,
+		now:          time.Now,
+		quiet:        rotatingQuiet,
+		reads:        make(chan []byte),
+		failed:       make(chan error, 1),
+		done:         make(chan struct{}),
+		readDeadline: pipe.MakeDeadline(),
 	}
+	c.current = &rotatingSocket{PacketConn: conn}
+	c.sockets = []*rotatingSocket{c.current}
+	return c
 }
 
-func (c *rotatingUDPConn) current() *net.UDPAddr {
-	port := c.portAt(c.now())
+// begin starts reading the first socket; the fields stay as set until then.
+func (c *rotatingUDPConn) begin() {
+	c.start.Do(func() {
+		c.access.Lock()
+		defer c.access.Unlock()
+		if !c.closed {
+			c.current.heard.Store(c.now().UnixNano())
+			go c.readLoop(c.current)
+		}
+	})
+}
+
+// next returns the socket and the address the next datagram goes to,
+// moving the flow to a new socket when the slot turned.
+func (c *rotatingUDPConn) next() (*rotatingSocket, *net.UDPAddr, error) {
+	now := c.now()
+	port := c.portAt(now)
 	c.access.Lock()
 	defer c.access.Unlock()
+	if c.closed {
+		return nil, nil, net.ErrClosed
+	}
 	if c.target == nil || port != c.port {
-		if c.target != nil && c.onTurn != nil {
-			c.onTurn(c.port, port)
+		if c.target != nil {
+			// without a new socket the flow stays on its own one, as it was before the move
+			conn, err := c.listen()
+			if err == nil {
+				s := &rotatingSocket{PacketConn: conn}
+				s.heard.Store(now.UnixNano())
+				if !c.writeDeadline.IsZero() {
+					conn.SetWriteDeadline(c.writeDeadline)
+				}
+				c.current = s
+				c.sockets = append(c.sockets, s)
+				go c.readLoop(s)
+			}
+			if c.onTurn != nil {
+				c.onTurn(c.port, port, err)
+			}
+			c.retireQuiet(now)
 		}
 		c.port = port
 		c.target = &net.UDPAddr{IP: c.remote.IP, Port: int(port), Zone: c.remote.Zone}
 	}
-	return c.target
+	return c.current, c.target, nil
+}
+
+// retireQuiet closes the earlier sockets that heard nothing for c.quiet, but
+// not the last one heard from; c.access is held.
+func (c *rotatingUDPConn) retireQuiet(now time.Time) {
+	var latest *rotatingSocket
+	for _, s := range c.sockets {
+		if s != c.current && (latest == nil || s.heard.Load() > latest.heard.Load()) {
+			latest = s
+		}
+	}
+	kept := c.sockets[:0]
+	for _, s := range c.sockets {
+		if s != c.current && s != latest && now.Sub(time.Unix(0, s.heard.Load())) > c.quiet {
+			s.retired.Store(true)
+			s.Close()
+			continue
+		}
+		kept = append(kept, s)
+	}
+	clear(c.sockets[len(kept):])
+	c.sockets = kept
+}
+
+func (c *rotatingUDPConn) readLoop(s *rotatingSocket) {
+	scratch := make([]byte, 65535)
+	for {
+		n, from, err := s.ReadFrom(scratch)
+		if err != nil {
+			c.access.Lock()
+			fatal := !s.retired.Load() && !c.closed && s == c.current
+			if !fatal && !s.retired.Load() {
+				// an earlier socket that broke: the others go on
+				s.retired.Store(true)
+				s.Close()
+				c.sockets = slices.DeleteFunc(c.sockets, func(v *rotatingSocket) bool { return v == s })
+			}
+			c.access.Unlock()
+			if fatal {
+				select {
+				case c.failed <- err:
+				default:
+				}
+			}
+			return
+		}
+		if !c.fromNode(from) {
+			continue
+		}
+		s.heard.Store(c.now().UnixNano())
+		data := buf.Get(n)
+		copy(data, scratch[:n])
+		select {
+		case c.reads <- data:
+		case <-c.done:
+			buf.Put(data)
+			return
+		}
+	}
 }
 
 func (c *rotatingUDPConn) Write(p []byte) (int, error) {
-	return c.conn.WriteTo(p, c.current())
+	c.begin()
+	s, target, err := c.next()
+	if err != nil {
+		return 0, err
+	}
+	return s.WriteTo(p, target)
 }
 
-// Read returns datagrams from the node's address only, whatever port they come from.
+// Read returns datagrams from the node's address only, whatever port and socket they come from.
 func (c *rotatingUDPConn) Read(p []byte) (int, error) {
-	for {
-		n, from, err := c.conn.ReadFrom(p)
-		if err != nil {
-			return n, err
-		}
-		if c.fromNode(from) {
-			return n, nil
-		}
+	c.begin()
+	select {
+	case data := <-c.reads:
+		n := copy(p, data)
+		buf.Put(data)
+		return n, nil
+	case err := <-c.failed:
+		return 0, err
+	case <-c.done:
+		return 0, net.ErrClosed
+	case <-c.readDeadline.Wait():
+		return 0, os.ErrDeadlineExceeded
 	}
 }
 
@@ -148,10 +291,47 @@ func (c *rotatingUDPConn) fromNode(addr net.Addr) bool {
 	}
 }
 
-func (c *rotatingUDPConn) Close() error                       { return c.conn.Close() }
-func (c *rotatingUDPConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }
-func (c *rotatingUDPConn) RemoteAddr() net.Addr               { return c.remote }
-func (c *rotatingUDPConn) SetDeadline(t time.Time) error      { return c.conn.SetDeadline(t) }
-func (c *rotatingUDPConn) SetReadDeadline(t time.Time) error  { return c.conn.SetReadDeadline(t) }
-func (c *rotatingUDPConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
-func (c *rotatingUDPConn) Upstream() any                      { return c.conn }
+func (c *rotatingUDPConn) Close() error {
+	c.access.Lock()
+	defer c.access.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	close(c.done)
+	var err error
+	for _, s := range c.sockets {
+		s.retired.Store(true)
+		err = E.Errors(err, s.Close())
+	}
+	c.sockets = nil
+	return err
+}
+
+func (c *rotatingUDPConn) LocalAddr() net.Addr {
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.current.LocalAddr()
+}
+
+func (c *rotatingUDPConn) RemoteAddr() net.Addr { return c.remote }
+
+func (c *rotatingUDPConn) SetDeadline(t time.Time) error {
+	c.SetReadDeadline(t)
+	return c.SetWriteDeadline(t)
+}
+
+func (c *rotatingUDPConn) SetReadDeadline(t time.Time) error {
+	c.readDeadline.Set(t)
+	return nil
+}
+
+func (c *rotatingUDPConn) SetWriteDeadline(t time.Time) error {
+	c.access.Lock()
+	defer c.access.Unlock()
+	c.writeDeadline = t
+	for _, s := range c.sockets {
+		s.SetWriteDeadline(t)
+	}
+	return nil
+}
