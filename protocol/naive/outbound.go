@@ -410,6 +410,16 @@ func (h *Outbound) SetDatagramAllowed(allowed bool) {
 	}
 }
 
+// DatagramProbe opens a UDP socket as HTTP/3 datagrams whether or not this network allows them yet: the app's probe
+// of the path (naive-udp-v1 §9.4) sends its echo through it. A refusal it meets counts as any socket's would
+// (neko).
+func (h *Outbound) DatagramProbe(ctx context.Context) (net.PacketConn, error) {
+	if h.datagram == nil {
+		return nil, E.New("naive: no UDP datagrams (udp_datagram is off)")
+	}
+	return h.datagram.listenPacket(ctx)
+}
+
 // DatagramState tells how new UDP sockets go: "off" (no udp_datagram), "unsupported" (the library has no
 // datagrams), "refused" (back over UoT on this network), "allowed" or "probing" (UoT until the app allows) (neko).
 func (h *Outbound) DatagramState() string {
