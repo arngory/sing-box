@@ -344,7 +344,6 @@ func TestNekoDatagramWatch(t *testing.T) {
 		err     error
 	}{
 		{404, nil, nil},
-		{429, nil, nil},
 		{200, nil, nil},
 		{0, nil, errors.New("net error -322")},
 		{0, nil, errDatagramUnsupported},
@@ -355,6 +354,17 @@ func TestNekoDatagramWatch(t *testing.T) {
 		d.watch(context.Background(), fake, d.generation.Load())
 		if d.usable() || !fake.closed {
 			t.Errorf("answer %d %v: usable %v, closed %v", answer.status, answer.err, d.usable(), fake.closed)
+		}
+	}
+
+	// a 429 or a 503 refuses this socket only: it ends, the next one asks again
+	for _, status := range []int{429, 503} {
+		d = newClient()
+		fake = newFakeDatagramConn()
+		fake.status, fake.headers = status, nil
+		d.watch(context.Background(), fake, d.generation.Load())
+		if !d.usable() || !fake.closed {
+			t.Errorf("answer %d: usable %v, closed %v", status, d.usable(), fake.closed)
 		}
 	}
 

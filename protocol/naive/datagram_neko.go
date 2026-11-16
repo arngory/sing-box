@@ -350,6 +350,13 @@ func datagramAccepted(status int, headers map[string]string) bool {
 	return false
 }
 
+// datagramRefusedOnce tells an answer that refuses this request only: 429 (the places of the user or the service,
+// §7) and 503 (the node's socket did not open, try later). Any other answer that is not the request's acceptance is
+// the site's: the service's flag is off or the node is old, and the network stays on UoT (§9.4 step 4).
+func datagramRefusedOnce(status int) bool {
+	return status == 429 || status == 503
+}
+
 // datagramClient opens the requests on a second naive client whose engine is QUIC, started at the first socket.
 // The app decides per network whether UDP goes this way (SetDatagramAllowed, after its probe: naive-udp-v1 §9.4);
 // a refusal, a node without datagrams or a QUIC connection that broke sends new sockets back over UoT until the
@@ -472,6 +479,12 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 	status, headers, err := conn.WaitReady(ctx)
 	switch {
 	case err == nil && datagramAccepted(status, headers):
+	case err == nil && datagramRefusedOnce(status):
+		// the places of the user or the service (shared with UoT, which a 429 would reach as well) or a socket the
+		// node could not open: this socket ends, the next one asks again
+		d.logger.DebugContext(ctx, "naive: the node refused a UDP request: ", status)
+		conn.Close()
+		return
 	case err == nil:
 		d.refuse(generation, "the node answered "+F.ToString(status))
 		conn.Close()
