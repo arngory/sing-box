@@ -383,6 +383,8 @@ type datagramClient struct {
 
 	allowed atomic.Bool
 	refused atomic.Bool
+	// allowed from the start and after every network change (udp_datagram_allowed): no app probes
+	allowedAlways bool
 	// counts the networks: a request of an earlier one that fails (its connections are closed on the change) says
 	// nothing about this one
 	generation atomic.Uint64
@@ -539,7 +541,7 @@ func (d *datagramClient) networkChanged() {
 		return
 	}
 	d.generation.Add(1)
-	d.allowed.Store(false)
+	d.allowed.Store(d.allowedAlways)
 	d.refused.Store(false)
 	d.refusedInARow.Store(0)
 	d.access.Lock()

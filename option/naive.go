@@ -44,4 +44,8 @@ type NaiveOutboundOptions struct {
 	// links), on a network where the app has allowed it after its probe (the outbound's SetDatagramAllowed). UDP over
 	// TCP stays the way before that and after a refusal, so it needs udp_over_tcp
 	UDPDatagram bool `json:"udp_datagram,omitempty"`
+	// neko: with udp_datagram, datagrams are allowed from the start and on every network, without an app's probe:
+	// for a client that does not probe (a plain sing-box, a test). A refusal still sends UDP over TCP until the
+	// network changes
+	UDPDatagramAllowed bool `json:"udp_datagram_allowed,omitempty"`
 }

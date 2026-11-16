@@ -268,6 +268,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			authorization = "Basic " + base64.StdEncoding.EncodeToString([]byte(options.Username+":"+options.Password))
 		}
 		datagram = newDatagramClient(ctx, logger, clientOptions, serverName, authorization)
+		if options.UDPDatagramAllowed {
+			datagram.allowedAlways = true
+			datagram.allowed.Store(true)
+		}
 	}
 	var networks []string
 	if uotClient != nil {

@@ -428,6 +428,14 @@ func TestNekoDatagramWatch(t *testing.T) {
 	if !d.usable() {
 		t.Error("the last network's closed request sent this one's sockets back over UoT")
 	}
+	// udp_datagram_allowed: allowed again after a network change, with no probe
+	always := newClient()
+	always.allowedAlways = true
+	always.refuse(always.generation.Load(), "test")
+	always.networkChanged()
+	if !always.usable() {
+		t.Error("udp_datagram_allowed did not keep datagrams on the next network")
+	}
 	var none *datagramClient
 	if none.usable() {
 		t.Error("an outbound without the option uses datagrams")
