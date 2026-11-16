@@ -147,6 +147,35 @@ type datagramPacketConn struct {
 	// was QUIC
 	access sync.Mutex
 	pairs  map[string]bool
+	// what this socket sent, read and lost on its side (UDP loses it without an error), said once when it closes:
+	// a socket whose datagrams never come back shows whether they left
+	sent, received atomic.Uint64
+	dropped        [writeDropReasons]atomic.Uint64
+	closeOnce      sync.Once
+	onClose        func(counts string)
+}
+
+// why a datagram the app wrote did not leave (writeDropNames)
+const (
+	writeDropLong           = iota // over the largest UDP payload
+	writeDropQUIC                  // a QUIC pair's datagram over 1252 bytes that no QUIC datagram carries (§4.4)
+	writeDropQueue                 // the library's queue of datagrams was full
+	writeDropCapsuleTimeout        // the capsule waited too long for the stream
+	writeDropTooLarge              // the library's own limit
+	writeDropReasons
+)
+
+var writeDropNames = [writeDropReasons]string{"long", "quic", "queue", "capsule-timeout", "too-large"}
+
+// counts are what Close says: sent and received, then each reason a datagram was lost for.
+func (c *datagramPacketConn) counts() string {
+	counts := F.ToString("sent ", c.sent.Load(), ", received ", c.received.Load())
+	for reason := range writeDropReasons {
+		if n := c.dropped[reason].Load(); n > 0 {
+			counts += F.ToString(", dropped ", writeDropNames[reason], " ", n)
+		}
+	}
+	return counts
 }
 
 var (
@@ -180,6 +209,7 @@ func (c *datagramPacketConn) quicPair(destination M.Socksaddr, payload []byte) b
 // the library has no room for, is lost as UDP is: no error.
 func (c *datagramPacketConn) write(destination M.Socksaddr, payload []byte, frame func(header []byte) []byte) error {
 	if len(payload) > datagramMaxPayload {
+		c.dropped[writeDropLong].Add(1)
 		return nil
 	}
 	var headerArray [datagramMaxHeader]byte
@@ -191,6 +221,7 @@ func (c *datagramPacketConn) write(destination M.Socksaddr, payload []byte, fram
 		// a datagram that does not fit the QUIC datagram goes as a capsule (or, before the node's answer, every one
 		// does): a QUIC pair's longer one is dropped instead
 		if maxPayload := c.conn.MaxPayload(); maxPayload == 0 || len(header)+len(payload) > maxPayload {
+			c.dropped[writeDropQUIC].Add(1)
 			return nil
 		}
 	}
@@ -206,10 +237,17 @@ func (c *datagramPacketConn) write(destination M.Socksaddr, payload []byte, fram
 		}
 	}
 	switch {
-	case err == nil,
-		errors.Is(err, errDatagramQueueFull),
-		errors.Is(err, errDatagramCapsuleTimeout),
-		errors.Is(err, errDatagramTooLarge):
+	case err == nil:
+		c.sent.Add(1)
+		return nil
+	case errors.Is(err, errDatagramQueueFull):
+		c.dropped[writeDropQueue].Add(1)
+		return nil
+	case errors.Is(err, errDatagramCapsuleTimeout):
+		c.dropped[writeDropCapsuleTimeout].Add(1)
+		return nil
+	case errors.Is(err, errDatagramTooLarge):
+		c.dropped[writeDropTooLarge].Add(1)
 		return nil
 	default:
 		return err
@@ -255,6 +293,7 @@ func (c *datagramPacketConn) readFrame(b []byte) (source M.Socksaddr, header, n 
 		}
 		source, header, err = parseDatagramAddress(b[:n])
 		if err == nil {
+			c.received.Add(1)
 			return source, header, n, nil
 		}
 	}
@@ -283,6 +322,11 @@ func (c *datagramPacketConn) CreateReadWaiter() (N.PacketReadWaiter, bool) {
 }
 
 func (c *datagramPacketConn) Close() error {
+	c.closeOnce.Do(func() {
+		if c.onClose != nil {
+			c.onClose(c.counts())
+		}
+	})
 	return c.conn.Close()
 }
 
@@ -532,7 +576,11 @@ func (d *datagramClient) listenPacket(ctx context.Context) (net.PacketConn, erro
 		return nil, err
 	}
 	go d.watch(ctx, conn, generation)
-	return newDatagramPacketConn(conn), nil
+	packetConn := newDatagramPacketConn(conn)
+	packetConn.onClose = func(counts string) {
+		d.logger.DebugContext(ctx, "naive: UDP socket closed: ", counts)
+	}
+	return packetConn, nil
 }
 
 // headers are a request's (§3.2), as the tunnel's: Padding, the authorization, QUIC forced, the user's extra

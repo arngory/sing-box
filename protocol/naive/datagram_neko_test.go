@@ -257,6 +257,20 @@ func TestNekoDatagramWriteRules(t *testing.T) {
 	if _, err := conn.WriteTo([]byte("x"), M.Socksaddr{Port: 53}); err == nil {
 		t.Error("a destination with no address was written")
 	}
+	// longer than UDP carries: lost
+	if _, err := conn.WriteTo(make([]byte, datagramMaxPayload+1), dns); err != nil || fake.frameCount() != 5 {
+		t.Errorf("a datagram longer than UDP: %v, %d frames", err, fake.frameCount())
+	}
+
+	// the socket says once, as it closes, what it sent and why it lost what it did
+	var said []string
+	conn.onClose = func(counts string) { said = append(said, counts) }
+	conn.Close()
+	conn.Close()
+	want := "sent 5, received 0, dropped long 1, dropped quic 1, dropped queue 1, dropped capsule-timeout 1"
+	if len(said) != 1 || said[0] != want {
+		t.Errorf("said on close %q, want once %q", said, want)
+	}
 }
 
 func TestNekoDatagramWritePacketHeadroom(t *testing.T) {
@@ -307,6 +321,9 @@ func TestNekoDatagramRead(t *testing.T) {
 	}
 	if _, _, err = conn.ReadFrom(p); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("read after the end: %v", err)
+	}
+	if counts := conn.counts(); counts != "sent 0, received 2" {
+		t.Errorf("counts %q: the unreadable frame counted, or a read not", counts)
 	}
 }
 
