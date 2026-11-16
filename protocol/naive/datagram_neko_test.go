@@ -34,6 +34,8 @@ type fakeDatagramConn struct {
 	done       chan struct{}
 	err        error
 	closed     bool
+	// no answer until the context ends (the library waiting for SETTINGS)
+	hang bool
 }
 
 func newFakeDatagramConn() *fakeDatagramConn {
@@ -42,8 +44,14 @@ func newFakeDatagramConn() *fakeDatagramConn {
 }
 
 func (f *fakeDatagramConn) WaitReady(ctx context.Context) (int, map[string]string, error) {
+	if f.hang {
+		<-ctx.Done()
+		return 0, nil, ctx.Err()
+	}
 	return f.status, f.headers, f.readyErr
 }
+
+func (f *fakeDatagramConn) Dropped() (receive, capsules uint64) { return 0, 0 }
 
 func (f *fakeDatagramConn) ReadDatagram(ctx context.Context, b []byte) (int, error) {
 	frame, ok := <-f.frames
@@ -646,5 +654,36 @@ func TestNekoDatagramRetry(t *testing.T) {
 	d.allowed.Store(true)
 	if !d.usable() || d.proved.Load() || d.retryAt.Load() != 0 || d.retries.Load() != 0 {
 		t.Fatal("a new network kept the last one's state")
+	}
+}
+
+// A request with no answer in datagramAnswerTimeout (the library waiting for the node's SETTINGS with no limit of its
+// own) is closed and counts as a QUIC that did not come up; the app's own context ending first does not count.
+func TestNekoDatagramNoAnswer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits the answer's timeout")
+	}
+	d := &datagramClient{ctx: context.Background(), logger: log.NewNOPFactory().Logger()}
+	d.allowed.Store(true)
+	fake := newFakeDatagramConn()
+	fake.hang = true
+	started := time.Now()
+	d.watch(context.Background(), fake, d.generation.Load())
+	if waited := time.Since(started); waited < datagramAnswerTimeout || waited > datagramAnswerTimeout+5*time.Second {
+		t.Errorf("waited %s for the answer", waited)
+	}
+	if d.usable() || !fake.closed {
+		t.Errorf("no answer: usable %v, closed %v", d.usable(), fake.closed)
+	}
+	// the app's context ends first: not the path's fault
+	d = &datagramClient{ctx: context.Background(), logger: log.NewNOPFactory().Logger()}
+	d.allowed.Store(true)
+	fake = newFakeDatagramConn()
+	fake.hang = true
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	d.watch(ctx, fake, d.generation.Load())
+	if !d.usable() {
+		t.Error("the app's context ending was taken for no answer")
 	}
 }

@@ -134,6 +134,7 @@ type datagramConn interface {
 	MaxPayload() int
 	SetReadDeadline(t time.Time) error
 	SetWriteDeadline(t time.Time) error
+	Dropped() (receive, capsules uint64)
 	Done() <-chan struct{}
 	Err() error
 	Close() error
@@ -554,7 +555,14 @@ func (d *datagramClient) headers() map[string]string {
 // watch checks the node's answer to a request and how the request ends: a refusal or a broken connection turns
 // new sockets back to UoT (§9.4 step 4). A socket the app closed, or one the node ended cleanly, says nothing.
 func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generation uint64) {
-	status, headers, err := conn.WaitReady(ctx)
+	// the library waits for the node's SETTINGS with no time limit of its own: a request that has no answer in
+	// datagramAnswerTimeout counts as a QUIC that did not come up (passing where datagrams worked)
+	answerCtx, cancel := context.WithTimeout(ctx, datagramAnswerTimeout)
+	status, headers, err := conn.WaitReady(answerCtx)
+	cancel()
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		err = errDatagramNoAnswer
+	}
 	if errors.Is(err, net.ErrClosed) {
 		// a request that ended before it was closed: its own end is the answer, not the close
 		select {
@@ -611,12 +619,18 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 	}
 	<-conn.Done()
 	err = conn.Err()
-	d.logger.DebugContext(ctx, "naive: UDP request ended: ", err)
+	receive, capsules := conn.Dropped()
+	d.logger.DebugContext(ctx, "naive: UDP request ended: ", err, "; dropped: received ", receive, ", capsules ", capsules)
 	if err != nil && !quietEnd(err) {
 		// after the node took it: a reset or QUIC broken (the node's restart among them), passing
 		d.refuse(generation, err.Error(), !datagramNever(err))
 	}
 }
+
+// datagramAnswerTimeout is how long a request may wait for the node's answer; errDatagramNoAnswer is its end.
+const datagramAnswerTimeout = 10 * time.Second
+
+var errDatagramNoAnswer = errors.New("naive: no answer to the UDP request in 10 s")
 
 // quietEnd tells an end that is no fault of the path: the app's close, its context, the node's clean end.
 func quietEnd(err error) bool {
