@@ -234,6 +234,10 @@ func TestNekoDatagramWriteRules(t *testing.T) {
 	if _, err := conn.WriteTo([]byte("x"), dns); !errors.Is(err, errDatagramClosed) {
 		t.Errorf("a closed request was not an error: %v", err)
 	}
+	// the node stopped reading: the socket closes itself, its reads end
+	if !fake.closed {
+		t.Error("a request the node stopped reading was left open")
+	}
 	fake.writeErr = nil
 	if _, err := conn.WriteTo([]byte("x"), M.Socksaddr{Port: 53}); err == nil {
 		t.Error("a destination with no address was written")

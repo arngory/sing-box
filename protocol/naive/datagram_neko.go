@@ -194,6 +194,11 @@ func (c *datagramPacketConn) write(destination M.Socksaddr, payload []byte, fram
 		}
 	}
 	err = c.conn.WriteDatagram(frame(header))
+	if errors.Is(err, errDatagramClosed) {
+		// the node stopped reading the request (STOP_SENDING) while it may go on sending: the socket ends here, so
+		// its reads end too and the app's next packet opens a new request, instead of one that only reads
+		c.conn.Close()
+	}
 	switch {
 	case err == nil,
 		errors.Is(err, errDatagramQueueFull),
