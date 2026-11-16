@@ -1,4 +1,4 @@
-//go:build with_naive_outbound && with_naive_datagram
+//go:build with_naive_outbound
 
 package naive
 
@@ -8,8 +8,8 @@ import (
 	"github.com/sagernet/cronet-go"
 )
 
-// The datagram API of cronet-go (arngory/cronet-go, naive-udp-v1 §8.4): built with with_naive_datagram, which needs
-// a cronet-go whose go branch carries it and a libcronet built with datagram_stream (neko).
+// The datagram API of cronet-go (arngory/cronet-go, naive-udp-v1 §8.4; its libcronet built with datagram_stream). A
+// libcronet without the symbols, an old one, answers ErrDatagramUnsupported: UDP stays over TCP (neko).
 
 var _ datagramConn = (*cronet.DatagramConn)(nil)
 

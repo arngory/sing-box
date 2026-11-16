@@ -496,7 +496,7 @@ func TestNekoDatagramClosed(t *testing.T) {
 	}
 }
 
-// A core without with_naive_datagram, or a libcronet without the datagram symbols (or none at all), keeps UDP over
+// A libcronet without the datagram symbols (an old one, or none at all), keeps UDP over
 // TCP: the engine is not started and new sockets stop asking for datagrams.
 func TestNekoDatagramSupport(t *testing.T) {
 	err := checkDatagramSupport()
