@@ -28,3 +28,6 @@ func checkDatagramSupport() error {
 func openDatagram(ctx context.Context, client *cronet.NaiveClient, url string, headers map[string]string) (datagramConn, error) {
 	return nil, errDatagramUnsupported
 }
+
+// datagramBuilt: this core does not carry the datagram API.
+const datagramBuilt = false

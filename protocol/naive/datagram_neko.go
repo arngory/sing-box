@@ -357,6 +357,10 @@ func datagramRefusedOnce(status int) bool {
 	return status == 429 || status == 503
 }
 
+// datagramRefusalsInARow 429s and 503s with no request taken between them send the network back over UoT: the node
+// keeps refusing, and every UDP socket of the app would end at its first answer.
+const datagramRefusalsInARow = 3
+
 // datagramClient opens the requests on a second naive client whose engine is QUIC, started at the first socket.
 // The app decides per network whether UDP goes this way (SetDatagramAllowed, after its probe: naive-udp-v1 §9.4);
 // a refusal, a node without datagrams or a QUIC connection that broke sends new sockets back over UoT until the
@@ -382,13 +386,15 @@ type datagramClient struct {
 	// counts the networks: a request of an earlier one that fails (its connections are closed on the change) says
 	// nothing about this one
 	generation atomic.Uint64
+	// 429s and 503s since the last request the node took, on this network
+	refusedInARow atomic.Int32
 }
 
 func newDatagramClient(ctx context.Context, logger logger.ContextLogger, options cronet.NaiveClientOptions, serverName string, authorization string) *datagramClient {
 	options.QUIC = true
 	// one QUIC connection carries every request: one congestion controller, one path MTU (§2.4)
 	options.InsecureConcurrency = 0
-	return &datagramClient{
+	d := &datagramClient{
 		ctx:           ctx,
 		logger:        logger,
 		options:       options,
@@ -396,6 +402,12 @@ func newDatagramClient(ctx context.Context, logger logger.ContextLogger, options
 		authorization: authorization,
 		extraHeaders:  options.ExtraHeaders,
 	}
+	if !datagramBuilt {
+		// a core without the datagram API: the app's state says so from the start, and no probe is spent on it
+		d.unsupported.Store(true)
+		logger.WarnContext(ctx, "naive: UDP stays over TCP: ", errDatagramUnsupported)
+	}
+	return d
 }
 
 // usable tells whether a new socket goes as datagrams now.
@@ -481,9 +493,19 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 	case err == nil && datagramAccepted(status, headers):
 	case err == nil && datagramRefusedOnce(status):
 		// the places of the user or the service (shared with UoT, which a 429 would reach as well) or a socket the
-		// node could not open: this socket ends, the next one asks again
-		d.logger.DebugContext(ctx, "naive: the node refused a UDP request: ", status)
+		// node could not open: this socket ends, the next one asks again. A node that keeps refusing (no UDP out,
+		// no descriptors left) sends the network back over UoT after a few in a row
 		conn.Close()
+		if d.generation.Load() != generation {
+			return
+		}
+		inARow := d.refusedInARow.Add(1)
+		if inARow == 1 {
+			d.logger.WarnContext(ctx, "naive: the node refused a UDP request (", status, "), the next socket asks again")
+		}
+		if inARow >= datagramRefusalsInARow {
+			d.refuse(generation, F.ToString("the node refused ", inARow, " UDP requests in a row, the last ", status))
+		}
 		return
 	case err == nil:
 		d.refuse(generation, "the node answered "+F.ToString(status))
@@ -495,6 +517,9 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 		}
 		conn.Close()
 		return
+	}
+	if d.generation.Load() == generation {
+		d.refusedInARow.Store(0)
 	}
 	<-conn.Done()
 	if err = conn.Err(); err != nil && !quietEnd(err) {
@@ -516,6 +541,7 @@ func (d *datagramClient) networkChanged() {
 	d.generation.Add(1)
 	d.allowed.Store(false)
 	d.refused.Store(false)
+	d.refusedInARow.Store(0)
 	d.access.Lock()
 	client := d.client
 	d.access.Unlock()

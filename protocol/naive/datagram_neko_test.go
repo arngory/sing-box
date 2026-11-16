@@ -358,14 +358,43 @@ func TestNekoDatagramWatch(t *testing.T) {
 	}
 
 	// a 429 or a 503 refuses this socket only: it ends, the next one asks again
-	for _, status := range []int{429, 503} {
-		d = newClient()
-		fake = newFakeDatagramConn()
+	refusedOnce := func(d *datagramClient, status int) *fakeDatagramConn {
+		fake := newFakeDatagramConn()
 		fake.status, fake.headers = status, nil
 		d.watch(context.Background(), fake, d.generation.Load())
+		return fake
+	}
+	for _, status := range []int{429, 503} {
+		d = newClient()
+		fake = refusedOnce(d, status)
 		if !d.usable() || !fake.closed {
 			t.Errorf("answer %d: usable %v, closed %v", status, d.usable(), fake.closed)
 		}
+	}
+	// a request taken between them starts the count over
+	d = newClient()
+	refusedOnce(d, 503)
+	refusedOnce(d, 429)
+	accepted := newFakeDatagramConn()
+	accepted.err = io.EOF
+	close(accepted.done)
+	d.watch(context.Background(), accepted, d.generation.Load())
+	refusedOnce(d, 503)
+	refusedOnce(d, 503)
+	if !d.usable() {
+		t.Error("refusals with a request taken between them sent the network back over UoT")
+	}
+	// a node that keeps refusing sends the network back over UoT
+	refusedOnce(d, 503)
+	if d.usable() {
+		t.Errorf("%d refusals in a row kept datagrams", datagramRefusalsInARow)
+	}
+	// a new network counts anew
+	d.networkChanged()
+	d.allowed.Store(true)
+	refusedOnce(d, 503)
+	if !d.usable() || d.refusedInARow.Load() != 1 {
+		t.Errorf("the last network's refusals counted on this one: %d", d.refusedInARow.Load())
 	}
 
 	// the app closed the socket before the answer: not the path's fault
@@ -427,6 +456,10 @@ func TestNekoDatagramClientURL(t *testing.T) {
 	}
 	if d.usable() {
 		t.Error("datagrams before the app allowed them")
+	}
+	// a core without the datagram API says so from the start
+	if d.unsupported.Load() == datagramBuilt {
+		t.Errorf("built with datagrams %v, unsupported from the start %v", datagramBuilt, d.unsupported.Load())
 	}
 }
 
