@@ -52,7 +52,7 @@ func (f *fakeDatagramConn) ReadDatagram(ctx context.Context, b []byte) (int, err
 	}
 	n := copy(b, frame)
 	if n < len(frame) {
-		return n, cronet.ErrDatagramTruncated
+		return n, errDatagramTruncated
 	}
 	return n, nil
 }
@@ -222,16 +222,16 @@ func TestNekoDatagramWriteRules(t *testing.T) {
 	}
 
 	// no room in the library: lost as UDP is; a closed request: an error
-	fake.writeErr = cronet.ErrDatagramQueueFull
+	fake.writeErr = errDatagramQueueFull
 	if _, err := conn.WriteTo([]byte("x"), dns); err != nil {
 		t.Errorf("a full queue was an error: %v", err)
 	}
-	fake.writeErr = cronet.ErrDatagramCapsuleTimeout
+	fake.writeErr = errDatagramCapsuleTimeout
 	if _, err := conn.WriteTo([]byte("x"), dns); err != nil {
 		t.Errorf("a capsule timeout was an error: %v", err)
 	}
-	fake.writeErr = cronet.ErrDatagramClosed
-	if _, err := conn.WriteTo([]byte("x"), dns); !errors.Is(err, cronet.ErrDatagramClosed) {
+	fake.writeErr = errDatagramClosed
+	if _, err := conn.WriteTo([]byte("x"), dns); !errors.Is(err, errDatagramClosed) {
 		t.Errorf("a closed request was not an error: %v", err)
 	}
 	fake.writeErr = nil
@@ -347,7 +347,7 @@ func TestNekoDatagramWatch(t *testing.T) {
 		{429, nil, nil},
 		{200, nil, nil},
 		{0, nil, errors.New("net error -322")},
-		{0, nil, cronet.ErrDatagramUnsupported},
+		{0, nil, errDatagramUnsupported},
 	} {
 		d = newClient()
 		fake = newFakeDatagramConn()
@@ -417,5 +417,56 @@ func TestNekoDatagramClientURL(t *testing.T) {
 	}
 	if d.usable() {
 		t.Error("datagrams before the app allowed them")
+	}
+}
+
+func TestNekoDatagramHeaders(t *testing.T) {
+	d := newDatagramClient(context.Background(), log.NewNOPFactory().Logger(),
+		cronet.NaiveClientOptions{ServerAddress: M.ParseSocksaddrHostPort("10.0.0.1", 443),
+			ExtraHeaders: map[string]string{"x-extra": "1", "niko-udp": "9"}},
+		"node.example", "Basic dTpw")
+	headers := d.headers()
+	for key, want := range map[string]string{"proxy-authorization": "Basic dTpw", "-force-quic": "true", "x-extra": "1",
+		"niko-udp": "1"} {
+		if headers[key] != want {
+			t.Errorf("%s: %q, want %q", key, headers[key], want)
+		}
+	}
+	if len(headers["padding"]) < 30 {
+		t.Errorf("padding %q", headers["padding"])
+	}
+	none := newDatagramClient(context.Background(), log.NewNOPFactory().Logger(),
+		cronet.NaiveClientOptions{ServerAddress: M.ParseSocksaddrHostPort("10.0.0.1", 443)}, "node.example", "")
+	if _, has := none.headers()["proxy-authorization"]; has {
+		t.Error("an authorization header without a user")
+	}
+}
+
+func TestNekoDatagramClosed(t *testing.T) {
+	d := newDatagramClient(context.Background(), log.NewNOPFactory().Logger(),
+		cronet.NaiveClientOptions{ServerAddress: M.ParseSocksaddrHostPort("10.0.0.1", 443)}, "node.example", "")
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.start(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("an engine started after the outbound closed: %v", err)
+	}
+}
+
+// A core without with_naive_datagram, or a libcronet without the datagram symbols (or none at all), keeps UDP over
+// TCP: the engine is not started and new sockets stop asking for datagrams.
+func TestNekoDatagramSupport(t *testing.T) {
+	err := checkDatagramSupport()
+	if err == nil {
+		t.Skip("this build and its library can do datagrams")
+	}
+	d := newDatagramClient(context.Background(), log.NewNOPFactory().Logger(),
+		cronet.NaiveClientOptions{ServerAddress: M.ParseSocksaddrHostPort("10.0.0.1", 443)}, "node.example", "")
+	d.allowed.Store(true)
+	if _, startErr := d.start(); startErr == nil || !d.unsupported.Load() || d.usable() {
+		t.Errorf("without datagrams (%v): start %v, unsupported %v, usable %v", err, startErr, d.unsupported.Load(), d.usable())
+	}
+	if _, listenErr := d.listenPacket(context.Background()); listenErr == nil {
+		t.Error("a socket opened without datagrams")
 	}
 }

@@ -139,8 +139,6 @@ type datagramConn interface {
 	Close() error
 }
 
-var _ datagramConn = (*cronet.DatagramConn)(nil)
-
 // datagramPacketConn is one UDP socket of the app over one connect-udp request.
 type datagramPacketConn struct {
 	conn datagramConn
@@ -198,9 +196,9 @@ func (c *datagramPacketConn) write(destination M.Socksaddr, payload []byte, fram
 	err = c.conn.WriteDatagram(frame(header))
 	switch {
 	case err == nil,
-		errors.Is(err, cronet.ErrDatagramQueueFull),
-		errors.Is(err, cronet.ErrDatagramCapsuleTimeout),
-		errors.Is(err, cronet.ErrDatagramTooLarge):
+		errors.Is(err, errDatagramQueueFull),
+		errors.Is(err, errDatagramCapsuleTimeout),
+		errors.Is(err, errDatagramTooLarge):
 		return nil
 	default:
 		return err
@@ -238,7 +236,7 @@ func (c *datagramPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 func (c *datagramPacketConn) readFrame(b []byte) (source M.Socksaddr, header, n int, err error) {
 	for {
 		n, err = c.conn.ReadDatagram(context.Background(), b)
-		if errors.Is(err, cronet.ErrDatagramTruncated) {
+		if errors.Is(err, errDatagramTruncated) {
 			err = nil
 		}
 		if err != nil {
@@ -362,9 +360,13 @@ type datagramClient struct {
 	options       cronet.NaiveClientOptions
 	url           string
 	authorization string
+	// the user's extra_headers: they go with every request, as with the tunnel's
+	extraHeaders map[string]string
 
 	access sync.Mutex
 	client *cronet.NaiveClient
+	// the outbound has closed: no engine is started again
+	closed bool
 	// the library cannot do datagrams at all (an old libcronet): never again
 	unsupported atomic.Bool
 
@@ -385,6 +387,7 @@ func newDatagramClient(ctx context.Context, logger logger.ContextLogger, options
 		options:       options,
 		url:           "https://" + net.JoinHostPort(serverName, F.ToString(options.ServerAddress.Port)) + datagramPath,
 		authorization: authorization,
+		extraHeaders:  options.ExtraHeaders,
 	}
 }
 
@@ -396,10 +399,13 @@ func (d *datagramClient) usable() bool {
 func (d *datagramClient) start() (*cronet.NaiveClient, error) {
 	d.access.Lock()
 	defer d.access.Unlock()
+	if d.closed {
+		return nil, net.ErrClosed
+	}
 	if d.client != nil {
 		return d.client, nil
 	}
-	if err := cronet.CheckDatagramSupport(); err != nil {
+	if err := checkDatagramSupport(); err != nil {
 		d.unsupported.Store(true)
 		d.logger.WarnContext(d.ctx, "naive: UDP stays over TCP, the library has no datagrams: ", err)
 		return nil, err
@@ -435,16 +441,29 @@ func (d *datagramClient) listenPacket(ctx context.Context) (net.PacketConn, erro
 	if err != nil {
 		return nil, err
 	}
+	conn, err := openDatagram(ctx, client, d.url, d.headers())
+	if err != nil {
+		return nil, err
+	}
+	go d.watch(ctx, conn, generation)
+	return newDatagramPacketConn(conn), nil
+}
+
+// headers are a request's (§3.2), as the tunnel's: Padding, the authorization, QUIC forced, the user's extra
+// headers last; niko-udp: 1 registers the datagram format. The library adds :protocol and capsule-protocol.
+func (d *datagramClient) headers() map[string]string {
 	headers := map[string]string{
-		"padding":             datagramPadding(),
-		datagramVersionHeader: datagramVersion,
+		"padding":     datagramPadding(),
+		"-force-quic": "true",
 	}
 	if d.authorization != "" {
 		headers["proxy-authorization"] = d.authorization
 	}
-	conn := client.Engine().StreamEngine().CreateDatagramConn(ctx, d.url, headers)
-	go d.watch(ctx, conn, generation)
-	return newDatagramPacketConn(conn), nil
+	for key, value := range d.extraHeaders {
+		headers[key] = value
+	}
+	headers[datagramVersionHeader] = datagramVersion
+	return headers
 }
 
 // watch checks the node's answer to a request and how the request ends: a refusal or a broken connection turns
@@ -499,6 +518,7 @@ func (d *datagramClient) Close() error {
 	d.access.Lock()
 	client := d.client
 	d.client = nil
+	d.closed = true
 	d.access.Unlock()
 	if client != nil {
 		return client.Close()
