@@ -229,7 +229,7 @@ replace masterdnsvpn-go => ./third_party/masterdnsvpn
 
 replace github.com/yggdrasil-network/yggdrasil-go => github.com/arngory/yggdrasil-go v0.5.16-0.20261108201637-5afe92f15200
 
-replace github.com/sagernet/cronet-go => github.com/arngory/cronet-go v0.0.0-20261115174743-d2bb88517181
+replace github.com/sagernet/cronet-go => github.com/arngory/cronet-go v0.0.0-20261116092231-c2dbe685da70
 
 replace github.com/sagernet/cronet-go/lib/android_arm64 => github.com/arngory/cronet-go/lib/android_arm64 v0.0.0-20261115174743-d2bb88517181
 

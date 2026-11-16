@@ -40,4 +40,8 @@ type NaiveOutboundOptions struct {
 	// over QUIC, as Chrome does, while over HTTP/2 it takes such a root either way. The chain, the name and the
 	// key pins are checked as before; with tls.certificate it changes nothing.
 	QUICLocallyTrustedRoots bool `json:"quic_locally_trusted_roots,omitempty"`
+	// neko: UDP as HTTP/3 datagrams on a second, QUIC connection to the server (raycontrol naive-udp-v1, udp=1 in its
+	// links), on a network where the app has allowed it after its probe (the outbound's SetDatagramAllowed). UDP over
+	// TCP stays the way before that and after a refusal, so it needs udp_over_tcp
+	UDPDatagram bool `json:"udp_datagram,omitempty"`
 }

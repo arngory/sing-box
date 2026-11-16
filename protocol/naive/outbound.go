@@ -4,6 +4,7 @@ package naive
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/pem"
 	"net"
 	"net/netip"
@@ -23,6 +24,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -50,6 +52,8 @@ type Outbound struct {
 	icmp *nikoicmp.Port
 	// neko: a TCP dial waits for the proxy's answer (the await_dial option)
 	awaitDial bool
+	// neko: UDP as HTTP/3 datagrams (the udp_datagram option), nil without it
+	datagram *datagramClient
 }
 
 var _ adapter.FlowOutbound = (*Outbound)(nil)
@@ -214,7 +218,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	default:
 		return nil, E.New("unknown quic congestion control: ", options.QUICCongestionControl)
 	}
-	client, err := cronet.NewNaiveClient(cronet.NaiveClientOptions{
+	clientOptions := cronet.NaiveClientOptions{
 		Context:                  ctx,
 		Logger:                   logger,
 		ServerAddress:            serverAddress,
@@ -241,7 +245,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		// or a hash of another length fails here
 		// Without pins of the profile's: the keys of the roots of the core's store, where it is a list (above)
 		CertificatePublicKeySHA256: publicKeyPins,
-	})
+	}
+	client, err := cronet.NewNaiveClient(clientOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +257,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			Dialer:  &naiveDialer{client},
 			Version: uotOptions.Version,
 		}
+	}
+	var datagram *datagramClient
+	if options.UDPDatagram {
+		if uotClient == nil {
+			return nil, E.New("udp_datagram needs udp_over_tcp: UDP goes that way until the probe and after a refusal")
+		}
+		var authorization string
+		if options.Username != "" {
+			authorization = "Basic " + base64.StdEncoding.EncodeToString([]byte(options.Username+":"+options.Password))
+		}
+		datagram = newDatagramClient(ctx, logger, clientOptions, serverName, authorization)
 	}
 	var networks []string
 	if uotClient != nil {
@@ -269,6 +285,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		client:    client,
 		uotClient: uotClient,
 		awaitDial: options.AwaitDial,
+		datagram:  datagram,
 	}
 	if options.ICMP {
 		naiveOutbound.icmp = nikoicmp.NewPort(ctx, logger, func(ctx context.Context) (net.Conn, error) {
@@ -309,6 +326,9 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		return err
 	}
 	scope.Add(h.client.Close)
+	if h.datagram != nil {
+		scope.Add(h.datagram.Close)
+	}
 	if h.icmp != nil {
 		scope.Add(h.icmp.Close)
 	}
@@ -345,6 +365,9 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		if h.uotClient == nil {
 			return nil, E.New("UDP is not supported unless UDP over TCP is enabled")
 		}
+		if packetConn := h.datagramPacketConn(ctx, destination); packetConn != nil {
+			return bufio.NewBindPacketConn(packetConn, destination), nil
+		}
 		h.logger.InfoContext(ctx, "outbound UoT packet connection to ", destination)
 		return h.uotClient.DialContext(ctx, network, destination)
 	default:
@@ -356,7 +379,53 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	if h.uotClient == nil {
 		return nil, E.New("UDP is not supported unless UDP over TCP is enabled")
 	}
+	if packetConn := h.datagramPacketConn(ctx, destination); packetConn != nil {
+		return packetConn, nil
+	}
 	return h.uotClient.ListenPacket(ctx, destination)
+}
+
+// datagramPacketConn opens the socket as HTTP/3 datagrams when this network allows them, nil for UoT: a socket that
+// could not open goes over UoT as well (neko).
+func (h *Outbound) datagramPacketConn(ctx context.Context, destination M.Socksaddr) net.PacketConn {
+	if !h.datagram.usable() {
+		return nil
+	}
+	packetConn, err := h.datagram.listenPacket(ctx)
+	if err != nil {
+		h.logger.WarnContext(ctx, "outbound datagram packet connection to ", destination, ", UoT instead: ", err)
+		return nil
+	}
+	h.logger.InfoContext(ctx, "outbound datagram packet connection to ", destination)
+	return packetConn
+}
+
+// SetDatagramAllowed lets new UDP sockets go as HTTP/3 datagrams on this network, or sends them over UoT: the app
+// allows it once its probe through a request has passed (naive-udp-v1 §9.4). Without the udp_datagram option it
+// does nothing. A refusal or a broken QUIC connection sends new sockets back over UoT until the network changes
+// (neko).
+func (h *Outbound) SetDatagramAllowed(allowed bool) {
+	if h.datagram != nil {
+		h.datagram.allowed.Store(allowed)
+	}
+}
+
+// DatagramState tells how new UDP sockets go: "off" (no udp_datagram), "unsupported" (the library has no
+// datagrams), "refused" (back over UoT on this network), "allowed" or "probing" (UoT until the app allows) (neko).
+func (h *Outbound) DatagramState() string {
+	d := h.datagram
+	switch {
+	case d == nil:
+		return "off"
+	case d.unsupported.Load():
+		return "unsupported"
+	case d.refused.Load():
+		return "refused"
+	case d.allowed.Load():
+		return "allowed"
+	default:
+		return "probing"
+	}
 }
 
 func (h *Outbound) MultiplexEnabled() bool {
@@ -365,6 +434,7 @@ func (h *Outbound) MultiplexEnabled() bool {
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	h.client.CloseAllConnections()
+	h.datagram.networkChanged()
 }
 
 func (h *Outbound) Client() *cronet.NaiveClient {
