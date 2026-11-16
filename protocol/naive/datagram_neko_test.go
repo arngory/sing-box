@@ -487,6 +487,22 @@ func TestNekoDatagramWatch(t *testing.T) {
 		t.Error("an outbound without the option uses datagrams")
 	}
 	none.networkChanged()
+	none.interfaceChanged()
+
+	// the core's own interface update forgets the network's refusals but keeps the app's allowance, whichever of the
+	// two hears of a change first; the app's network change drops it
+	d = newClient()
+	d.allowed.Store(true)
+	d.refuse(d.generation.Load(), "test", false)
+	before := d.generation.Load()
+	d.interfaceChanged()
+	if !d.usable() || d.refused.Load() || d.generation.Load() == before {
+		t.Error("an interface update dropped the app's allowance or kept the refusal")
+	}
+	d.networkChanged()
+	if d.usable() {
+		t.Error("the app's network change kept its allowance of the last network")
+	}
 }
 
 func TestNekoDatagramPadding(t *testing.T) {

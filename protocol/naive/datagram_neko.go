@@ -686,13 +686,28 @@ func quietEnd(err error) bool {
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// networkChanged drops what the last network decided: the app probes the new one before it allows datagrams.
+// networkChanged drops what the last network decided, the app's allowance too: the app tells it on a network of its
+// own reckoning (the gateway's and DNS servers' hash, which tells one Wi-Fi from the next on the same interface) and
+// probes the new one before it allows datagrams.
 func (d *datagramClient) networkChanged() {
+	d.reset(false)
+}
+
+// interfaceChanged drops what the last network decided but the app's allowance, which the app keeps or drops as it
+// tells the network itself (networkChanged): its allowance for a network it had decided would be lost otherwise when
+// the core hears of the interface after the app (two listeners of one change, in no fixed order).
+func (d *datagramClient) interfaceChanged() {
+	d.reset(true)
+}
+
+func (d *datagramClient) reset(keepAllowed bool) {
 	if d == nil {
 		return
 	}
 	d.generation.Add(1)
-	d.allowed.Store(d.allowedAlways)
+	if !keepAllowed {
+		d.allowed.Store(d.allowedAlways)
+	}
 	d.refused.Store(false)
 	d.refusedInARow.Store(0)
 	d.proved.Store(false)

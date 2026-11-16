@@ -408,11 +408,18 @@ func (h *Outbound) datagramPacketConn(ctx context.Context, destination M.Socksad
 // SetDatagramAllowed lets new UDP sockets go as HTTP/3 datagrams on this network, or sends them over UoT: the app
 // allows it once its probe through a request has passed (naive-udp-v1 §9.4). Without the udp_datagram option it
 // does nothing. A refusal or a broken QUIC connection sends new sockets back over UoT until the network changes
-// (neko).
+// (neko). The allowance holds until the app takes it back or tells a new network (DatagramNetworkChanged).
 func (h *Outbound) SetDatagramAllowed(allowed bool) {
 	if h.datagram != nil {
 		h.datagram.allowed.Store(allowed)
 	}
+}
+
+// DatagramNetworkChanged forgets what the last network decided about datagrams, the app's allowance included: the
+// app calls it on a network of its own reckoning, before it probes the network or allows datagrams there from a
+// result it remembers. The core's own interface updates keep the app's allowance (neko).
+func (h *Outbound) DatagramNetworkChanged() {
+	h.datagram.networkChanged()
 }
 
 // DatagramProbe opens a UDP socket as HTTP/3 datagrams whether or not this network allows them yet: the app's probe
@@ -449,7 +456,7 @@ func (h *Outbound) MultiplexEnabled() bool {
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	h.client.CloseAllConnections()
-	h.datagram.networkChanged()
+	h.datagram.interfaceChanged()
 }
 
 func (h *Outbound) Client() *cronet.NaiveClient {
