@@ -346,6 +346,16 @@ func datagramPadding() string {
 	return string(padding)
 }
 
+// headerValue is the value of the header named key, whatever its case.
+func headerValue(headers map[string]string, key string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
 // datagramAccepted tells the node's answer that takes the request: 200 and niko-udp: 1 (§3.2). A 200 without it is
 // a node that took the request for a TCP CONNECT (§3.3): not taken either.
 func datagramAccepted(status int, headers map[string]string) bool {
@@ -555,6 +565,11 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 		default:
 		}
 	}
+	if err != nil {
+		d.logger.DebugContext(ctx, "naive: UDP request, no answer: ", err)
+	} else {
+		d.logger.DebugContext(ctx, "naive: UDP request answered ", status, ", niko-udp ", headerValue(headers, datagramVersionHeader))
+	}
 	switch {
 	case err == nil && datagramAccepted(status, headers):
 	case err == nil && datagramRefusedOnce(status):
@@ -589,11 +604,15 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 	}
 	if d.generation.Load() == generation {
 		d.refusedInARow.Store(0)
-		d.proved.Store(true)
+		if !d.proved.Swap(true) {
+			d.logger.InfoContext(ctx, "naive: the node takes UDP as HTTP/3 datagrams on this network")
+		}
 		d.retries.Store(0)
 	}
 	<-conn.Done()
-	if err = conn.Err(); err != nil && !quietEnd(err) {
+	err = conn.Err()
+	d.logger.DebugContext(ctx, "naive: UDP request ended: ", err)
+	if err != nil && !quietEnd(err) {
 		// after the node took it: a reset or QUIC broken (the node's restart among them), passing
 		d.refuse(generation, err.Error(), !datagramNever(err))
 	}
