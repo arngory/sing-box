@@ -4,6 +4,7 @@ package naive
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sagernet/cronet-go"
 )
@@ -34,3 +35,9 @@ func openDatagram(ctx context.Context, client *cronet.NaiveClient, url string, h
 
 // datagramBuilt: this core carries the datagram API.
 const datagramBuilt = true
+
+// datagramNever tells an end that says the node or the library cannot do datagrams at all, whatever worked before:
+// a library without the symbols, a node that announces no HTTP/3 datagrams (-322, ERR_METHOD_NOT_SUPPORTED).
+func datagramNever(err error) bool {
+	return errors.Is(err, cronet.ErrDatagramUnsupported) || errors.Is(err, cronet.NetErrorMethodNotSupported)
+}

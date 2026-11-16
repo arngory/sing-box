@@ -400,6 +400,26 @@ type datagramClient struct {
 	generation atomic.Uint64
 	// 429s and 503s since the last request the node took, on this network
 	refusedInARow atomic.Int32
+	// the node has taken a request on this network: datagrams worked here. A later break (the node restarts its
+	// naive on an update, closing QUIC) sends UoT for a while only, then the next socket tries again (retryAt)
+	proved atomic.Bool
+	// when new sockets try datagrams again after a passing refusal (unix ns, 0: until the network changes), and how
+	// many passing refusals since the node last took a request
+	retryAt atomic.Int64
+	retries atomic.Int32
+	// the clock (tests)
+	now func() time.Time
+}
+
+// datagramRetryAfter: how long a network where datagrams worked keeps UoT after a break, one step per break in a
+// row, the last one repeated (naive-udp-v1 §9.4 step 4).
+var datagramRetryAfter = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
+func (d *datagramClient) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 func newDatagramClient(ctx context.Context, logger logger.ContextLogger, options cronet.NaiveClientOptions, serverName string, authorization string) *datagramClient {
@@ -422,9 +442,21 @@ func newDatagramClient(ctx context.Context, logger logger.ContextLogger, options
 	return d
 }
 
-// usable tells whether a new socket goes as datagrams now.
+// usable tells whether a new socket goes as datagrams now; past the time of a passing refusal it tries again.
 func (d *datagramClient) usable() bool {
-	return d != nil && d.allowed.Load() && !d.refused.Load() && !d.unsupported.Load()
+	if d == nil || !d.allowed.Load() || d.unsupported.Load() {
+		return false
+	}
+	if !d.refused.Load() {
+		return true
+	}
+	at := d.retryAt.Load()
+	if at != 0 && d.clock().UnixNano() >= at && d.retryAt.CompareAndSwap(at, 0) {
+		d.refused.Store(false)
+		d.logger.InfoContext(d.ctx, "naive: UDP tries HTTP/3 datagrams again on this network")
+		return true
+	}
+	return false
 }
 
 func (d *datagramClient) start() (*cronet.NaiveClient, error) {
@@ -455,13 +487,25 @@ func (d *datagramClient) start() (*cronet.NaiveClient, error) {
 	return client, nil
 }
 
-// refuse sends new sockets back over UoT until the next network, saying why once; a request of an earlier network
-// (generation) does not count.
-func (d *datagramClient) refuse(generation uint64, reason string) {
+// refuse sends new sockets back over UoT, saying why once; a request of an earlier network (generation) does not
+// count. A passing refusal on a network where datagrams worked (proved) lasts the next step of datagramRetryAfter;
+// any other until the network changes: datagrams never worked here, or the node says it cannot do them.
+func (d *datagramClient) refuse(generation uint64, reason string, passing bool) {
 	if d.generation.Load() != generation {
 		return
 	}
-	if d.refused.CompareAndSwap(false, true) {
+	if passing && d.proved.Load() {
+		if d.refused.CompareAndSwap(false, true) {
+			step := int(d.retries.Add(1)) - 1
+			wait := datagramRetryAfter[min(step, len(datagramRetryAfter)-1)]
+			d.retryAt.Store(d.clock().Add(wait).UnixNano())
+			d.logger.WarnContext(d.ctx, "naive: UDP back over TCP for ", wait, " on this network, then datagrams again: ",
+				reason)
+		}
+		return
+	}
+	wasPassing := d.retryAt.Swap(0) != 0
+	if d.refused.CompareAndSwap(false, true) || wasPassing {
 		d.logger.WarnContext(d.ctx, "naive: UDP back over TCP on this network: ", reason)
 	}
 }
@@ -526,26 +570,32 @@ func (d *datagramClient) watch(ctx context.Context, conn datagramConn, generatio
 			d.logger.WarnContext(ctx, "naive: the node refused a UDP request (", status, "), the next socket asks again")
 		}
 		if inARow >= datagramRefusalsInARow {
-			d.refuse(generation, F.ToString("the node refused ", inARow, " UDP requests in a row, the last ", status))
+			d.refuse(generation, F.ToString("the node refused ", inARow, " UDP requests in a row, the last ", status), true)
 		}
 		return
 	case err == nil:
-		d.refuse(generation, "the node answered "+F.ToString(status))
+		// the site's answer: the service's flag is off or the node is old
+		d.refuse(generation, "the node answered "+F.ToString(status), false)
 		conn.Close()
 		return
 	default:
 		if !quietEnd(err) {
-			d.refuse(generation, err.Error())
+			// QUIC did not come up or the request failed before the answer: passing where datagrams worked (a node
+			// restarting its naive), unless it says it cannot do them
+			d.refuse(generation, err.Error(), !datagramNever(err))
 		}
 		conn.Close()
 		return
 	}
 	if d.generation.Load() == generation {
 		d.refusedInARow.Store(0)
+		d.proved.Store(true)
+		d.retries.Store(0)
 	}
 	<-conn.Done()
 	if err = conn.Err(); err != nil && !quietEnd(err) {
-		d.refuse(generation, err.Error())
+		// after the node took it: a reset or QUIC broken (the node's restart among them), passing
+		d.refuse(generation, err.Error(), !datagramNever(err))
 	}
 }
 
@@ -564,6 +614,9 @@ func (d *datagramClient) networkChanged() {
 	d.allowed.Store(d.allowedAlways)
 	d.refused.Store(false)
 	d.refusedInARow.Store(0)
+	d.proved.Store(false)
+	d.retryAt.Store(0)
+	d.retries.Store(0)
 	d.access.Lock()
 	client := d.client
 	d.access.Unlock()

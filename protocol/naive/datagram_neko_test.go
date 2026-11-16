@@ -429,7 +429,7 @@ func TestNekoDatagramWatch(t *testing.T) {
 
 	// a new network forgets the refusal and waits for the app's probe
 	d = newClient()
-	d.refuse(d.generation.Load(), "test")
+	d.refuse(d.generation.Load(), "test", false)
 	d.networkChanged()
 	if d.usable() || d.refused.Load() {
 		t.Error("a new network kept the last one's decision")
@@ -452,7 +452,7 @@ func TestNekoDatagramWatch(t *testing.T) {
 	// udp_datagram_allowed: allowed again after a network change, with no probe
 	always := newClient()
 	always.allowedAlways = true
-	always.refuse(always.generation.Load(), "test")
+	always.refuse(always.generation.Load(), "test", false)
 	always.networkChanged()
 	if !always.usable() {
 		t.Error("udp_datagram_allowed did not keep datagrams on the next network")
@@ -540,5 +540,111 @@ func TestNekoDatagramSupport(t *testing.T) {
 	}
 	if _, listenErr := d.listenPacket(context.Background()); listenErr == nil {
 		t.Error("a socket opened without datagrams")
+	}
+}
+
+// A network where datagrams worked keeps UoT for a while after a break (the node restarting its naive closes QUIC),
+// then tries again, 30 s, 2 min, 10 min; one where they never worked, or the node says it cannot do them, keeps UoT
+// until it changes (naive-udp-v1 §9.4 step 4).
+func TestNekoDatagramRetry(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	newClient := func() *datagramClient {
+		d := &datagramClient{ctx: context.Background(), logger: log.NewNOPFactory().Logger(), now: func() time.Time { return now }}
+		d.allowed.Store(true)
+		return d
+	}
+	accepted := func(d *datagramClient, end error) {
+		fake := newFakeDatagramConn()
+		fake.err = end
+		close(fake.done)
+		d.watch(context.Background(), fake, d.generation.Load())
+	}
+	failedBefore := func(d *datagramClient, err error) {
+		fake := newFakeDatagramConn()
+		fake.readyErr = err
+		d.watch(context.Background(), fake, d.generation.Load())
+	}
+	broken := errors.New("net error -356")
+
+	// worked, then broke: UoT for 30 s, then datagrams again
+	d := newClient()
+	accepted(d, broken)
+	if d.usable() {
+		t.Fatal("a break kept datagrams")
+	}
+	now = now.Add(29 * time.Second)
+	if d.usable() {
+		t.Fatal("datagrams again before 30 s")
+	}
+	now = now.Add(2 * time.Second)
+	if !d.usable() {
+		t.Fatal("no datagrams again after 30 s")
+	}
+	// QUIC does not come up on the retry (the node still restarting): 2 min this time
+	failedBefore(d, broken)
+	now = now.Add(time.Minute)
+	if d.usable() {
+		t.Fatal("datagrams again before 2 min on the second break")
+	}
+	now = now.Add(61 * time.Second)
+	if !d.usable() {
+		t.Fatal("no datagrams again after 2 min")
+	}
+	// then 10 min, and 10 min after it
+	failedBefore(d, broken)
+	now = now.Add(9 * time.Minute)
+	if d.usable() {
+		t.Fatal("datagrams again before 10 min")
+	}
+	now = now.Add(61 * time.Second)
+	if !d.usable() {
+		t.Fatal("no datagrams again after 10 min")
+	}
+	// a request taken starts the steps over
+	accepted(d, io.EOF)
+	accepted(d, broken)
+	now = now.Add(31 * time.Second)
+	if !d.usable() {
+		t.Fatal("the steps did not start over after a request was taken")
+	}
+
+	// worked, then the site's answer (the flag turned off): until the network changes
+	d = newClient()
+	accepted(d, io.EOF)
+	site := newFakeDatagramConn()
+	site.status, site.headers = 404, nil
+	d.watch(context.Background(), site, d.generation.Load())
+	now = now.Add(time.Hour)
+	if d.usable() {
+		t.Fatal("the site's answer was passing")
+	}
+	// worked, then -322 (no HTTP/3 datagrams on the node): until the network changes
+	d = newClient()
+	accepted(d, io.EOF)
+	failedBefore(d, cronet.NetErrorMethodNotSupported)
+	now = now.Add(time.Hour)
+	if d.usable() {
+		t.Fatal("a node without datagrams was passing")
+	}
+	// never worked here: a break keeps UoT until the network changes
+	d = newClient()
+	failedBefore(d, broken)
+	now = now.Add(time.Hour)
+	if d.usable() {
+		t.Fatal("a network where datagrams never worked tried again")
+	}
+	// a passing refusal turned lasting by a later one: no retry
+	d = newClient()
+	accepted(d, broken)
+	d.refuse(d.generation.Load(), "test", false)
+	now = now.Add(time.Hour)
+	if d.usable() {
+		t.Fatal("a lasting refusal after a passing one was retried")
+	}
+	// a new network forgets it all
+	d.networkChanged()
+	d.allowed.Store(true)
+	if !d.usable() || d.proved.Load() || d.retryAt.Load() != 0 || d.retries.Load() != 0 {
+		t.Fatal("a new network kept the last one's state")
 	}
 }
