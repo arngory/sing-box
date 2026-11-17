@@ -124,7 +124,7 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 		}
-		m.noteDialFailure(this, remoteString, err)
+		m.noteDialFailure(&metadata, this, remoteString, err)
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
 		m.deleteURLTestHistory(metadata.OutboundChain)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -201,7 +201,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
-			m.noteDialFailure(this, remoteString, err)
+			m.noteDialFailure(&metadata, this, remoteString, err)
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
 			m.deleteURLTestHistory(metadata.OutboundChain)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -226,7 +226,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
-			m.noteDialFailure(this, metadata.Destination.String(), err)
+			m.noteDialFailure(&metadata, this, metadata.Destination.String(), err)
 			err = E.Cause(err, "listen packet connection using ", dialerString)
 			m.deleteURLTestHistory(metadata.OutboundChain)
 			N.CloseOnHandshakeFailure(conn, onClose, err)

@@ -61,6 +61,15 @@ func TestNekoDialFailureObserved(t *testing.T) {
 		}
 	}
 
+	// a group picked the member that dialled: the failure is the group's, the outbound the route chose
+	member, memberServer := net.Pipe()
+	defer member.Close()
+	manager.NewConnection(ctx, failingOutbound{tag: "proxy-member-2"}, memberServer,
+		adapter.InboundContext{Destination: destination, RouteOutbound: "proxy"}, nil)
+	if len(*heard) != 3 || (*heard)[2].tag != "proxy" {
+		t.Fatalf("a member's failure heard as %+v", (*heard)[len(*heard)-1])
+	}
+
 	quiet := NewConnectionManager(context.Background(), log.NewNOPFactory().Logger())
 	other, otherServer := net.Pipe()
 	defer other.Close()
