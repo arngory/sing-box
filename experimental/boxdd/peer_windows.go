@@ -65,6 +65,11 @@ func platformServerOptions(daemon *Daemon) ([]grpc.ServerOption, error) {
 }
 
 func platformFallbackPeerIdentity(ctx context.Context) (peerIdentity, error) {
+	// niko: --listen (development only, TCP without credentials) has no peer to authenticate, as on Linux
+	// (peer_linux.go). Without this DesktopService refuses every call there and the mode cannot start a service
+	if listenAddress != "" {
+		return peerIdentity{UserID: "local"}, nil
+	}
 	return peerIdentity{}, E.New("missing Windows peer authentication")
 }
 
