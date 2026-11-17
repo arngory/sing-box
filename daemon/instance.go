@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"sync"
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
@@ -37,12 +38,33 @@ type Instance struct {
 	outboundManager       adapter.OutboundManager
 	endpointManager       adapter.EndpointManager
 	logFactory            log.Factory
+	// niko: requests that hold the core outside the daemon's lifecycle lock (Hold); Close waits for them after it
+	// cancels the core's context and before it closes the core
+	holders sync.RWMutex
 }
 
 // Context is the core's context: its router, outbounds, DNS and the services it registered (niko: for a daemon's
-// added services, e.g. Niko's route tester).
+// added services, e.g. Niko's route tester). A request outside the daemon's lifecycle lock takes it through Hold.
 func (i *Instance) Context() context.Context {
 	return i.ctx
+}
+
+// Hold takes the core for a request that runs outside the daemon's lifecycle lock (niko: a daemon's added services):
+// false once the core is stopping. Until release is called, Close waits after it cancels the core's context, so the
+// request sees the cancellation and ends before the core is closed under it (rule sets emptied, DNS closed). release
+// may be called more than once.
+func (i *Instance) Hold() (release func(), held bool) {
+	// a stopping core is refused before the lock: Close, waiting for the lock, would make RLock wait for it in turn
+	if i.ctx.Err() != nil {
+		return nil, false
+	}
+	i.holders.RLock()
+	if i.ctx.Err() != nil {
+		i.holders.RUnlock()
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(i.holders.RUnlock) }, true
 }
 
 func (s *StartedService) CheckConfig(ctx context.Context, configContent string) error {
@@ -174,6 +196,10 @@ func (i *Instance) Start() error {
 
 func (i *Instance) Close() error {
 	i.cancel()
+	// niko: who holds the core (Hold) has seen the cancellation; it lets the core go before the core closes
+	i.holders.Lock()
+	//nolint:staticcheck
+	i.holders.Unlock()
 	if i.pauseCallback != nil {
 		i.pauseManager.UnregisterCallback(i.pauseCallback)
 		i.pauseCallback = nil
