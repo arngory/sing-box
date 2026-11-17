@@ -366,7 +366,9 @@ func (a *daemonAuthorizer) Authorize(ctx context.Context, method string) error {
 	if policy, added := a.daemon.methodPolicy(method); added && policy == PolicyCaller {
 		return nil
 	}
-	if a.daemon.ownerProtected(method) {
+	// niko: an added service's PolicyOwnerUnlocked is checked here as the owner's methods are; InvokeUnary then runs
+	// it outside the lock (services.go)
+	if a.daemon.ownerProtected(method) || a.daemon.ownerChecked(method) {
 		a.daemon.lifecycleAccess.Lock()
 		defer a.daemon.lifecycleAccess.Unlock()
 		err = a.daemon.authorizeOwnerLocked(identity.UserID)

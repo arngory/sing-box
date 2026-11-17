@@ -43,6 +43,10 @@ const (
 	PolicyCaller
 	// PolicyOwner: the daemon's owner only, under its lifecycle lock, as StartedService and ManagedService.
 	PolicyOwner
+	// PolicyOwnerUnlocked: the daemon's owner only, checked under the lifecycle lock and run outside it: for a long
+	// read of the running core (a lookup through its DNS), which a stop, a start or the service's own shutdown must
+	// not wait for. Such a method takes the running core for itself and ends with its context.
+	PolicyOwnerUnlocked
 )
 
 // Host is what an added service sees of the daemon.
@@ -130,7 +134,7 @@ func (d *Daemon) methodPolicy(method string) (MethodPolicy, bool) {
 	return PolicyRefuse, false
 }
 
-// ownerProtected: the method is the owner's, under the lifecycle lock: the daemon's StartedService and
+// ownerProtected: the method is the owner's and runs under the lifecycle lock: the daemon's StartedService and
 // ManagedService, an added service's with PolicyOwner.
 func (d *Daemon) ownerProtected(method string) bool {
 	if ownerProtectedMethod(method) {
@@ -138,4 +142,10 @@ func (d *Daemon) ownerProtected(method string) bool {
 	}
 	policy, added := d.methodPolicy(method)
 	return added && policy == PolicyOwner
+}
+
+// ownerChecked: the method is the owner's, checked under the lifecycle lock and run outside it (PolicyOwnerUnlocked).
+func (d *Daemon) ownerChecked(method string) bool {
+	policy, added := d.methodPolicy(method)
+	return added && policy == PolicyOwnerUnlocked
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -27,6 +28,7 @@ func probeDesc(name string) *grpc.ServiceDesc {
 			{MethodName: "Open", Handler: handler},
 			{MethodName: "Own", Handler: handler},
 			{MethodName: "Shut", Handler: handler},
+			{MethodName: "Read", Handler: handler},
 		},
 	}
 }
@@ -36,7 +38,7 @@ func probeService(name string) Service {
 		Desc:    probeDesc(name),
 		New:     func(Host) (any, error) { return struct{}{}, nil },
 		Policy:  PolicyCaller,
-		Methods: map[string]MethodPolicy{"Own": PolicyOwner, "Shut": PolicyRefuse},
+		Methods: map[string]MethodPolicy{"Own": PolicyOwner, "Shut": PolicyRefuse, "Read": PolicyOwnerUnlocked},
 	}
 }
 
@@ -145,5 +147,66 @@ func TestNekoAddedServiceRegistration(t *testing.T) {
 	}
 	if _, err := testDaemon(t, probeService("niko.test.Probe"), probeService("niko.test.Probe")); err == nil {
 		t.Error("the same name twice: registered")
+	}
+}
+
+// An owner's method run outside the lifecycle lock: checked as the owner's, and a slow one holds up no other owner's
+// call (a stop, a start) while it runs.
+func TestNekoAddedServiceUnlocked(t *testing.T) {
+	if listenAddress != "" {
+		t.Skip("development mode allows every call")
+	}
+	d, err := testDaemon(t, probeService("niko.test.Probe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &daemonAuthorizer{daemon: d}
+	if d.ownerProtected("/niko.test.Probe/Read") || !d.ownerChecked("/niko.test.Probe/Read") {
+		t.Fatal("Read: owner protection")
+	}
+	if c := status.Code(a.Authorize(verified("1000"), "/niko.test.Probe/Read")); c != codes.PermissionDenied {
+		t.Fatalf("no owner: %v", c)
+	}
+	if err := saveOwner("1000", 0); err != nil {
+		t.Fatal(err)
+	}
+	if c := status.Code(a.Authorize(verified("1001"), "/niko.test.Probe/Read")); c != codes.PermissionDenied {
+		t.Fatalf("another user: %v", c)
+	}
+	hold := make(chan struct{})
+	running := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.InvokeUnary(verified("1000"), "/niko.test.Probe/Read", func() (any, error) {
+			close(running)
+			<-hold
+			return nil, nil
+		})
+		done <- err
+	}()
+	select {
+	case <-running:
+	case err := <-done:
+		t.Fatalf("Read did not run: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read did not start")
+	}
+	// the slow read runs; an owner's call under the lock goes through meanwhile
+	owned := make(chan error, 1)
+	go func() {
+		_, err := a.InvokeUnary(verified("1000"), "/niko.test.Probe/Own", func() (any, error) { return nil, nil })
+		owned <- err
+	}()
+	select {
+	case err := <-owned:
+		if err != nil {
+			t.Fatalf("Own: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Own waited for the read: the lock was held")
+	}
+	close(hold)
+	if err := <-done; err != nil {
+		t.Fatalf("Read: %v", err)
 	}
 }
