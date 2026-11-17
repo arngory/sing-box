@@ -125,29 +125,35 @@ func (c *Conn) Close() error {
 }
 
 func (c *Conn) sendPrelude() {
-	if c.options.Prelude <= 0 {
+	sendPrelude(c.Conn, c.options, c.logger)
+}
+
+// sendPrelude writes the fakes of options to a connected UDP socket, with their TTL when one is set (the socket's
+// own is put back after them).
+func sendPrelude(conn net.Conn, options Options, logger logger.Logger) {
+	if options.Prelude <= 0 {
 		return
 	}
 	restore := func() {}
-	if c.options.PreludeTTL > 0 {
+	if options.PreludeTTL > 0 {
 		var err error
-		restore, err = setTTL(c.Conn, c.options.PreludeTTL)
-		if err != nil && c.logger != nil {
-			c.logger.Warn("udp prelude: cannot set TTL, sending with the default: ", err)
+		restore, err = setTTL(conn, options.PreludeTTL)
+		if err != nil && logger != nil {
+			logger.Warn("udp prelude: cannot set TTL, sending with the default: ", err)
 		}
 	}
 	defer restore()
-	for i := 0; i < min(c.options.Prelude, MaxPrelude); i++ {
+	for i := 0; i < min(options.Prelude, MaxPrelude); i++ {
 		var packet []byte
-		if c.options.PreludeSNI != "" {
-			packet = FakeInitial(c.options.PreludeSNI)
+		if options.PreludeSNI != "" {
+			packet = FakeInitial(options.PreludeSNI)
 		} else {
 			packet = make([]byte, 100+randomInt(1101))
 			rand.Read(packet)
 			// not a QUIC long header, so no server takes it for a connection attempt
 			packet[0] &= 0x3f
 		}
-		c.Conn.Write(packet)
+		conn.Write(packet)
 	}
 }
 

@@ -48,4 +48,9 @@ type NaiveOutboundOptions struct {
 	// for a client that does not probe (a plain sing-box, a test). A refusal still sends UDP over TCP until the
 	// network changes
 	UDPDatagramAllowed bool `json:"udp_datagram_allowed,omitempty"`
+	// neko: the first datagrams of the QUIC connections this outbound opens (quic, and the second connection of
+	// udp_datagram) shaped as Hysteria2's and TUIC's are (common/udpdesync). The prelude goes out before Chromium
+	// has the socket, which is its own as without the option. reorder_initial needs every datagram to pass through
+	// the core, so the socket Chromium gets is then a pipe to the core's: a copy a datagram each way
+	UDPDesync *UDPDesyncOptions `json:"udp_desync,omitempty"`
 }

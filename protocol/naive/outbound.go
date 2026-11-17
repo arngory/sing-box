@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/common/certificate"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/nikoicmp"
+	"github.com/sagernet/sing-box/common/udpdesync"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/log"
@@ -121,6 +122,19 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
+
+	// neko: the first datagrams of the outbound's QUIC connections (option.NaiveOutboundOptions.UDPDesync). The
+	// resolver above keeps the dialer as it is: only what Chromium opens towards the server is shaped
+	desyncOptions, err := udpdesync.OptionsFrom(options.UDPDesync)
+	if err != nil {
+		return nil, err
+	}
+	if desyncOptions.Enabled() && !options.QUIC && !options.UDPDatagram {
+		// as Hysteria2 does for what cannot apply: said and left out, the profile still connects
+		logger.Warn("udp_desync: no QUIC connection without quic or udp_datagram, ignored")
+		desyncOptions = udpdesync.Options{}
+	}
+	cronetDialer := udpdesync.WrapSocketDialer(outboundDialer, desyncOptions, logger)
 
 	var trustedRootCertificates string
 	if len(options.TLS.Certificate) > 0 {
@@ -229,7 +243,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		ExtraHeaders:             extraHeaders,
 		ReceiveWindow:            options.ReceiveWindow.Value(),
 		TrustedRootCertificates:  trustedRootCertificates,
-		Dialer:                   outboundDialer,
+		Dialer:                   cronetDialer,
 		DNSResolver:              dnsResolver,
 		ECHEnabled:               echEnabled,
 		ECHConfigList:            echConfigList,

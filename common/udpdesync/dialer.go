@@ -48,3 +48,40 @@ func (d *Dialer) DialContext(ctx context.Context, network string, destination M.
 }
 
 func (d *Dialer) Upstream() any { return d.Dialer }
+
+// SocketDialer is for a QUIC client that takes the socket itself and writes to it past the core (Chromium through
+// cronet, the naive outbound): no wrapper sees its datagrams. The prelude is sent on the socket before it is
+// handed over, and the socket goes on as dialed. Reordering the Initials needs the datagrams themselves, so with it
+// the connection returned hides its socket: the client is then left to relay through it.
+type SocketDialer struct {
+	N.Dialer
+	options Options
+	logger  logger.Logger
+}
+
+// WrapSocketDialer returns dialer itself when nothing is enabled.
+func WrapSocketDialer(dialer N.Dialer, options Options, logger logger.Logger) N.Dialer {
+	if !options.Enabled() {
+		return dialer
+	}
+	return &SocketDialer{Dialer: dialer, options: options, logger: logger}
+}
+
+func (d *SocketDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	conn, err := d.Dialer.DialContext(ctx, network, destination)
+	if err != nil || N.NetworkName(network) != N.NetworkUDP {
+		return conn, err
+	}
+	if d.options.ReorderInitial {
+		return opaqueConn{NewConn(conn, d.options, d.logger)}, nil
+	}
+	sendPrelude(conn, d.options, d.logger)
+	return conn, nil
+}
+
+func (d *SocketDialer) Upstream() any { return d.Dialer }
+
+// opaqueConn has net.Conn's methods and no Upstream: who looks for the socket under it finds none.
+type opaqueConn struct {
+	net.Conn
+}
