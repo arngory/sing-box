@@ -33,4 +33,22 @@ type YggdrasilEndpointOptions struct {
 	// TLSFingerprint is the ClientHello of outgoing tls:// links: "" or "chrome" (uTLS, a browser
 	// ClientHello), "go" (crypto/tls, as yggdrasil-go sends it)
 	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
+	// Multicast finds this node's peers on the local network, as yggdrasil-go's multicast does (neko): on the
+	// interfaces an entry names, a beacon sent and the others' heard, and a link to each node found that knows the
+	// same password. The links dial as the peers' do (DialerOptions)
+	Multicast []YggdrasilMulticastOptions `json:"multicast,omitempty"`
+}
+
+// YggdrasilMulticastOptions is one entry of yggdrasil-go's MulticastInterfaces (neko).
+type YggdrasilMulticastOptions struct {
+	// Interface is a regular expression of the interfaces' names, as "^wlan[0-9]+$"
+	Interface string `json:"interface"`
+	// Beacon: this node is announced there; Listen: the others' beacons are heard, and dialled
+	Beacon bool `json:"beacon,omitempty"`
+	Listen bool `json:"listen,omitempty"`
+	// Port of the link listener a beacon offers; 0: any free one
+	Port     uint16 `json:"port,omitempty"`
+	Priority uint8  `json:"priority,omitempty"`
+	// Password: only nodes that know it peer; at most 64 bytes, as yggdrasil-go takes it
+	Password string `json:"password,omitempty"`
 }

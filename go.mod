@@ -96,6 +96,7 @@ require (
 	github.com/bits-and-blooms/bloom/v3 v3.7.1 // indirect
 	github.com/gologme/log v1.3.0 // indirect
 	github.com/quic-go/quic-go v0.64.1 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 )
 

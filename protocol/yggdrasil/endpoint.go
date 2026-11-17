@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ import (
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
+	"github.com/yggdrasil-network/yggdrasil-go/src/multicast"
 )
 
 func RegisterEndpoint(registry *endpoint.Registry) {
@@ -75,6 +77,9 @@ type Endpoint struct {
 	inboundSources []netip.Prefix
 	dialedAccess   sync.RWMutex
 	dialed         map[netip.Addr]time.Time
+	// the local network's peers (neko): started with the endpoint, stopped before its core
+	multicastOptions []multicast.SetupOption
+	multicast        *multicast.Multicast
 }
 
 const (
@@ -142,6 +147,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		}
 		peers = append(peers, peerURL)
 	}
+	multicastOptions, err := multicastSetup(options.Multicast)
+	if err != nil {
+		return nil, err
+	}
 	yggCore, err := core.New(certificate, &coreLogger{logger}, setup...)
 	if err != nil {
 		return nil, E.Cause(err, "start the Yggdrasil core")
@@ -159,6 +168,8 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		closed:    make(chan struct{}),
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
 		peers:     peers,
+
+		multicastOptions: multicastOptions,
 	}
 	ep.inboundListed = options.InboundListed
 	ep.inboundSources = options.InboundSources
@@ -236,7 +247,42 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 			return E.Cause(err, "add peer ", peer.Redacted())
 		}
 	}
+	if len(e.multicastOptions) > 0 {
+		mc, err := multicast.New(e.core, &coreLogger{e.logger}, e.multicastOptions...)
+		if err != nil {
+			// the mesh's peers still work: a local network that refuses the group is said, not fatal
+			e.logger.Warn("multicast on the local network: ", err)
+		} else {
+			e.multicast = mc
+		}
+	}
 	return nil
+}
+
+// multicastSetup reads the multicast entries as yggdrasil-go's module takes them (neko).
+func multicastSetup(entries []option.YggdrasilMulticastOptions) ([]multicast.SetupOption, error) {
+	var setup []multicast.SetupOption
+	for _, entry := range entries {
+		if entry.Interface == "" {
+			return nil, E.New("multicast: an entry names no interface")
+		}
+		regex, err := regexp.Compile(entry.Interface)
+		if err != nil {
+			return nil, E.Cause(err, "multicast: interface ", entry.Interface)
+		}
+		if len(entry.Password) > 64 {
+			return nil, E.New("multicast: the password is longer than 64 bytes")
+		}
+		setup = append(setup, multicast.MulticastInterface{
+			Regex:    regex,
+			Beacon:   entry.Beacon,
+			Listen:   entry.Listen,
+			Port:     entry.Port,
+			Priority: entry.Priority,
+			Password: entry.Password,
+		})
+	}
+	return setup, nil
 }
 
 // parsePeer checks a peer URI before the start, where the core would only refuse it later.
@@ -320,6 +366,9 @@ func (e *Endpoint) Close() error {
 		close(e.closed)
 	}
 	e.started.Store(false)
+	if e.multicast != nil {
+		_ = e.multicast.Stop()
+	}
 	e.core.Stop()
 	e.rwc.Close()
 	return e.device.Close()
