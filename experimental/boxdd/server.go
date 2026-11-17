@@ -1,4 +1,4 @@
-package main
+package boxdd
 
 import (
 	"context"
@@ -41,6 +41,8 @@ type Daemon struct {
 	peerAccess              sync.Mutex
 	peerConnections         map[peerConnection]peerIdentity
 	platform                daemonPlatform
+	// niko: the services a program added (services.go)
+	services []Service
 }
 
 func newDaemon() (*Daemon, error) {
@@ -93,6 +95,13 @@ func newDaemon() (*Daemon, error) {
 	healthServer.SetServingStatus(daemon.ManagedService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
 	healthServer.SetServingStatus(DesktopService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(d.server, healthServer)
+	// niko: a program's own services (services.go), their names checked against all the above
+	err = d.registerServices(addedServices, func(name string) {
+		healthServer.SetServingStatus(name, grpc_health_v1.HealthCheckResponse_SERVING)
+	})
+	if err != nil {
+		return nil, err
+	}
 	if listenAddress != "" {
 		reflection.Register(d.server)
 	}
@@ -333,7 +342,7 @@ func (a *allowAllAuthorizer) Authorize(ctx context.Context, method string) error
 }
 
 func (a *allowAllAuthorizer) InvokeUnary(ctx context.Context, method string, handler func() (any, error)) (any, error) {
-	if ownerProtectedMethod(method) {
+	if a.daemon.ownerProtected(method) {
 		a.daemon.lifecycleAccess.Lock()
 		defer a.daemon.lifecycleAccess.Unlock()
 	}
@@ -353,7 +362,11 @@ func (a *daemonAuthorizer) Authorize(ctx context.Context, method string) error {
 	if strings.HasPrefix(method, desktopPrefix) {
 		return nil
 	}
-	if ownerProtectedMethod(method) {
+	// niko: an added service's method as its policy says (services.go)
+	if policy, added := a.daemon.methodPolicy(method); added && policy == PolicyCaller {
+		return nil
+	}
+	if a.daemon.ownerProtected(method) {
 		a.daemon.lifecycleAccess.Lock()
 		defer a.daemon.lifecycleAccess.Unlock()
 		err = a.daemon.authorizeOwnerLocked(identity.UserID)
@@ -373,7 +386,7 @@ func (a *daemonAuthorizer) Authorize(ctx context.Context, method string) error {
 }
 
 func (a *daemonAuthorizer) InvokeUnary(ctx context.Context, method string, handler func() (any, error)) (any, error) {
-	if !ownerProtectedMethod(method) {
+	if !a.daemon.ownerProtected(method) {
 		err := a.Authorize(ctx, method)
 		if err != nil {
 			return nil, err

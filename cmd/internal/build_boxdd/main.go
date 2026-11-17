@@ -81,7 +81,7 @@ func build() error {
 	if operatingSystem == "windows" && architecture == "386" {
 		arguments = append(arguments, "-gcflags=net=-l")
 	}
-	arguments = append(arguments, "./experimental/boxdd")
+	arguments = append(arguments, "./cmd/boxdd")
 	command := exec.Command("go", arguments...)
 	cgoEnabledValue := "0"
 	if cgoEnabled {

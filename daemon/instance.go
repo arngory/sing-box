@@ -39,6 +39,12 @@ type Instance struct {
 	logFactory            log.Factory
 }
 
+// Context is the core's context: its router, outbounds, DNS and the services it registered (niko: for a daemon's
+// added services, e.g. Niko's route tester).
+func (i *Instance) Context() context.Context {
+	return i.ctx
+}
+
 func (s *StartedService) CheckConfig(ctx context.Context, configContent string) error {
 	selectedLocale := locale.FromContext(ctx)
 	ctx, _ = locale.ContextWithLocale(s.ctx, selectedLocale.Locale)

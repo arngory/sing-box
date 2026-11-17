@@ -206,6 +206,17 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
 	}
 }
 
+// RunningInstance is the core running now, nil when none is started (niko: for a daemon's added services). The
+// core may stop at any time after: a caller holds it only for one request.
+func (s *StartedService) RunningInstance() *Instance {
+	s.serviceAccess.RLock()
+	defer s.serviceAccess.RUnlock()
+	if s.serviceStatus.Status != ServiceStatus_STARTED {
+		return nil
+	}
+	return s.instance
+}
+
 func (s *StartedService) followInstance(ctx context.Context, run func(ctx context.Context, instance *Instance) error) error {
 	statusSubscription, statusDone, err := s.serviceStatusObserver.Subscribe()
 	if err != nil {

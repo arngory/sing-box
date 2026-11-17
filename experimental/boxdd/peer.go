@@ -1,5 +1,5 @@
 //nolint:unused
-package main
+package boxdd
 
 import (
 	"context"

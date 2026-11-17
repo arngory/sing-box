@@ -1,4 +1,4 @@
-package main
+package boxdd
 
 import (
 	"context"
@@ -35,7 +35,10 @@ func init() {
 	mainCommand.AddCommand(commandVersion)
 }
 
-func main() {
+// Main runs the daemon's command line with what a program adds to it (niko: services.go); cmd/boxdd gives nothing and
+// is upstream's boxdd.
+func Main(options Options) {
+	addedServices = options.Services
 	logFactory := log.NewDefaultFactory(context.Background(), log.Formatter{
 		BaseTime:      time.Now(),
 		DisableColors: true,

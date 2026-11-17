@@ -1,6 +1,6 @@
 //go:build windows || linux
 
-package main
+package boxdd
 
 import (
 	"context"
