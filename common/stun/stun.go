@@ -418,7 +418,14 @@ func Run(options Options) (*Result, error) {
 		if err != nil {
 			return nil, E.Cause(err, "create UDP socket")
 		}
-		serverAddr = serverSocksaddr
+		// neko: a direct dialer hands back the plain *net.UDPConn for an address (only a name gets the resolving
+		// wrapper), and its WriteTo refuses any net.Addr but *net.UDPAddr with EINVAL; the wrapped connections take
+		// both, so an address goes as *net.UDPAddr, as the mapping and filtering tests already send theirs
+		if serverSocksaddr.IsIP() {
+			serverAddr = serverSocksaddr.UDPAddr()
+		} else {
+			serverAddr = serverSocksaddr
+		}
 	} else {
 		serverUDPAddr, resolveErr := net.ResolveUDPAddr("udp", serverSocksaddr.String())
 		if resolveErr != nil {
