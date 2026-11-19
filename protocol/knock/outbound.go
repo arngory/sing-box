@@ -81,7 +81,7 @@ type Options struct {
 	Hosts []string `json:"hosts,omitempty"`
 	// NodeAddresses: names-v1 (names.go), the node's addresses from its signed data. A name dialled through this
 	// outbound is resolved once per attempt and knocked and dialled at an address of the answer only if it is one of
-	// them; else, and when the name does not resolve, at these.
+	// them; else, and when the name does not resolve, at these. Ignored with a detour, which resolves the name.
 	NodeAddresses []string `json:"node_addresses,omitempty"`
 }
 
@@ -300,6 +300,11 @@ func New(ctx context.Context, router adapter.Router, logger log.ContextLogger, t
 	node, err := parseNodeAddresses(options.NodeAddresses)
 	if err != nil {
 		return nil, err
+	}
+	if options.Detour != "" {
+		// through a detour (a chain's later hop, a mesh) the name is the detour's to resolve, as resolve() leaves
+		// it: a lookup here would ask the local network for the node behind the chain (neko)
+		node = nil
 	}
 	interval := time.Duration(options.Interval)
 	if interval <= 0 {

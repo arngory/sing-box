@@ -63,6 +63,12 @@ func TestNamesResolveNode(t *testing.T) {
 	if _, ok := newBox(t, Options{Sequence: knock}).ResolveNode(ctx, "node.invalid"); ok {
 		t.Fatal("a knock without node_addresses resolved for names-v1")
 	}
+	// through a detour the name is the detour's: not looked up here, where the local network would see it
+	detoured := Options{Sequence: knock, NodeAddresses: []string{"192.0.2.1"}}
+	detoured.Detour = "direct"
+	if d, err := New(o.ctx, nil, o.logger, "knock2", detoured); err != nil || d.(*Outbound).node != nil {
+		t.Fatal("node_addresses taken with a detour: ", err)
+	}
 	for _, bad := range []string{"node.example.com", "0.0.0.0", "fe80::1%eth0"} {
 		if _, err := parseNodeAddresses([]string{bad}); err == nil {
 			t.Fatal("taken as the node's address: ", bad)
