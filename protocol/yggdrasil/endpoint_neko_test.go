@@ -16,6 +16,7 @@ import (
 
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/wireguard"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/json"
 
@@ -301,4 +302,28 @@ func TestNekoYggdrasilDialedBounded(t *testing.T) {
 	if !e.answering(newest) || len(e.dialed) > dialedMax {
 		t.Fatal("a dial into a full list not answered")
 	}
+}
+
+// A packet read from the mesh as the endpoint closes is dropped, not written to the closing device: gVisor's stack
+// has no dispatcher then and panics (neko)
+func TestNekoYggdrasilDeliverAfterClose(t *testing.T) {
+	device := &countingDevice{}
+	e := &Endpoint{device: device, closed: make(chan struct{}), logger: log.NewNOPFactory().Logger()}
+	if !e.deliver([][]byte{{0x60}}) || device.writes != 1 {
+		t.Fatal("an open endpoint did not deliver")
+	}
+	close(e.closed)
+	if e.deliver([][]byte{{0x60}}) || device.writes != 1 {
+		t.Fatal("a closing endpoint wrote to its device")
+	}
+}
+
+type countingDevice struct {
+	wireguard.Device
+	writes int
+}
+
+func (d *countingDevice) Write(bufs [][]byte, offset int) (int, error) {
+	d.writes++
+	return len(bufs), nil
 }

@@ -77,6 +77,9 @@ type Endpoint struct {
 	inboundSources []netip.Prefix
 	dialedAccess   sync.RWMutex
 	dialed         map[netip.Addr]time.Time
+	// pumpIn holds it while it hands a packet to the device; Close takes it before it closes the device, so no
+	// packet reaches a closed device (gVisor's stack has no dispatcher then and panics) (neko)
+	delivering sync.Mutex
 	// the local network's peers (neko): started with the endpoint, stopped before its core
 	multicastOptions []multicast.SetupOption
 	multicast        *multicast.Multicast
@@ -346,10 +349,25 @@ func (e *Endpoint) pumpIn() {
 			continue
 		}
 		packets[0] = buf[:n]
-		if _, err = e.device.Write(packets, 0); err != nil {
-			e.logger.Debug("yggdrasil: deliver: ", err)
+		if !e.deliver(packets) {
+			return
 		}
 	}
+}
+
+// deliver hands packets to the device unless the endpoint is closing; false once it is.
+func (e *Endpoint) deliver(packets [][]byte) bool {
+	e.delivering.Lock()
+	defer e.delivering.Unlock()
+	select {
+	case <-e.closed:
+		return false
+	default:
+	}
+	if _, err := e.device.Write(packets, 0); err != nil {
+		e.logger.Debug("yggdrasil: deliver: ", err)
+	}
+	return true
 }
 
 // Peers is the state of the node's peer links (neko): the configured peers with whether each is up, its latency and
@@ -371,6 +389,9 @@ func (e *Endpoint) Close() error {
 	}
 	e.core.Stop()
 	e.rwc.Close()
+	// a packet pumpIn read before the close is delivered or dropped before the device goes
+	e.delivering.Lock()
+	defer e.delivering.Unlock()
 	return e.device.Close()
 }
 
