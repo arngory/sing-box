@@ -310,7 +310,9 @@ func parsePeer(raw string) (*url.URL, error) {
 	return peerURL, nil
 }
 
-// pumpOut moves the stack's outgoing packets into the mesh.
+// pumpOut moves the stack's outgoing packets into the mesh. It reads until the device is closed, also while the
+// endpoint closes, and drops them then (neko): the stack may answer a packet pumpIn is delivering into a full queue,
+// and Close waits for that delivery before it closes the device, so the queue must keep draining.
 func (e *Endpoint) pumpOut() {
 	mtu := e.rwc.MTU()
 	bufs := [][]byte{make([]byte, mtu)}
@@ -323,14 +325,13 @@ func (e *Endpoint) pumpOut() {
 		if count == 0 {
 			continue
 		}
-		e.sending(bufs[0][:sizes[0]])
-		if _, err = e.rwc.Write(bufs[0][:sizes[0]]); err != nil {
-			select {
-			case <-e.closed:
-				return
-			default:
-			}
+		select {
+		case <-e.closed:
+			continue
+		default:
 		}
+		e.sending(bufs[0][:sizes[0]])
+		_, _ = e.rwc.Write(bufs[0][:sizes[0]])
 	}
 }
 

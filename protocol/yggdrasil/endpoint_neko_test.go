@@ -10,7 +10,9 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/address"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
+	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
 )
 
 // A seed and the 64-byte key yggdrasil-go stores give the same node; the certificate
@@ -326,4 +329,88 @@ type countingDevice struct {
 func (d *countingDevice) Write(bufs [][]byte, offset int) (int, error) {
 	d.writes++
 	return len(bufs), nil
+}
+
+// Close waits for a delivery in flight while the stack's answers to it keep leaving through pumpOut (dropped, the
+// mesh is gone), so answers that fill the stack's queue cannot hold Close forever (neko)
+func TestNekoYggdrasilCloseWhileDelivering(t *testing.T) {
+	privateKey, err := parsePrivateKey(strings.Repeat("ef", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := selfSignedCertificate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := core.New(certificate, &coreLogger{log.NewNOPFactory().Logger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := &answeringDevice{
+		entered:  make(chan struct{}),
+		proceed:  make(chan struct{}),
+		outbound: make(chan []byte),
+		done:     make(chan struct{}),
+	}
+	e := &Endpoint{
+		core:   node,
+		rwc:    ipv6rwc.NewReadWriteCloser(node),
+		device: device,
+		closed: make(chan struct{}),
+		logger: log.NewNOPFactory().Logger(),
+	}
+	go e.pumpOut()
+	delivered := make(chan bool, 1)
+	go func() { delivered <- e.deliver([][]byte{{0x60}}) }()
+	<-device.entered
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- e.Close() }()
+	// the endpoint is closing before the stack answers the packet it is taking
+	<-e.closed
+	close(device.proceed)
+	select {
+	case <-closeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close held by a delivery whose answers nobody reads")
+	}
+	if !<-delivered {
+		t.Fatal("the delivery begun before the close was refused")
+	}
+}
+
+// answeringDevice is a stack that answers a packet as it takes it, through the queue pumpOut reads; the answers
+// are not IPv6, so the mesh refuses each.
+type answeringDevice struct {
+	wireguard.Device
+	entered, proceed, done chan struct{}
+	outbound               chan []byte
+	closeOnce              sync.Once
+}
+
+func (d *answeringDevice) Write(bufs [][]byte, offset int) (int, error) {
+	close(d.entered)
+	<-d.proceed
+	for i := 0; i < 3; i++ {
+		select {
+		case d.outbound <- []byte{0x45}:
+		case <-d.done:
+			return 0, os.ErrClosed
+		}
+	}
+	return len(bufs), nil
+}
+
+func (d *answeringDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	select {
+	case packet := <-d.outbound:
+		sizes[0] = copy(bufs[0][offset:], packet)
+		return 1, nil
+	case <-d.done:
+		return 0, os.ErrClosed
+	}
+}
+
+func (d *answeringDevice) Close() error {
+	d.closeOnce.Do(func() { close(d.done) })
+	return nil
 }
