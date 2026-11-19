@@ -348,7 +348,12 @@ func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, ca
 		o.send(ctx, target, step{port: port, udp: true, payload: packet})
 		return sleep(ctx, spa2Settle())
 	}
-	payload, err := carrierPayload(carrier, packet)
+	serverName := serverNameFrom(ctx)
+	if serverName == "" && o.node != nil {
+		// a renewal: the name the node was last resolved by
+		serverName = o.node.serverName()
+	}
+	payload, err := carrierPayload(carrier, packet, serverName)
 	if err != nil {
 		return err
 	}
@@ -562,11 +567,17 @@ func SPAv2Packet(options SPAv2Options, now time.Time) (uint16, []byte, error) {
 // waits 300 ms for the node to apply it (§7). For requests made outside an
 // outbound: the subscription and the remote API.
 func SendSPAv2(ctx context.Context, dialer *net.Dialer, host string, options SPAv2Options, carrier Carrier, now time.Time) error {
+	return SendSPAv2Named(ctx, dialer, host, "", options, carrier, now)
+}
+
+// SendSPAv2Named is SendSPAv2 to an address the caller resolved serverName to (names-v1 §5 p. 6): the ClientHello
+// carrier names it (no server_name when it is empty or an address).
+func SendSPAv2Named(ctx context.Context, dialer *net.Dialer, host string, serverName string, options SPAv2Options, carrier Carrier, now time.Time) error {
 	port, packet, err := SPAv2Packet(options, now)
 	if err != nil {
 		return err
 	}
-	payload, err := carrierPayload(carrier, packet)
+	payload, err := carrierPayload(carrier, packet, serverName)
 	if err != nil {
 		return err
 	}

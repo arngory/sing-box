@@ -46,9 +46,10 @@ func (c Carrier) network() string {
 const extSessionTicket = 0x0023
 
 // tlsCarrier wraps a sealed packet in a ClientHello record (spa-v2.md §10.1): the ClientHello of the core's
-// Chrome reference (common/tls/chromehello), as Chrome sends it to an address (no server_name), with the packet
-// as its session ticket. Random, session_id, key shares and GREASE are fresh, the extension order is shuffled.
-func tlsCarrier(packet []byte) ([]byte, error) {
+// Chrome reference (common/tls/chromehello), as Chrome sends it to serverName (names-v1 §5 p. 6) or to an address
+// (no server_name), with the packet as its session ticket. Random, session_id, key shares and GREASE are fresh, the
+// extension order is shuffled.
+func tlsCarrier(packet []byte, serverName string) ([]byte, error) {
 	spec, err := chromehello.Spec()
 	if err != nil {
 		return nil, err
@@ -56,7 +57,7 @@ func tlsCarrier(packet []byte) ([]byte, error) {
 	conn, peer := net.Pipe()
 	defer conn.Close()
 	defer peer.Close()
-	uConn := utls.UClient(conn, &utls.Config{InsecureSkipVerify: true}, utls.HelloCustom)
+	uConn := utls.UClient(conn, &utls.Config{ServerName: serverName, InsecureSkipVerify: true}, utls.HelloCustom)
 	if err = uConn.ApplyPreset(spec); err != nil {
 		return nil, err
 	}
@@ -131,9 +132,9 @@ func withSessionTicket(hello, ticket []byte) ([]byte, error) {
 }
 
 // carrierPayload is what goes on the wire for the carrier.
-func carrierPayload(c Carrier, packet []byte) ([]byte, error) {
+func carrierPayload(c Carrier, packet []byte, serverName string) ([]byte, error) {
 	if c == CarrierTLS {
-		return tlsCarrier(packet)
+		return tlsCarrier(packet, serverName)
 	}
 	return packet, nil
 }

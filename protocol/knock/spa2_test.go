@@ -615,7 +615,7 @@ func TestSPA2CarriersListed(t *testing.T) {
 // session ticket; and the rest of it is the core's Chrome reference.
 func TestTLSCarrierShape(t *testing.T) {
 	packet := bytes.Repeat([]byte{0xab}, 128)
-	record, err := tlsCarrier(packet)
+	record, err := tlsCarrier(packet, "")
 	if err != nil {
 		t.Fatal(err)
 	}

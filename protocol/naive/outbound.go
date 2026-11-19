@@ -181,9 +181,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 
 	dnsRouter := service.FromContext[adapter.DNSRouter](ctx)
+	// neko: names-v1, the node's name resolved as the knock outbound Chromium dials through resolves it (protocol/
+	// knock/names.go): once per attempt, and only to the node's own addresses
+	nodeAnswer := nodeResolverFor(ctx, options.Detour, serverAddress)
 	var dnsResolver cronet.DNSResolverFunc
 	if dnsRouter != nil {
 		dnsResolver = func(dnsContext context.Context, request *mDNS.Msg) *mDNS.Msg {
+			if response := nodeAnswer(dnsContext, request); response != nil {
+				return response
+			}
 			response, err := dnsRouter.Exchange(dnsContext, request, outboundDialer.(dialer.ResolveDialer).QueryOptions())
 			if err != nil {
 				logger.Error("DNS exchange failed: ", err)

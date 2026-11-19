@@ -79,6 +79,10 @@ type Options struct {
 	// before dialling (a DNS server's domain_resolver, yggdrasil-go's quic://). A Yggdrasil endpoint dials the node
 	// and, as a fallback, the node's public peers through this outbound: the peers must never get its SPA.
 	Hosts []string `json:"hosts,omitempty"`
+	// NodeAddresses: names-v1 (names.go), the node's addresses from its signed data. A name dialled through this
+	// outbound is resolved once per attempt and knocked and dialled at an address of the answer only if it is one of
+	// them; else, and when the name does not resolve, at these.
+	NodeAddresses []string `json:"node_addresses,omitempty"`
 }
 
 func Register(registry *outbound.Registry) {
@@ -143,6 +147,8 @@ type Outbound struct {
 
 	// the only hosts knocked at (Options.Hosts); nil: all
 	hosts *knockHosts
+	// the node's addresses (Options.NodeAddresses, names.go); nil: names are resolved as any other
+	node *nodeAddresses
 }
 
 // knockHosts: Options.Hosts, names in lower case and addresses, with what the names resolved to
@@ -291,6 +297,10 @@ func New(ctx context.Context, router adapter.Router, logger log.ContextLogger, t
 	if err != nil {
 		return nil, err
 	}
+	node, err := parseNodeAddresses(options.NodeAddresses)
+	if err != nil {
+		return nil, err
+	}
 	interval := time.Duration(options.Interval)
 	if interval <= 0 {
 		interval = defaultInterval
@@ -332,6 +342,7 @@ func New(ctx context.Context, router adapter.Router, logger log.ContextLogger, t
 		ttl:            ttl,
 		silence:        silence,
 		hosts:          parseHosts(options.Hosts),
+		node:           node,
 		targets:        make(map[string]*target),
 		carriers:       carriers,
 	}
@@ -390,6 +401,12 @@ func parseSequence(sequence []Step) ([]step, error) {
 
 func (o *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	plain := o.plain(ctx, destination)
+	if o.node != nil && !plain {
+		return o.dialNode(ctx, network, destination)
+	}
+	if destination.IsFqdn() {
+		ctx = o.withServerName(ctx, destination.Fqdn)
+	}
 	destination, err := o.resolve(ctx, destination)
 	if err != nil {
 		return nil, err
@@ -397,6 +414,11 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 	if plain {
 		return o.dialer.DialContext(ctx, network, destination)
 	}
+	return o.dialResolved(ctx, network, destination)
+}
+
+// dialResolved knocks at an address and dials it
+func (o *Outbound) dialResolved(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if o.spa2 != nil {
 		return o.dialSPA2(ctx, network, destination)
 	}
@@ -430,9 +452,23 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 
 func (o *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	plain := o.plain(ctx, destination)
-	destination, err := o.resolve(ctx, destination)
-	if err != nil {
-		return nil, err
+	var err error
+	if o.node != nil && !plain && knockable(destination) {
+		// a datagram's peer is one address: the first of the attempt (UDP tells nothing of the next one's need)
+		targets, name := o.nodeTargets(ctx, destination)
+		if len(targets) == 0 {
+			return nil, E.New("knock: no address for ", destination)
+		}
+		ctx = o.withServerName(ctx, name)
+		destination = targets[0]
+	} else {
+		if destination.IsFqdn() {
+			ctx = o.withServerName(ctx, destination.Fqdn)
+		}
+		destination, err = o.resolve(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// e.g. multi-peer WireGuard listens on 0.0.0.0, there is nothing to knock at
 	if plain || !knockable(destination) {
