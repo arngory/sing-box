@@ -1,0 +1,161 @@
+package knock
+
+import (
+	"context"
+	"net"
+	"net/netip"
+	"sync/atomic"
+
+	M "github.com/sagernet/sing/common/metadata"
+)
+
+// SPA v3 (raycontrol docs/spec/spa-v3.md), neko: the address a knock goes to is under the tag (dst), and the node
+// opens only for its own. The client:
+//   - knocks v3 at any address of the node, a DNS answer included (§6 p. 1, 2): a knock caught at a forged address
+//     opens nothing at the node (names.go takes such answers then);
+//   - when v3 at an address of the node's signed data did not open it, sends v2 once more there (§6 p. 3: a node
+//     rolled back to a version before v0.35.0), and keeps v2 for that address after it worked;
+//   - never v2 at an address known only from DNS (§6 p. 4).
+
+var (
+	// the NAT64 prefix of the network in use, from the app (Android's LinkProperties.getNat64Prefix); nil: none
+	nat64Prefix atomic.Pointer[netip.Prefix]
+	// RFC 6052's well-known prefix, the one a node takes (spa-v3 §3)
+	wellKnownNAT64 = netip.MustParsePrefix("64:ff9b::/96")
+)
+
+// SetNAT64Prefix sets the NAT64 prefix of the network in use ("" or an invalid one: none). An address in it, or in
+// 64:ff9b::/96, is written to dst as the IPv4 it embeds (spa-v3 §3).
+func SetNAT64Prefix(prefix string) {
+	p, err := netip.ParsePrefix(prefix)
+	if err != nil || !p.Addr().Is6() || p.Addr().Is4In6() {
+		nat64Prefix.Store(nil)
+		return
+	}
+	p = p.Masked()
+	nat64Prefix.Store(&p)
+}
+
+// DstOf is the address a v3 knock at addr names: the IPv4 a NAT64 address embeds, else addr without its zone.
+func DstOf(addr netip.Addr) netip.Addr {
+	addr = addr.Unmap().WithZone("")
+	if !addr.Is6() {
+		return addr
+	}
+	if wellKnownNAT64.Contains(addr) {
+		v4, _ := embeddedIPv4(addr, 96)
+		return v4
+	}
+	if p := nat64Prefix.Load(); p != nil && p.Contains(addr) {
+		if v4, ok := embeddedIPv4(addr, p.Bits()); ok {
+			return v4
+		}
+	}
+	return addr
+}
+
+// embeddedIPv4 is the IPv4 address in an IPv4-embedded IPv6 address with a prefix of bits (RFC 6052 §2.2: bits
+// 64-71 are left out).
+func embeddedIPv4(addr netip.Addr, bits int) (netip.Addr, bool) {
+	a := addr.As16()
+	var v4 [4]byte
+	switch bits {
+	case 32:
+		copy(v4[:], a[4:8])
+	case 40:
+		copy(v4[:3], a[5:8])
+		v4[3] = a[9]
+	case 48:
+		copy(v4[:2], a[6:8])
+		copy(v4[2:], a[9:11])
+	case 56:
+		v4[0] = a[7]
+		copy(v4[1:], a[9:12])
+	case 64:
+		copy(v4[:], a[9:13])
+	case 96:
+		copy(v4[:], a[12:16])
+	default:
+		return netip.Addr{}, false
+	}
+	return netip.AddrFrom4(v4), true
+}
+
+func spaVersionOf(dst netip.Addr) int {
+	if dst.IsValid() {
+		return 3
+	}
+	return 2
+}
+
+type spaV2Key struct{}
+
+// withSPAv2: the knocks of this dial are v2 (the fallback of §6 p. 3)
+func withSPAv2(ctx context.Context) context.Context {
+	return context.WithValue(ctx, spaV2Key{}, true)
+}
+
+func spaV2From(ctx context.Context) bool {
+	v2, _ := ctx.Value(spaV2Key{}).(bool)
+	return v2
+}
+
+type fromDNSKey struct{}
+
+// withFromDNS: the address of this dial is a DNS answer, not the signed data's (an outbound without node_addresses
+// dialling a name)
+func withFromDNS(ctx context.Context) context.Context {
+	return context.WithValue(ctx, fromDNSKey{}, true)
+}
+
+// signed reports whether addr comes from the node's signed data (node_addresses, the config's address), where v2
+// may follow a v3 that did not open (§6 p. 3, 4).
+func (o *Outbound) signed(ctx context.Context, addr netip.Addr) bool {
+	if o.node != nil {
+		return o.node.set[addr.Unmap()]
+	}
+	fromDNS, _ := ctx.Value(fromDNSKey{}).(bool)
+	return !fromDNS
+}
+
+// spaDst is the dst of a knock at destination: none (v2) without v3, at a name, in a v2 dial, or at an address
+// where only v2 opened.
+func (o *Outbound) spaDst(ctx context.Context, destination M.Socksaddr) netip.Addr {
+	if o.spa2 == nil || !o.spa2.v3 || !destination.IsIP() || spaV2From(ctx) {
+		return netip.Addr{}
+	}
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	v2 := t.v2
+	t.access.Unlock()
+	if v2 {
+		return netip.Addr{}
+	}
+	return DstOf(destination.Addr)
+}
+
+func (o *Outbound) setV2(destination M.Socksaddr, v2 bool) {
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	t.v2 = v2
+	t.access.Unlock()
+}
+
+// dialSPA2 dials after SPA (dialSPA2Once); a v3 knock at an address of the signed data that opened nothing is
+// followed by v2 at the same address, with the same carriers (spa-v3 §6 p. 3).
+func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	conn, err := o.dialSPA2Once(ctx, network, destination)
+	if err == nil || ctx.Err() != nil || !o.spaDst(ctx, destination).IsValid() || !o.signed(ctx, destination.Addr) {
+		return conn, err
+	}
+	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
+	o.setV2(destination, true)
+	conn, v2err := o.dialSPA2Once(withSPAv2(ctx), network, destination)
+	if v2err != nil {
+		// neither: the next dial tries v3 again
+		o.setV2(destination, false)
+		return nil, err
+	}
+	o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there from now on")
+	return conn, nil
+}

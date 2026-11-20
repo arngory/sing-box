@@ -9,8 +9,10 @@ import (
 	"encoding/hex"
 	"math/big"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,9 +26,17 @@ import (
 // one XChaCha20-Poly1305 packet of a random length, sealed with a per-epoch
 // key of the device, sent to the port of the current time slot. Test vectors:
 // testdata/spa_v2_vectors.json, copied from raycontrol internal/spa/testdata.
+//
+// SPA v3 (docs/spec/spa-v3.md, raycontrol v0.35.0) is v2 with the address the
+// packet goes to (dst) under the tag: a node that takes v3 (Versions) gets it
+// at an address, and opens only for its own, so a knock caught at a forged
+// address is of no use elsewhere. Vectors: testdata/spa_v3_vectors.json.
 
 const (
 	spa2Version    = 0x02
+	spa3Version    = 0x03
+	spa3DstSize    = 16
+	spa3Header     = 1 + 8 + 2 + 1 + 1 + spa3DstSize
 	spa2NonceSize  = 24
 	spa2TagSize    = 16
 	spa2KeySize    = 32
@@ -65,6 +75,9 @@ type SPAv2Options struct {
 	Carriers []string `json:"carriers,omitempty"`
 	// Relay: these are the parameters of a relay in front of the node (relay-v1 §3), knocked at with K_relay
 	Relay *SPARelay `json:"relay,omitempty"`
+	// Versions the node (or the relay) takes (spa-v3 §5, raycontrol v0.35.0): with 3, a knock at an address is v3
+	// and names it; none = [2]
+	Versions []int `json:"versions,omitempty"`
 }
 
 // SPARelay names the relay and the node behind it: K_relay = HKDF-SHA256(device key, the exit's node_id,
@@ -142,6 +155,8 @@ type spa2Params struct {
 	deviceKey [spa2KeySize]byte
 	scope     []uint16
 	ttl       uint16
+	// v3: the node takes SPA v3 (Versions has 3) and its lengths fit the address (spa-v3 §2)
+	v3 bool
 }
 
 func decodeHexInto(dst []byte, s, name string) error {
@@ -242,7 +257,18 @@ func parseSPAv2(o SPAv2Options) (*spa2Params, error) {
 	case len(p.scope) > spa2MaxScope:
 		return nil, E.New("spa_v2: scope has more than ", spa2MaxScope, " services")
 	}
+	// a node always leaves room for the address (len_max ≥ 117, spa-v3 §2); lengths that do not are knocked v2
+	p.v3 = slices.Contains(o.Versions, 3) && p.lenMax >= p.minLen(true)
 	return p, nil
+}
+
+// minLen is the shortest packet for this scope, v3 (with the address) or v2.
+func (p *spa2Params) minLen(v3 bool) int {
+	header := spa2Header
+	if v3 {
+		header = spa3Header
+	}
+	return spa2NonceSize + spa2TagSize + header + 2*len(p.scope)
 }
 
 func be64(v uint64) []byte {
@@ -262,9 +288,10 @@ func (p *spa2Params) epochKey(epoch uint64) ([]byte, error) {
 	return hkdf.Key(sha256.New, p.deviceKey[:], p.nodeID[:], spa2KeyInfo+string(be64(epoch)), spa2KeySize)
 }
 
-// seal builds a packet of exactly length bytes for the time now.
-func (p *spa2Params) seal(now time.Time, nonce []byte, length int) ([]byte, error) {
-	if length < p.lenMin || length > p.lenMax {
+// seal builds a packet of exactly length bytes for the time now: v3 for dst (the address it goes to), v2 without.
+func (p *spa2Params) seal(now time.Time, nonce []byte, length int, dst netip.Addr) ([]byte, error) {
+	v3 := dst.IsValid()
+	if length < max(p.lenMin, p.minLen(v3)) || length > p.lenMax {
 		return nil, E.New("spa_v2: packet length out of range")
 	}
 	plaintext := make([]byte, length-spa2NonceSize-spa2TagSize)
@@ -273,8 +300,16 @@ func (p *spa2Params) seal(now time.Time, nonce []byte, length int) ([]byte, erro
 	binary.BigEndian.PutUint16(plaintext[9:11], p.ttl)
 	plaintext[11] = 0
 	plaintext[12] = byte(len(p.scope))
+	header := spa2Header
+	if v3 {
+		// the address as the node compares it: IPv4 as ::ffff:a.b.c.d, no zone (spa-v3 §2, §3)
+		plaintext[0] = spa3Version
+		a := dst.WithZone("").As16()
+		copy(plaintext[spa2Header:spa3Header], a[:])
+		header = spa3Header
+	}
 	for i, id := range p.scope {
-		binary.BigEndian.PutUint16(plaintext[spa2Header+2*i:], id)
+		binary.BigEndian.PutUint16(plaintext[header+2*i:], id)
 	}
 	key, err := p.epochKey(p.epoch(now))
 	if err != nil {
@@ -296,14 +331,16 @@ func randomInt(n int64) int64 {
 	return v.Int64()
 }
 
-// packet returns the port of the current slot and a fresh packet of a random length.
-func (p *spa2Params) packet(now time.Time) (uint16, []byte, error) {
+// packet returns the port of the current slot and a fresh packet of a random length, v3 for dst (valid) and v2
+// without; the length uniform in [max(len_min, the shortest for the version), len_max] (spa-v3 §2).
+func (p *spa2Params) packet(now time.Time, dst netip.Addr) (uint16, []byte, error) {
 	nonce := make([]byte, spa2NonceSize)
 	if _, err := rand.Read(nonce); err != nil {
 		return 0, nil, err
 	}
-	length := p.lenMin + int(randomInt(int64(p.lenMax-p.lenMin+1)))
-	packet, err := p.seal(now, nonce, length)
+	low := max(p.lenMin, p.minLen(dst.IsValid()))
+	length := low + int(randomInt(int64(p.lenMax-low+1)))
+	packet, err := p.seal(now, nonce, length, dst)
 	return p.port(p.slot(now)), packet, err
 }
 
@@ -338,13 +375,14 @@ func (o *Outbound) sendSPA2(ctx context.Context, destination M.Socksaddr) error 
 // or bare for nodes before raycontrol v0.10.0, then close; the node answers
 // nothing and resets.
 func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, carrier Carrier) error {
-	port, packet, err := o.spa2.packet(time.Now())
+	dst := o.spaDst(ctx, destination)
+	port, packet, err := o.spa2.packet(time.Now(), dst)
 	if err != nil {
 		return err
 	}
 	target := M.Socksaddr{Addr: destination.Addr, Fqdn: destination.Fqdn, Port: port}
 	if carrier == CarrierUDP {
-		o.logger.DebugContext(ctx, "SPA v2 to ", destination.AddrString(), " port ", port)
+		o.logger.DebugContext(ctx, "SPA v", spaVersionOf(dst), " to ", destination.AddrString(), " port ", port)
 		o.send(ctx, target, step{port: port, udp: true, payload: packet})
 		return sleep(ctx, spa2Settle())
 	}
@@ -357,7 +395,7 @@ func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, ca
 	if err != nil {
 		return err
 	}
-	o.logger.DebugContext(ctx, "SPA v2 over ", carrier, " to ", destination.AddrString(), " port ", port)
+	o.logger.DebugContext(ctx, "SPA v", spaVersionOf(dst), " over ", carrier, " to ", destination.AddrString(), " port ", port)
 	dialCtx, cancel := context.WithTimeout(ctx, spa2TCPTimeout)
 	conn, err := o.dialer.DialContext(dialCtx, N.NetworkTCP, target)
 	cancel()
@@ -374,11 +412,11 @@ func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, ca
 	return sleep(ctx, spa2Settle())
 }
 
-// dialSPA2 dials after SPA v2 (spa-v2.md §7, §10): on a failed dial one more
+// dialSPA2Once dials after SPA v2 (spa-v2.md §7, §10): on a failed dial one more
 // packet over the carrier in use (the slot may have turned), then the carriers
 // after it in turn (UDP, ClientHello, bare TCP); the one that worked is kept
-// until the network changes.
-func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+// until the network changes. The version of its knocks: spaDst (spa3.go).
+func (o *Outbound) dialSPA2Once(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if _, err := o.knock(ctx, destination, false); err != nil {
 		return nil, err
 	}
@@ -552,13 +590,20 @@ func (c *trackedPacketConn) Close() error {
 func (c *trackedPacketConn) Upstream() any { return c.PacketConn }
 
 // SPAv2Packet returns the slot port and a fresh packet for the options at now
-// (the subscription fetch sends it outside an outbound).
-func SPAv2Packet(options SPAv2Options, now time.Time) (uint16, []byte, error) {
+// (the subscription fetch sends it outside an outbound): v3 at host, an
+// address, when the options' node takes it (spa-v3 §3), else v2.
+func SPAv2Packet(options SPAv2Options, host string, now time.Time) (uint16, []byte, error) {
 	p, err := parseSPAv2(options)
 	if err != nil {
 		return 0, nil, err
 	}
-	return p.packet(now)
+	var dst netip.Addr
+	if p.v3 {
+		if addr, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+			dst = DstOf(addr)
+		}
+	}
+	return p.packet(now, dst)
 }
 
 // SendSPAv2 sends one packet for options to host at the port of the slot of
@@ -573,7 +618,7 @@ func SendSPAv2(ctx context.Context, dialer *net.Dialer, host string, options SPA
 // SendSPAv2Named is SendSPAv2 to an address the caller resolved serverName to (names-v1 §5 p. 6): the ClientHello
 // carrier names it (no server_name when it is empty or an address).
 func SendSPAv2Named(ctx context.Context, dialer *net.Dialer, host string, serverName string, options SPAv2Options, carrier Carrier, now time.Time) error {
-	port, packet, err := SPAv2Packet(options, now)
+	port, packet, err := SPAv2Packet(options, host, now)
 	if err != nil {
 		return err
 	}

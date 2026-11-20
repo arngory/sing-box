@@ -111,10 +111,20 @@ func (o *Outbound) ResolveNode(ctx context.Context, name string) ([]netip.Addr, 
 	answer, err := o.lookup(lookupCtx, name)
 	cancel()
 	var addresses []netip.Addr
+	// SPA v3 (spa-v3 §6 p. 2): any address of the answer, the knock names it and opens nothing elsewhere; the
+	// node's own after them, for an answer that does not lead to the node
+	v3 := o.spa2 != nil && o.spa2.v3
 	for _, addr := range answer {
 		addr = addr.Unmap()
-		if n.set[addr] && !slices.Contains(addresses, addr) {
+		if (n.set[addr] || v3 && addr.IsValid() && !addr.IsUnspecified()) && !slices.Contains(addresses, addr) {
 			addresses = append(addresses, addr)
+		}
+	}
+	if v3 && len(addresses) > 0 && slices.ContainsFunc(addresses, func(addr netip.Addr) bool { return !n.set[addr] }) {
+		for _, addr := range n.fallback(o.generation.Load()) {
+			if !slices.Contains(addresses, addr) {
+				addresses = append(addresses, addr)
+			}
 		}
 	}
 	if len(addresses) > 0 {
@@ -142,6 +152,11 @@ func (o *Outbound) nodeTargets(ctx context.Context, destination M.Socksaddr) ([]
 		addresses, _ = o.ResolveNode(ctx, name)
 	} else if addr := destination.Addr.Unmap(); o.node.set[addr] {
 		addresses = []netip.Addr{addr}
+	} else if o.spa2 != nil && o.spa2.v3 && !addr.IsUnspecified() {
+		// SPA v3: an address another resolver gave is knocked at as it is (spa-v3 §6 p. 2), the node's own after it
+		addresses = append([]netip.Addr{addr}, slices.DeleteFunc(o.node.fallback(o.generation.Load()), func(a netip.Addr) bool {
+			return a == addr
+		})...)
 	} else {
 		o.logger.WarnContext(ctx, "names: ", addr, " is none of the node's addresses (a forged answer to whoever "+
 			"resolved its name): the knock goes to the node's own")

@@ -96,7 +96,7 @@ func TestSPA2Vectors(t *testing.T) {
 			t.Fatalf("packet %d: epoch key %x, want %s (%v)", i, key, c.EpochKey, err)
 		}
 		nonce, _ := hex.DecodeString(c.Nonce)
-		packet, err := p.seal(now, nonce, c.Length)
+		packet, err := p.seal(now, nonce, c.Length, netip.Addr{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -345,8 +345,8 @@ func TestSPA2Options(t *testing.T) {
 	}
 	// packets are random: different nonce, length within bounds
 	p, _ := parseSPAv2(good)
-	_, a, _ := p.packet(time.Now())
-	_, b, _ := p.packet(time.Now())
+	_, a, _ := p.packet(time.Now(), netip.Addr{})
+	_, b, _ := p.packet(time.Now(), netip.Addr{})
 	if bytes.Equal(a[:spa2NonceSize], b[:spa2NonceSize]) || len(a) < 96 || len(a) > 160 {
 		t.Fatal("packet not random")
 	}

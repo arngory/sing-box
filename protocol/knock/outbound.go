@@ -112,6 +112,8 @@ type target struct {
 	lastUse time.Time
 	active  int
 	renew   *time.Timer
+	// SPA v3: only v2 opened this address of the signed data (spa-v3 §6 p. 3), its knocks are v2
+	v2 bool
 }
 
 var (
@@ -410,7 +412,7 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 		return o.dialNode(ctx, network, destination)
 	}
 	if destination.IsFqdn() {
-		ctx = o.withServerName(ctx, destination.Fqdn)
+		ctx = withFromDNS(o.withServerName(ctx, destination.Fqdn))
 	}
 	destination, err := o.resolve(ctx, destination)
 	if err != nil {
@@ -468,7 +470,7 @@ func (o *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		destination = targets[0]
 	} else {
 		if destination.IsFqdn() {
-			ctx = o.withServerName(ctx, destination.Fqdn)
+			ctx = withFromDNS(o.withServerName(ctx, destination.Fqdn))
 		}
 		destination, err = o.resolve(ctx, destination)
 		if err != nil {
