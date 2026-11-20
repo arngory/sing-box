@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -344,7 +345,8 @@ func TestSPA3DNSAnswers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// the node's own first: a forged answer (a block page that takes TCP) does not hold them up
-	if got, _ := o.ResolveNode(ctx, "localhost"); len(got) < 2 || got[0] != netip.MustParseAddr("192.0.2.1") || got[len(got)-1] != netip.MustParseAddr("127.0.0.1") {
+	// (localhost may answer ::1 as well)
+	if got, _ := o.ResolveNode(ctx, "localhost"); len(got) < 2 || got[0] != netip.MustParseAddr("192.0.2.1") || !slices.Contains(got[1:], netip.MustParseAddr("127.0.0.1")) {
 		t.Fatal("v3: the node's own, then the answer: ", got)
 	}
 	conn, err := o.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("localhost", service))
