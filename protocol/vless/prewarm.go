@@ -39,8 +39,10 @@ func newPrewarm(ctx context.Context, logger log.ContextLogger, idle time.Duratio
 	return &prewarm{ctx: ctx, logger: logger, idle: idle, dial: dial}
 }
 
-// take hands out the spare, if one is ready and still open: one a NAT or a middlebox dropped while it waited, or
-// the server closed, is left for a new connection rather than failing the request it would carry
+// take hands out the spare, if one is ready and still open: one the server closed or reset while it waited is left
+// for a new connection rather than failing the request it would carry. A connection a NAT dropped from its table
+// without a word looks open here and is not caught (only a retry after its first read could, and a VLESS request
+// may be retried only before the server answered)
 func (p *prewarm) take() net.Conn {
 	p.access.Lock()
 	conn := p.spare
@@ -54,7 +56,7 @@ func (p *prewarm) take() net.Conn {
 	}
 	if !stillOpen(conn) {
 		conn.Close()
-		p.logger.Debug("prewarm: the connection opened ahead was closed meanwhile, a new one instead")
+		p.logger.Debug("prewarm: a spare closed meanwhile, dialling anew")
 		return nil
 	}
 	return conn
