@@ -148,7 +148,9 @@ func (o *Outbound) setV2(destination M.Socksaddr, v2 bool) {
 
 // dialSPA2 dials after SPA (dialSPA2Once); a v3 knock at an address of the signed data that opened nothing is
 // followed by v2 at the same address, with the same carriers (spa-v3 §6 p. 3). An attempt with a deadline (one
-// address of several) gives v3 half of it, so that a node rolled back is reached in the other half.
+// address of several) gives v3 half of it, so that a node rolled back is reached in the other half. v2 stays for
+// that address only when v3 had its time and opened nothing; v3 that ran out of it (a slow network, the TCP
+// carriers) is followed by v2 for this dial alone, and the next one knocks v3 again.
 func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if !o.spaDst(ctx, destination).IsValid() || !o.signed(destination.Addr) {
 		return o.dialSPA2Once(ctx, network, destination)
@@ -158,19 +160,26 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 		v3ctx, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
 	}
 	conn, err := o.dialSPA2Once(v3ctx, network, destination)
+	outOfTime := v3ctx.Err() != nil
 	cancel()
 	if err == nil || ctx.Err() != nil {
 		return conn, err
 	}
-	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
-	o.setV2(destination, true)
+	if outOfTime {
+		o.logger.DebugContext(ctx, "SPA v3 ran out of its time at ", destination.AddrString(), ", v2 for this dial: ", err)
+	} else {
+		o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
+		o.setV2(destination, true)
+	}
 	conn, v2err := o.dialSPA2Once(withSPAv2(ctx), network, destination)
 	if v2err != nil {
 		// neither: the next dial tries v3 again
 		o.setV2(destination, false)
 		return nil, err
 	}
-	o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there from now on")
+	if !outOfTime {
+		o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there from now on")
+	}
 	return conn, nil
 }
 
