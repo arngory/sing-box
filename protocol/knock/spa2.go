@@ -476,6 +476,9 @@ func (o *Outbound) dialSPA2Once(ctx context.Context, network string, destination
 // dialPeer dials the service; a UDP flow to a service with a rotating port
 // (spa-v2.md §11) goes to the current slot's port and keeps it.
 func (o *Outbound) dialPeer(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if o.testDialPeer != nil {
+		return o.testDialPeer(ctx, network, destination)
+	}
 	schedule := o.udpPorts[destination.Port]
 	if schedule == nil || N.NetworkName(network) != N.NetworkUDP || !destination.IsIP() {
 		return o.dialer.DialContext(ctx, network, destination)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -364,5 +365,85 @@ func TestSPA3DNSAnswers(t *testing.T) {
 	if plaintext := spa3Plaintext(t, o.spa2, buffer[:n], time.Now()); plaintext[0] != spa3Version ||
 		netip.AddrFrom16([16]byte(plaintext[13:29])).Unmap() != netip.MustParseAddr("127.0.0.1") {
 		t.Fatalf("plaintext % x", plaintext[:29])
+	}
+}
+
+// TestSPA3FallbackAfterTimeout: a node rolled back whose perimeter drops the SYN (no refusal) until a v2 knock: v3
+// runs out of its half of a dial with a deadline, v2 opens in the other half, and the next dial goes straight to v2.
+func TestSPA3FallbackAfterTimeout(t *testing.T) {
+	spaConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spaConn.Close()
+	options := SPAv2Options{
+		NodeID: "33333333333333333333333333333333", EpochLen: 86400, SlotLen: 600,
+		PortKey:  "4444444444444444444444444444444444444444444444444444444444444444",
+		PortBase: uint16(spaConn.LocalAddr().(*net.UDPAddr).Port), PortRange: 1, LenMin: 96, LenMax: 160,
+		DeviceKey: "1111111111111111111111111111111111111111111111111111111111111111",
+		Carriers:  []string{"udp"}, Versions: []int{2, 3},
+	}
+	o := newBox(t, Options{SPAv2: &options, NodeAddresses: []string{"127.0.0.1"}})
+	opened := make(chan struct{})
+	var open sync.Once
+	var versions []byte
+	var access sync.Mutex
+	go func() {
+		buffer := make([]byte, 1024)
+		for {
+			n, _, err := spaConn.ReadFrom(buffer)
+			if err != nil {
+				return
+			}
+			v := spa3Plaintext(t, o.spa2, bytes.Clone(buffer[:n]), time.Now())[0]
+			access.Lock()
+			versions = append(versions, v)
+			if v == spa2Version {
+				open.Do(func() { close(opened) })
+			}
+			access.Unlock()
+		}
+	}()
+	// the dial hangs until a v2 knock opened the port, as a dropped SYN does
+	o.testDialPeer = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		select {
+		case <-opened:
+			client, server := net.Pipe()
+			server.Close()
+			return client, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	destination := M.ParseSocksaddrHostPort("127.0.0.1", 443)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, err := o.DialContext(ctx, N.NetworkTCP, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	access.Lock()
+	first := bytes.Clone(versions)
+	access.Unlock()
+	if len(first) < 2 || first[0] != spa3Version || first[len(first)-1] != spa2Version {
+		t.Fatalf("v3, then v2: % x", first)
+	}
+	// the next dial knocks v2 straight away
+	o.forget(destination)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel2()
+	started := time.Now()
+	conn, err = o.DialContext(ctx2, N.NetworkTCP, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	time.Sleep(100 * time.Millisecond)
+	access.Lock()
+	second := bytes.Clone(versions[len(first):])
+	access.Unlock()
+	if len(second) != 1 || second[0] != spa2Version || time.Since(started) > time.Second {
+		t.Fatalf("the second dial: % x after %v", second, time.Since(started))
 	}
 }

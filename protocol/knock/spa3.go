@@ -123,15 +123,23 @@ func (o *Outbound) detourTargets(destination M.Socksaddr) []M.Socksaddr {
 	return targets
 }
 
+const (
+	// how long v2 stays at an address where v3 had its time and opened nothing, and v2 then did (a node rolled back)
+	spa3V2Hold = time.Hour
+	// the same where v3 ran out of its time first: a node that drops the SYN looks like a slow network, so the
+	// evidence is weaker and v3 is tried again sooner
+	spa3V2HoldShort = 10 * time.Minute
+)
+
 // spaDst is the dst of a knock at destination: none (v2) without v3, at a name, in a v2 dial, or at an address
-// where only v2 opened.
+// where v2 opened lately on this network.
 func (o *Outbound) spaDst(ctx context.Context, destination M.Socksaddr) netip.Addr {
 	if o.spa2 == nil || !o.spa2.v3 || !destination.IsIP() || spaV2From(ctx) {
 		return netip.Addr{}
 	}
 	t := o.target(destination.AddrString())
 	t.access.Lock()
-	v2 := t.v2
+	v2 := time.Now().Before(t.v2Until) && t.v2Generation == o.generation.Load()
 	t.access.Unlock()
 	if v2 {
 		return netip.Addr{}
@@ -139,18 +147,22 @@ func (o *Outbound) spaDst(ctx context.Context, destination M.Socksaddr) netip.Ad
 	return DstOf(destination.Addr)
 }
 
-func (o *Outbound) setV2(destination M.Socksaddr, v2 bool) {
+// markV2 keeps v2 at destination for hold (0: v3 again).
+func (o *Outbound) markV2(destination M.Socksaddr, hold time.Duration) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
-	t.v2 = v2
+	if hold > 0 {
+		t.v2Until, t.v2Generation = time.Now().Add(hold), o.generation.Load()
+	} else {
+		t.v2Until = time.Time{}
+	}
 	t.access.Unlock()
 }
 
 // dialSPA2 dials after SPA (dialSPA2Once); a v3 knock at an address of the signed data that opened nothing is
 // followed by v2 at the same address, with the same carriers (spa-v3 §6 p. 3). An attempt with a deadline (one
-// address of several) gives v3 half of it, so that a node rolled back is reached in the other half. v2 stays for
-// that address only when v3 had its time and opened nothing; v3 that ran out of it (a slow network, the TCP
-// carriers) is followed by v2 for this dial alone, and the next one knocks v3 again.
+// address of several) gives v3 half of it, so that a node rolled back is reached in the other half. Where v2 then
+// opens, the address keeps it for a while (spa3V2Hold, shorter when v3 only ran out of time), then v3 again.
 func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if !o.spaDst(ctx, destination).IsValid() || !o.signed(destination.Addr) {
 		return o.dialSPA2Once(ctx, network, destination)
@@ -165,21 +177,18 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	if err == nil || ctx.Err() != nil {
 		return conn, err
 	}
-	if outOfTime {
-		o.logger.DebugContext(ctx, "SPA v3 ran out of its time at ", destination.AddrString(), ", v2 for this dial: ", err)
-	} else {
-		o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
-		o.setV2(destination, true)
-	}
+	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
+	// the dial's own v2 (withSPAv2); the mark, for the dials meanwhile and after, only once v2 has opened
 	conn, v2err := o.dialSPA2Once(withSPAv2(ctx), network, destination)
 	if v2err != nil {
-		// neither: the next dial tries v3 again
-		o.setV2(destination, false)
 		return nil, err
 	}
-	if !outOfTime {
-		o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there from now on")
+	hold := spa3V2Hold
+	if outOfTime {
+		hold = spa3V2HoldShort
 	}
+	o.markV2(destination, hold)
+	o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there for ", hold)
 	return conn, nil
 }
 

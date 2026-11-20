@@ -112,8 +112,10 @@ type target struct {
 	lastUse time.Time
 	active  int
 	renew   *time.Timer
-	// SPA v3: only v2 opened this address of the signed data (spa-v3 §6 p. 3), its knocks are v2
-	v2 bool
+	// SPA v3: v2 opened this address of the signed data after v3 did not (spa-v3 §6 p. 3): its knocks are v2 until
+	// v2Until on that network (v2Generation), then v3 is tried again
+	v2Until      time.Time
+	v2Generation uint64
 }
 
 var (
@@ -154,6 +156,8 @@ type Outbound struct {
 	// the node's signed addresses (node_addresses) with or without a detour: SPA v3 knocks at them through one, and
 	// only at them does v2 follow a v3 that opened nothing (spa3.go)
 	signedAddrs *nodeAddresses
+	// tests: the dial after the knock (a node that drops the SYN until the right knock)
+	testDialPeer func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
 }
 
 // knockHosts: Options.Hosts, names in lower case and addresses, with what the names resolved to
