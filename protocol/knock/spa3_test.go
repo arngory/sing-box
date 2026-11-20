@@ -268,3 +268,28 @@ func TestSPA3NoV2BeyondSignedData(t *testing.T) {
 		t.Fatal("without node_addresses")
 	}
 }
+
+func TestSPA3KnocksV3(t *testing.T) {
+	options := SPAv2Options{
+		NodeID: "33333333333333333333333333333333", EpochLen: 86400, SlotLen: 600,
+		PortKey:  "4444444444444444444444444444444444444444444444444444444444444444",
+		PortBase: 40000, PortRange: 4096, LenMin: 96, LenMax: 160,
+		DeviceKey: "1111111111111111111111111111111111111111111111111111111111111111", Versions: []int{2, 3},
+	}
+	if !KnocksV3(options, "203.0.113.7") || !KnocksV3(options, "[2001:db8::7]") {
+		t.Fatal("v3 at an address")
+	}
+	if KnocksV3(options, "node.example.com") || KnocksV3(options.V2(), "203.0.113.7") {
+		t.Fatal("v3 at a name, or after V2")
+	}
+	// a request's packet at an address names it
+	_, packet, err := SPAv2Packet(options, "203.0.113.7", time.Unix(1767225600, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := parseSPAv2(options)
+	if plaintext := spa3Plaintext(t, p, packet, time.Unix(1767225600, 0)); plaintext[0] != spa3Version ||
+		netip.AddrFrom16([16]byte(plaintext[13:29])).Unmap() != netip.MustParseAddr("203.0.113.7") {
+		t.Fatalf("plaintext % x", plaintext[:29])
+	}
+}

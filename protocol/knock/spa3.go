@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
+	"strings"
 	"sync/atomic"
 
 	M "github.com/sagernet/sing/common/metadata"
@@ -158,4 +160,24 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	}
 	o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there from now on")
 	return conn, nil
+}
+
+// KnocksV3 reports whether a knock with options at host, outside an outbound (libcore's requests), is v3: the node
+// takes it and host is an address.
+func KnocksV3(options SPAv2Options, host string) bool {
+	if !slices.Contains(options.Versions, 3) {
+		return false
+	}
+	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err != nil {
+		return false
+	}
+	p, err := parseSPAv2(options)
+	return err == nil && p.v3
+}
+
+// V2 is options that knock v2 alone: a request that v3 did not open at an address of the signed data tries it once
+// (spa-v3 §6 p. 3).
+func (o SPAv2Options) V2() SPAv2Options {
+	o.Versions = nil
+	return o
 }
