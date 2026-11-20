@@ -466,10 +466,22 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	if len(third) != 2 || third[0] != spa2Version || third[1] != spa3Version {
 		t.Fatalf("a renewal after the hold: % x", third)
 	}
-	// a dial knocks v3 alone, and as it opens (this node opens to anything now) the mark goes
+	// a dial right after, on the access that v2 opened (the knock cached): it proves nothing of v3, the mark stays
+	ctx4, cancel4 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel4()
+	conn, err = o.DialContext(ctx4, N.NetworkTCP, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if !o.hadV2(destination) {
+		t.Fatal("the mark went on access a v2 knock opened")
+	}
+	// a dial that knocks v3 alone, no v2 within the access time, and opens (this node opens to anything now): the
+	// mark goes
 	target := o.target("127.0.0.1")
 	target.access.Lock()
-	target.pairedAt = time.Time{}
+	target.lastV2At = time.Time{}
 	target.access.Unlock()
 	o.forget(destination)
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 4*time.Second)

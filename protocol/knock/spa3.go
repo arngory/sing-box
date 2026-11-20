@@ -163,21 +163,23 @@ func renewalFrom(ctx context.Context) bool {
 	return renewal
 }
 
-// pairedV2 records a renewal that sent v2 beside v3 at destination.
-func (o *Outbound) pairedV2(destination M.Socksaddr) {
+// sentV2 records a v2 packet sent at destination on a node that takes v3.
+func (o *Outbound) sentV2(destination M.Socksaddr) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
-	t.pairedAt = time.Now()
+	t.lastV2At, t.lastV2Generation = time.Now(), o.generation.Load()
 	t.access.Unlock()
 }
 
-// v3Alone clears destination's v2 mark after a dial v3 opened by itself: no renewal sent v2 beside it within the
-// access time, so the node takes v3 again.
+// v3Alone clears destination's v2 mark after a dial on the v3 path opened: only when no v2 packet went there on this
+// network within the access time, so that the access it used was v3's alone (a dial on access a v2 knock opened,
+// cached, proves nothing), and the node takes v3 again.
 func (o *Outbound) v3Alone(destination M.Socksaddr) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
-	if !t.v2Until.IsZero() && time.Since(t.pairedAt) >= o.ttl {
-		t.v2Until, t.pairedAt = time.Time{}, time.Time{}
+	recentV2 := t.lastV2Generation == o.generation.Load() && time.Since(t.lastV2At) < o.ttl
+	if !t.v2Until.IsZero() && !recentV2 {
+		t.v2Until = time.Time{}
 	}
 	t.access.Unlock()
 }

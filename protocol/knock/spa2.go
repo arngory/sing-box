@@ -379,7 +379,6 @@ func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, ca
 	if dst.IsValid() && renewalFrom(ctx) && o.hadV2(destination) {
 		// a renewal where v2 opened before on this network and its hold ran out: v2 beside v3, so a node still
 		// rolled back stays open (a renewal is not a dial: it cannot tell v3 went unheard); one settle for the two
-		o.pairedV2(destination)
 		if err := o.sendSPA2Packet(ctx, destination, carrier, netip.Addr{}); err != nil {
 			return err
 		}
@@ -395,6 +394,9 @@ func (o *Outbound) sendSPA2Packet(ctx context.Context, destination M.Socksaddr, 
 	port, packet, err := o.spa2.packet(time.Now(), dst)
 	if err != nil {
 		return err
+	}
+	if !dst.IsValid() && o.spa2.v3 {
+		o.sentV2(destination)
 	}
 	target := M.Socksaddr{Addr: destination.Addr, Fqdn: destination.Fqdn, Port: port}
 	if carrier == CarrierUDP {

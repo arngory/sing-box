@@ -116,8 +116,10 @@ type target struct {
 	// v2Until on that network (v2Generation), then v3 is tried again
 	v2Until      time.Time
 	v2Generation uint64
-	// the last renewal that sent v2 beside v3 after a hold (the access it opened is v2's as much as v3's)
-	pairedAt time.Time
+	// the last v2 packet sent here on a node that takes v3 (alone in a hold, beside v3 after it, a fallback's) and
+	// its network: access it opened is v2's, so a dial on it proves nothing of v3 (v3Alone)
+	lastV2At         time.Time
+	lastV2Generation uint64
 }
 
 var (
