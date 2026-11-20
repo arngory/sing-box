@@ -3,6 +3,7 @@ package vless
 import (
 	"context"
 	"net"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -49,6 +50,7 @@ type Outbound struct {
 	transport       adapter.V2RayClientTransport
 	packetAddr      bool
 	xudp            bool
+	prewarm         *prewarm
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
@@ -80,6 +82,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if outbound.tlsConfig != nil {
 			outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
 		}
+	}
+	if options.Prewarm > 0 && options.Transport == nil && outbound.tlsDialer != nil {
+		outbound.prewarm = newPrewarm(ctx, logger, time.Duration(options.Prewarm), func(ctx context.Context) (net.Conn, error) {
+			return outbound.tlsDialer.DialTLSContext(ctx, outbound.serverAddr)
+		})
 	}
 	if options.Transport != nil {
 		outbound.transport, err = v2ray.NewClientTransport(ctx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
@@ -164,12 +171,18 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	if h.transport != nil {
 		h.transport.Close()
 	}
+	if h.prewarm != nil {
+		h.prewarm.reset()
+	}
 	if h.multiplexDialer != nil {
 		h.multiplexDialer.Reset()
 	}
 }
 
 func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	if h.prewarm != nil {
+		h.prewarm.setOn(keep)
+	}
 	transportKeeper, isTransportKeeper := h.transport.(adapter.IdleConnectionKeeper)
 	if isTransportKeeper {
 		transportKeeper.SetKeepIdleConnections(keep)
@@ -180,6 +193,9 @@ func (h *Outbound) SetKeepIdleConnections(keep bool) {
 }
 
 func (h *Outbound) CloseIdleConnections() {
+	if h.prewarm != nil {
+		h.prewarm.reset()
+	}
 	transportKeeper, isTransportKeeper := h.transport.(adapter.IdleConnectionKeeper)
 	if isTransportKeeper {
 		transportKeeper.CloseIdleConnections()
@@ -199,10 +215,31 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if h.multiplexDialer != nil {
 		scope.Add(h.multiplexDialer.Close)
 	}
+	if h.prewarm != nil {
+		scope.Add(h.prewarm.Close)
+	}
 	return nil
 }
 
 type vlessDialer Outbound
+
+// dialTLS: the spare opened ahead if one is ready, else a new connection; either way the next spare is warmed
+// after it, and only after a connection went through, so a server that does not answer is not dialled twice
+func (h *vlessDialer) dialTLS(ctx context.Context) (net.Conn, error) {
+	if h.prewarm == nil {
+		return h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
+	}
+	if conn := h.prewarm.take(); conn != nil {
+		h.logger.DebugContext(ctx, "prewarm: the connection opened ahead")
+		h.prewarm.warm()
+		return conn, nil
+	}
+	conn, err := h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
+	if err == nil {
+		h.prewarm.warm()
+	}
+	return conn, err
+}
 
 func (h *vlessDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	ctx, metadata := adapter.ExtendContext(ctx)
@@ -213,7 +250,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	if h.transport != nil {
 		conn, err = h.transport.DialContext(ctx)
 	} else if h.tlsDialer != nil {
-		conn, err = h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
+		conn, err = h.dialTLS(ctx)
 	} else {
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
 	}
@@ -259,7 +296,7 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	if h.transport != nil {
 		conn, err = h.transport.DialContext(ctx)
 	} else if h.tlsDialer != nil {
-		conn, err = h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
+		conn, err = h.dialTLS(ctx)
 	} else {
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
 	}

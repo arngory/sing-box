@@ -1,5 +1,7 @@
 package option
 
+import "github.com/sagernet/sing/common/json/badoption"
+
 type VLESSInboundOptions struct {
 	ListenOptions
 	Users []VLESSUser `json:"users,omitempty"`
@@ -29,4 +31,7 @@ type VLESSOutboundOptions struct {
 	Multiplex      *OutboundMultiplexOptions `json:"multiplex,omitempty"`
 	Transport      *V2RayTransportOptions    `json:"transport,omitempty"`
 	PacketEncoding *string                   `json:"packet_encoding,omitempty"`
+	// Prewarm (niko): with TLS and no transport, one connection opened ahead through TCP and the TLS (REALITY)
+	// handshake, closed after this long unused; zero leaves it off (protocol/vless/prewarm.go)
+	Prewarm badoption.Duration `json:"prewarm,omitempty"`
 }
