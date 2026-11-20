@@ -2,6 +2,7 @@ package vless
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -38,16 +39,44 @@ func newPrewarm(ctx context.Context, logger log.ContextLogger, idle time.Duratio
 	return &prewarm{ctx: ctx, logger: logger, idle: idle, dial: dial}
 }
 
-// take hands out the spare, if one is ready
+// take hands out the spare, if one is ready and still open: one a NAT or a middlebox dropped while it waited, or
+// the server closed, is left for a new connection rather than failing the request it would carry
 func (p *prewarm) take() net.Conn {
 	p.access.Lock()
-	defer p.access.Unlock()
 	conn := p.spare
 	if conn != nil {
 		p.spare = nil
 		p.expiry.Stop()
 	}
+	p.access.Unlock()
+	if conn == nil {
+		return nil
+	}
+	if !stillOpen(conn) {
+		conn.Close()
+		p.logger.Debug("prewarm: the connection opened ahead was closed meanwhile, a new one instead")
+		return nil
+	}
 	return conn
+}
+
+// prewarmPeek is how long take looks for the spare's end: a closed connection answers at once
+const prewarmPeek = time.Millisecond
+
+// stillOpen reads the spare for prewarmPeek: nothing comes before the request, so the read runs out of time on an
+// open connection. An end (EOF, a reset) or bytes of any kind (which the read would have taken) mean it is not to
+// be used. A TLS connection keeps its state after a read timeout (crypto/tls and uTLS treat it as temporary).
+func stillOpen(conn net.Conn) bool {
+	if conn.SetReadDeadline(time.Now().Add(prewarmPeek)) != nil {
+		return false
+	}
+	var one [1]byte
+	n, err := conn.Read(one[:])
+	if conn.SetReadDeadline(time.Time{}) != nil || n > 0 {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // warm opens a spare in the background unless one is ready or on its way
@@ -64,22 +93,30 @@ func (p *prewarm) warm() {
 		ctx, cancel := context.WithTimeout(p.ctx, prewarmDialTimeout)
 		conn, err := p.dial(ctx)
 		cancel()
-		p.access.Lock()
-		p.warming = false
 		if err != nil {
-			p.access.Unlock()
 			p.logger.Debug("prewarm: ", err)
+			p.settle()
 			return
 		}
+		p.access.Lock()
 		if p.closed || p.off || generation != p.generation || p.spare != nil {
 			p.access.Unlock()
+			// closed before the warming ends: once it has, nothing of this attempt is left open
 			conn.Close()
+			p.settle()
 			return
 		}
+		p.warming = false
 		p.spare = conn
 		p.expiry = time.AfterFunc(p.idle, func() { p.expire(conn) })
 		p.access.Unlock()
 	}()
+}
+
+func (p *prewarm) settle() {
+	p.access.Lock()
+	p.warming = false
+	p.access.Unlock()
 }
 
 func (p *prewarm) expire(conn net.Conn) {

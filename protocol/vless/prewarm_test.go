@@ -2,7 +2,14 @@ package vless
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	stdtls "crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"math/big"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,14 +19,17 @@ import (
 	"github.com/sagernet/sing-box/log"
 )
 
+// fakeConn is one end of a pipe: its peer is the server, which closes or writes to it
 type fakeConn struct {
 	net.Conn
+	peer   net.Conn
 	closed atomic.Bool
 }
 
 func (c *fakeConn) Close() error {
 	c.closed.Store(true)
-	return nil
+	c.peer.Close()
+	return c.Conn.Close()
 }
 
 type fakeDialer struct {
@@ -38,7 +48,8 @@ func (d *fakeDialer) dial(ctx context.Context) (net.Conn, error) {
 	if d.fail {
 		return nil, errors.New("refused")
 	}
-	conn := &fakeConn{}
+	client, server := net.Pipe()
+	conn := &fakeConn{Conn: client, peer: server}
 	d.conns = append(d.conns, conn)
 	return conn, nil
 }
@@ -185,5 +196,89 @@ func TestPrewarmOffClosedFailed(t *testing.T) {
 	waitSettled(t, p)
 	if d.count() != 2 {
 		t.Fatal("warmed after Close")
+	}
+}
+
+// A spare the server closed or wrote to while it waited is not handed out: the request dials anew
+func TestPrewarmSpareClosedMeanwhile(t *testing.T) {
+	d := &fakeDialer{}
+	p := newTestPrewarm(d, time.Minute)
+	defer p.Close()
+	p.warm()
+	waitSettled(t, p)
+	d.conns[0].peer.Close()
+	if p.take() != nil || !d.conns[0].closed.Load() {
+		t.Fatal("a spare its server closed was handed out")
+	}
+	p.warm()
+	waitSettled(t, p)
+	go d.conns[1].peer.Write([]byte{0x17})
+	time.Sleep(10 * time.Millisecond)
+	if p.take() != nil || !d.conns[1].closed.Load() {
+		t.Fatal("a spare with bytes before its request was handed out")
+	}
+	p.warm()
+	waitSettled(t, p)
+	conn := p.take()
+	if conn == nil || d.conns[2].closed.Load() {
+		t.Fatal("an open spare was not handed out")
+	}
+	// the peek leaves no deadline behind
+	go d.conns[2].peer.Write([]byte{1})
+	var one [1]byte
+	if n, err := conn.Read(one[:]); n != 1 || err != nil {
+		t.Fatal("the spare after the peek: ", n, err)
+	}
+}
+
+// The peek's timeout leaves a TLS connection whole: the request and the answer after it go through
+func TestPrewarmPeekKeepsTLS(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"node.example"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		raw, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		server := stdtls.Server(raw, &stdtls.Config{Certificates: []stdtls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}})
+		defer server.Close()
+		request := make([]byte, 7)
+		if _, err := io.ReadFull(server, request); err != nil {
+			return
+		}
+		server.Write(append([]byte("answer:"), request...))
+	}()
+	raw, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := stdtls.Client(raw, &stdtls.Config{ServerName: "node.example", InsecureSkipVerify: true})
+	defer client.Close()
+	if err := client.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if !stillOpen(client) {
+		t.Fatal("an open TLS connection taken as closed")
+	}
+	if _, err := client.Write([]byte("request")); err != nil {
+		t.Fatal("write after the peek: ", err)
+	}
+	answer := make([]byte, 14)
+	if _, err := io.ReadFull(client, answer); err != nil || string(answer) != "answer:request" {
+		t.Fatal("read after the peek: ", string(answer), err)
 	}
 }
