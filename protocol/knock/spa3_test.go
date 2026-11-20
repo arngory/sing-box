@@ -446,4 +446,24 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	if len(second) != 1 || second[0] != spa2Version || time.Since(started) > time.Second {
 		t.Fatalf("the second dial: % x after %v", second, time.Since(started))
 	}
+	// the hold ran out: v3 again, with v2 beside it for a node still rolled back
+	target := o.target("127.0.0.1")
+	target.access.Lock()
+	target.v2Until = time.Now().Add(-time.Second)
+	target.access.Unlock()
+	o.forget(destination)
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel3()
+	conn, err = o.DialContext(ctx3, N.NetworkTCP, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	time.Sleep(100 * time.Millisecond)
+	access.Lock()
+	third := bytes.Clone(versions[len(first)+len(second):])
+	access.Unlock()
+	if len(third) != 2 || third[0] != spa2Version || third[1] != spa3Version {
+		t.Fatalf("after the hold: % x", third)
+	}
 }

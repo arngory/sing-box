@@ -123,6 +123,9 @@ func (o *Outbound) detourTargets(destination M.Socksaddr) []M.Socksaddr {
 	return targets
 }
 
+// v2 at an address of the signed data costs nothing v3 would keep: whoever is on the path to that address can
+// replay a knock there either way (spa-v3 §8), and a node takes v2 always (§4). So where v2 opened after v3 did not,
+// the address keeps it for a while, the attempt's time saved, and v3 is tried again after (with v2 beside it, hadV2).
 const (
 	// how long v2 stays at an address where v3 had its time and opened nothing, and v2 then did (a node rolled back)
 	spa3V2Hold = time.Hour
@@ -145,6 +148,14 @@ func (o *Outbound) spaDst(ctx context.Context, destination M.Socksaddr) netip.Ad
 		return netip.Addr{}
 	}
 	return DstOf(destination.Addr)
+}
+
+// hadV2 reports whether v2 opened destination before on this network (its hold may have run out since).
+func (o *Outbound) hadV2(destination M.Socksaddr) bool {
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	defer t.access.Unlock()
+	return !t.v2Until.IsZero() && t.v2Generation == o.generation.Load()
 }
 
 // markV2 keeps v2 at destination for hold (0: v3 again).

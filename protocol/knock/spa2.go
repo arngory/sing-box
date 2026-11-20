@@ -376,6 +376,13 @@ func (o *Outbound) sendSPA2(ctx context.Context, destination M.Socksaddr) error 
 // nothing and resets.
 func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, carrier Carrier) error {
 	dst := o.spaDst(ctx, destination)
+	if dst.IsValid() && o.hadV2(destination) {
+		// v2 opened this signed address before on this network and its hold ran out: v3 again, and v2 beside it,
+		// so a node still rolled back stays open (a renewal is not a dial: it cannot tell v3 went unheard)
+		if err := o.sendSPA2Over(withSPAv2(ctx), destination, carrier); err != nil {
+			return err
+		}
+	}
 	port, packet, err := o.spa2.packet(time.Now(), dst)
 	if err != nil {
 		return err
