@@ -125,7 +125,8 @@ func (o *Outbound) detourTargets(destination M.Socksaddr) []M.Socksaddr {
 
 // v2 at an address of the signed data costs nothing v3 would keep: whoever is on the path to that address can
 // replay a knock there either way (spa-v3 §8), and a node takes v2 always (§4). So where v2 opened after v3 did not,
-// the address keeps it for a while, the attempt's time saved, and v3 is tried again after (with v2 beside it, hadV2).
+// the address keeps it for a while, the attempt's time saved. After that a dial knocks v3 alone again (and a v3 that
+// opens clears the mark), while renewals of access in use send v2 beside v3, which they cannot check (hadV2).
 const (
 	// how long v2 stays at an address where v3 had its time and opened nothing, and v2 then did (a node rolled back)
 	spa3V2Hold = time.Hour
@@ -148,6 +149,37 @@ func (o *Outbound) spaDst(ctx context.Context, destination M.Socksaddr) netip.Ad
 		return netip.Addr{}
 	}
 	return DstOf(destination.Addr)
+}
+
+type renewalKey struct{}
+
+// withRenewal: a knock that renews access in use (spa2.go scheduleRenewal, renewInUse), not one before a dial
+func withRenewal(ctx context.Context) context.Context {
+	return context.WithValue(ctx, renewalKey{}, true)
+}
+
+func renewalFrom(ctx context.Context) bool {
+	renewal, _ := ctx.Value(renewalKey{}).(bool)
+	return renewal
+}
+
+// pairedV2 records a renewal that sent v2 beside v3 at destination.
+func (o *Outbound) pairedV2(destination M.Socksaddr) {
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	t.pairedAt = time.Now()
+	t.access.Unlock()
+}
+
+// v3Alone clears destination's v2 mark after a dial v3 opened by itself: no renewal sent v2 beside it within the
+// access time, so the node takes v3 again.
+func (o *Outbound) v3Alone(destination M.Socksaddr) {
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	if !t.v2Until.IsZero() && time.Since(t.pairedAt) >= o.ttl {
+		t.v2Until, t.pairedAt = time.Time{}, time.Time{}
+	}
+	t.access.Unlock()
 }
 
 // hadV2 reports whether v2 opened destination before on this network (its hold may have run out since).
@@ -185,8 +217,12 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	conn, err := o.dialSPA2Once(v3ctx, network, destination)
 	outOfTime := v3ctx.Err() != nil
 	cancel()
-	if err == nil || ctx.Err() != nil {
-		return conn, err
+	if err == nil {
+		o.v3Alone(destination)
+		return conn, nil
+	}
+	if ctx.Err() != nil {
+		return nil, err
 	}
 	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
 	// the dial's own v2 (withSPAv2); the mark, for the dials meanwhile and after, only once v2 has opened

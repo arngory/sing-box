@@ -376,13 +376,22 @@ func (o *Outbound) sendSPA2(ctx context.Context, destination M.Socksaddr) error 
 // nothing and resets.
 func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, carrier Carrier) error {
 	dst := o.spaDst(ctx, destination)
-	if dst.IsValid() && o.hadV2(destination) {
-		// v2 opened this signed address before on this network and its hold ran out: v3 again, and v2 beside it,
-		// so a node still rolled back stays open (a renewal is not a dial: it cannot tell v3 went unheard)
-		if err := o.sendSPA2Over(withSPAv2(ctx), destination, carrier); err != nil {
+	if dst.IsValid() && renewalFrom(ctx) && o.hadV2(destination) {
+		// a renewal where v2 opened before on this network and its hold ran out: v2 beside v3, so a node still
+		// rolled back stays open (a renewal is not a dial: it cannot tell v3 went unheard); one settle for the two
+		o.pairedV2(destination)
+		if err := o.sendSPA2Packet(ctx, destination, carrier, netip.Addr{}); err != nil {
 			return err
 		}
 	}
+	if err := o.sendSPA2Packet(ctx, destination, carrier, dst); err != nil {
+		return err
+	}
+	return sleep(ctx, spa2Settle())
+}
+
+// sendSPA2Packet sends one packet, v3 for dst and v2 without, over the carrier; the settle is the caller's.
+func (o *Outbound) sendSPA2Packet(ctx context.Context, destination M.Socksaddr, carrier Carrier, dst netip.Addr) error {
 	port, packet, err := o.spa2.packet(time.Now(), dst)
 	if err != nil {
 		return err
@@ -391,7 +400,7 @@ func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, ca
 	if carrier == CarrierUDP {
 		o.logger.DebugContext(ctx, "SPA v", spaVersionOf(dst), " to ", destination.AddrString(), " port ", port)
 		o.send(ctx, target, step{port: port, udp: true, payload: packet})
-		return sleep(ctx, spa2Settle())
+		return nil
 	}
 	serverName := serverNameFrom(ctx)
 	if serverName == "" && o.node != nil {
@@ -416,7 +425,7 @@ func (o *Outbound) sendSPA2Over(ctx context.Context, destination M.Socksaddr, ca
 		}
 		conn.Close()
 	}
-	return sleep(ctx, spa2Settle())
+	return nil
 }
 
 // dialSPA2Once dials after SPA v2 (spa-v2.md §7, §10): on a failed dial one more
@@ -521,7 +530,7 @@ func (o *Outbound) scheduleRenewal(t *target, destination M.Socksaddr) {
 		if o.ctx.Err() != nil || !o.inUse(t) {
 			return
 		}
-		ctx, cancel := context.WithTimeout(o.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(withRenewal(o.ctx), 10*time.Second)
 		defer cancel()
 		if _, err := o.knock(ctx, destination, true); err != nil {
 			o.logger.Debug("SPA v2 renewal for ", destination.AddrString(), ": ", err)
@@ -547,7 +556,7 @@ func (o *Outbound) renewInUse() {
 		if !o.inUse(t) {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(o.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(withRenewal(o.ctx), 10*time.Second)
 		if _, err := o.knock(ctx, M.ParseSocksaddrHostPort(host, 0), true); err != nil {
 			o.logger.Debug("SPA v2 after a network change, ", host, ": ", err)
 		}

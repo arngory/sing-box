@@ -448,10 +448,28 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	if len(second) != 1 || second[0] != spa2Version || time.Since(started) > time.Second {
 		t.Fatalf("the second dial: % x after %v", second, time.Since(started))
 	}
-	// the hold ran out: v3 again, with v2 beside it for a node still rolled back
+	// the hold ran out: a renewal sends v2 beside v3, for a node still rolled back
+	expire := func() {
+		target := o.target("127.0.0.1")
+		target.access.Lock()
+		target.v2Until = time.Now().Add(-time.Second)
+		target.access.Unlock()
+	}
+	expire()
+	if err = o.sendSPA2(withRenewal(context.Background()), destination); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	access.Lock()
+	third := bytes.Clone(versions[len(first)+len(second):])
+	access.Unlock()
+	if len(third) != 2 || third[0] != spa2Version || third[1] != spa3Version {
+		t.Fatalf("a renewal after the hold: % x", third)
+	}
+	// a dial knocks v3 alone, and as it opens (this node opens to anything now) the mark goes
 	target := o.target("127.0.0.1")
 	target.access.Lock()
-	target.v2Until = time.Now().Add(-time.Second)
+	target.pairedAt = time.Time{}
 	target.access.Unlock()
 	o.forget(destination)
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 4*time.Second)
@@ -463,9 +481,9 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	conn.Close()
 	time.Sleep(100 * time.Millisecond)
 	access.Lock()
-	third := bytes.Clone(versions[len(first)+len(second):])
+	fourth := bytes.Clone(versions[len(first)+len(second)+len(third):])
 	access.Unlock()
-	if len(third) != 2 || third[0] != spa2Version || third[1] != spa3Version {
-		t.Fatalf("after the hold: % x", third)
+	if len(fourth) != 1 || fourth[0] != spa3Version || o.hadV2(destination) {
+		t.Fatalf("a dial after the hold: % x, v2 mark %v", fourth, o.hadV2(destination))
 	}
 }
