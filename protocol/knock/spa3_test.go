@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -290,6 +291,53 @@ func TestSPA3KnocksV3(t *testing.T) {
 	p, _ := parseSPAv2(options)
 	if plaintext := spa3Plaintext(t, p, packet, time.Unix(1767225600, 0)); plaintext[0] != spa3Version ||
 		netip.AddrFrom16([16]byte(plaintext[13:29])).Unmap() != netip.MustParseAddr("203.0.113.7") {
+		t.Fatalf("plaintext % x", plaintext[:29])
+	}
+}
+
+// TestSPA3DNSAnswers: with v3 a DNS answer outside the signed data is knocked at, the node's own addresses after it;
+// a connection to it does not make it the address that answered last (it would lead the node's own on a fallback).
+func TestSPA3DNSAnswers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("localhost")
+	}
+	spaConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spaConn.Close()
+	r := &recorder{}
+	service := listenTCP(t, r, "service")
+	options := SPAv2Options{
+		NodeID: "33333333333333333333333333333333", EpochLen: 86400, SlotLen: 600,
+		PortKey:  "4444444444444444444444444444444444444444444444444444444444444444",
+		PortBase: uint16(spaConn.LocalAddr().(*net.UDPAddr).Port), PortRange: 1, LenMin: 96, LenMax: 160,
+		DeviceKey: "1111111111111111111111111111111111111111111111111111111111111111",
+		Carriers:  []string{"udp"}, Versions: []int{2, 3},
+	}
+	o := newBox(t, Options{SPAv2: &options, NodeAddresses: []string{"192.0.2.1"}})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if got, _ := o.ResolveNode(ctx, "localhost"); len(got) < 2 || got[0] != netip.MustParseAddr("127.0.0.1") || got[len(got)-1] != netip.MustParseAddr("192.0.2.1") {
+		t.Fatal("v3: the answer, then the node's own: ", got)
+	}
+	conn, err := o.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("localhost", service))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if first := o.node.fallback(o.generation.Load())[0]; first != netip.MustParseAddr("192.0.2.1") {
+		t.Fatal("a DNS answer leads the node's own addresses: ", first)
+	}
+	// the knock at the answer was v3, naming it
+	spaConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buffer := make([]byte, 1024)
+	n, _, err := spaConn.ReadFrom(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plaintext := spa3Plaintext(t, o.spa2, buffer[:n], time.Now()); plaintext[0] != spa3Version ||
+		netip.AddrFrom16([16]byte(plaintext[13:29])).Unmap() != netip.MustParseAddr("127.0.0.1") {
 		t.Fatalf("plaintext % x", plaintext[:29])
 	}
 }

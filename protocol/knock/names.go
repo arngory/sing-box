@@ -182,8 +182,10 @@ func (o *Outbound) dialNode(ctx context.Context, network string, destination M.S
 		conn, err := o.dialResolved(dialCtx, network, target)
 		cancel()
 		if err == nil {
-			// a UDP socket says nothing of the node: only a TCP connection marks the address that answers
-			if N.NetworkName(network) == N.NetworkTCP {
+			// a UDP socket says nothing of the node: only a TCP connection marks the address that answers,
+			// and only an address of the signed data: with SPA v3 a DNS answer is dialled too, and one that accepts
+			// TCP (a block page) must not lead the node's own addresses (fallback)
+			if N.NetworkName(network) == N.NetworkTCP && o.node.set[target.Addr.Unmap()] {
 				o.node.answered(target.Addr, o.generation.Load())
 			}
 			return conn, nil
