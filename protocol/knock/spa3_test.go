@@ -253,20 +253,37 @@ func TestSPA3FallbackToV2(t *testing.T) {
 	}
 }
 
-// TestSPA3NoV2BeyondSignedData: v2 follows v3 only at an address of the signed data (spa-v3 §6 p. 4).
+// TestSPA3NoV2BeyondSignedData: v2 follows v3 only at an address of the signed data (spa-v3 §6 p. 4); without
+// node_addresses (a node known by name alone) at none, and through a detour v3 goes to the signed addresses.
 func TestSPA3NoV2BeyondSignedData(t *testing.T) {
 	node, err := parseNodeAddresses([]string{"203.0.113.7"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := &Outbound{node: node}
-	if !o.signed(context.Background(), netip.MustParseAddr("203.0.113.7")) || o.signed(context.Background(), netip.MustParseAddr("198.51.100.1")) {
+	o := &Outbound{node: node, signedAddrs: node}
+	if !o.signed(netip.MustParseAddr("203.0.113.7")) || o.signed(netip.MustParseAddr("198.51.100.1")) {
 		t.Fatal("the node's addresses")
 	}
-	// without node_addresses: the config's address is signed, a DNS answer is not
-	o = &Outbound{}
-	if !o.signed(context.Background(), netip.MustParseAddr("198.51.100.1")) || o.signed(withFromDNS(context.Background()), netip.MustParseAddr("198.51.100.1")) {
-		t.Fatal("without node_addresses")
+	if (&Outbound{}).signed(netip.MustParseAddr("198.51.100.1")) {
+		t.Fatal("an address without node_addresses")
+	}
+	v3 := &spa2Params{v3: true}
+	detoured := &Outbound{signedAddrs: node, hasDetour: true, spa2: v3}
+	targets := detoured.detourTargets(M.ParseSocksaddrHostPort("node.example.com", 443))
+	if len(targets) != 1 || targets[0] != M.ParseSocksaddrHostPort("203.0.113.7", 443) {
+		t.Fatal("through a detour: ", targets)
+	}
+	for _, o := range []*Outbound{
+		{signedAddrs: node, spa2: v3},                             // no detour: dialNode's
+		{signedAddrs: node, hasDetour: true, spa2: &spa2Params{}}, // v2: the name, as before
+		{hasDetour: true, spa2: v3},                               // no signed addresses
+	} {
+		if o.detourTargets(M.ParseSocksaddrHostPort("node.example.com", 443)) != nil {
+			t.Fatal("detour targets where none are due")
+		}
+	}
+	if detoured.detourTargets(M.ParseSocksaddrHostPort("203.0.113.7", 443)) != nil {
+		t.Fatal("detour targets for an address")
 	}
 }
 
@@ -277,8 +294,15 @@ func TestSPA3KnocksV3(t *testing.T) {
 		PortBase: 40000, PortRange: 4096, LenMin: 96, LenMax: 160,
 		DeviceKey: "1111111111111111111111111111111111111111111111111111111111111111", Versions: []int{2, 3},
 	}
-	if !KnocksV3(options, "203.0.113.7") || !KnocksV3(options, "[2001:db8::7]") {
+	if !KnocksV3(options, "203.0.113.7") || !KnocksV3(options, "[2001:db8::7]") || !TakesV3(options) || TakesV3(options.V2()) {
 		t.Fatal("v3 at an address")
+	}
+	// never v2 at a name for a node that takes v3 (§6 p. 4)
+	if _, _, err := SPAv2Packet(options, "node.example.com", time.Now()); err == nil {
+		t.Fatal("a packet for a name")
+	}
+	if _, _, err := SPAv2Packet(options.V2(), "node.example.com", time.Now()); err != nil {
+		t.Fatal(err)
 	}
 	if KnocksV3(options, "node.example.com") || KnocksV3(options.V2(), "203.0.113.7") {
 		t.Fatal("v3 at a name, or after V2")
@@ -318,8 +342,9 @@ func TestSPA3DNSAnswers(t *testing.T) {
 	o := newBox(t, Options{SPAv2: &options, NodeAddresses: []string{"192.0.2.1"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if got, _ := o.ResolveNode(ctx, "localhost"); len(got) < 2 || got[0] != netip.MustParseAddr("127.0.0.1") || got[len(got)-1] != netip.MustParseAddr("192.0.2.1") {
-		t.Fatal("v3: the answer, then the node's own: ", got)
+	// the node's own first: a forged answer (a block page that takes TCP) does not hold them up
+	if got, _ := o.ResolveNode(ctx, "localhost"); len(got) < 2 || got[0] != netip.MustParseAddr("192.0.2.1") || got[len(got)-1] != netip.MustParseAddr("127.0.0.1") {
+		t.Fatal("v3: the node's own, then the answer: ", got)
 	}
 	conn, err := o.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("localhost", service))
 	if err != nil {

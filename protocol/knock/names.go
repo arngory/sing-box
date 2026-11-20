@@ -110,22 +110,29 @@ func (o *Outbound) ResolveNode(ctx context.Context, name string) ([]netip.Addr, 
 	lookupCtx, cancel := context.WithTimeout(ctx, nodeLookupTimeout)
 	answer, err := o.lookup(lookupCtx, name)
 	cancel()
-	var addresses []netip.Addr
-	// SPA v3 (spa-v3 §6 p. 2): any address of the answer, the knock names it and opens nothing elsewhere; the
-	// node's own after them, for an answer that does not lead to the node
+	var addresses, others []netip.Addr
+	// SPA v3 (spa-v3 §6 p. 2): an address of the answer that is not the node's may be knocked at too, the knock
+	// names it and opens nothing elsewhere. After the node's own: a forged answer (a block page that takes TCP, a
+	// black hole for UDP) must not hold up the node's signed addresses; a node that moved is still reached by it
 	v3 := o.spa2 != nil && o.spa2.v3
 	for _, addr := range answer {
 		addr = addr.Unmap()
-		if (n.set[addr] || v3 && addr.IsValid() && !addr.IsUnspecified()) && !slices.Contains(addresses, addr) {
-			addresses = append(addresses, addr)
+		switch {
+		case n.set[addr]:
+			if !slices.Contains(addresses, addr) {
+				addresses = append(addresses, addr)
+			}
+		case v3 && addr.IsValid() && !addr.IsUnspecified() && !addr.IsMulticast() && !slices.Contains(others, addr):
+			others = append(others, addr)
 		}
 	}
-	if v3 && len(addresses) > 0 && slices.ContainsFunc(addresses, func(addr netip.Addr) bool { return !n.set[addr] }) {
+	if len(others) > 0 {
 		for _, addr := range n.fallback(o.generation.Load()) {
 			if !slices.Contains(addresses, addr) {
 				addresses = append(addresses, addr)
 			}
 		}
+		return append(addresses, others...), true
 	}
 	if len(addresses) > 0 {
 		return addresses, true
@@ -152,11 +159,9 @@ func (o *Outbound) nodeTargets(ctx context.Context, destination M.Socksaddr) ([]
 		addresses, _ = o.ResolveNode(ctx, name)
 	} else if addr := destination.Addr.Unmap(); o.node.set[addr] {
 		addresses = []netip.Addr{addr}
-	} else if o.spa2 != nil && o.spa2.v3 && !addr.IsUnspecified() {
-		// SPA v3: an address another resolver gave is knocked at as it is (spa-v3 §6 p. 2), the node's own after it
-		addresses = append([]netip.Addr{addr}, slices.DeleteFunc(o.node.fallback(o.generation.Load()), func(a netip.Addr) bool {
-			return a == addr
-		})...)
+	} else if o.spa2 != nil && o.spa2.v3 && !addr.IsUnspecified() && !addr.IsMulticast() {
+		// SPA v3: an address another resolver gave is knocked at too (spa-v3 §6 p. 2), after the node's own
+		addresses = append(o.node.fallback(o.generation.Load()), addr)
 	} else {
 		o.logger.WarnContext(ctx, "names: ", addr, " is none of the node's addresses (a forged answer to whoever "+
 			"resolved its name): the knock goes to the node's own")
@@ -172,7 +177,11 @@ func (o *Outbound) nodeTargets(ctx context.Context, destination M.Socksaddr) ([]
 // dialNode dials the node's addresses of this attempt in turn, each but the last for nodeDialTimeout at most
 func (o *Outbound) dialNode(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	targets, name := o.nodeTargets(ctx, destination)
-	ctx = o.withServerName(ctx, name)
+	return o.dialTargets(o.withServerName(ctx, name), network, targets)
+}
+
+// dialTargets dials the addresses of one attempt at the node in turn (dialNode, detourTargets)
+func (o *Outbound) dialTargets(ctx context.Context, network string, targets []M.Socksaddr) (net.Conn, error) {
 	var lastErr error
 	for i, target := range targets {
 		dialCtx, cancel := ctx, context.CancelFunc(func() {})
@@ -185,7 +194,7 @@ func (o *Outbound) dialNode(ctx context.Context, network string, destination M.S
 			// a UDP socket says nothing of the node: only a TCP connection marks the address that answers,
 			// and only an address of the signed data: with SPA v3 a DNS answer is dialled too, and one that accepts
 			// TCP (a block page) must not lead the node's own addresses (fallback)
-			if N.NetworkName(network) == N.NetworkTCP && o.node.set[target.Addr.Unmap()] {
+			if N.NetworkName(network) == N.NetworkTCP && o.node != nil && o.node.set[target.Addr.Unmap()] {
 				o.node.answered(target.Addr, o.generation.Load())
 			}
 			return conn, nil
@@ -199,7 +208,7 @@ func (o *Outbound) dialNode(ctx context.Context, network string, destination M.S
 		}
 	}
 	if lastErr == nil {
-		lastErr = E.New("knock: no address for ", destination)
+		lastErr = E.New("knock: no address of the node")
 	}
 	return nil, lastErr
 }

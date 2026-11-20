@@ -591,7 +591,9 @@ func (c *trackedPacketConn) Upstream() any { return c.PacketConn }
 
 // SPAv2Packet returns the slot port and a fresh packet for the options at now
 // (the subscription fetch sends it outside an outbound): v3 at host, an
-// address, when the options' node takes it (spa-v3 §3), else v2.
+// address, when the options' node takes it (spa-v3 §3), else v2. A node that
+// takes v3 is never knocked v2 at a name, which whoever answers its lookup
+// would get (§6 p. 4): the caller resolves it and knocks at an address.
 func SPAv2Packet(options SPAv2Options, host string, now time.Time) (uint16, []byte, error) {
 	p, err := parseSPAv2(options)
 	if err != nil {
@@ -599,9 +601,11 @@ func SPAv2Packet(options SPAv2Options, host string, now time.Time) (uint16, []by
 	}
 	var dst netip.Addr
 	if p.v3 {
-		if addr, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
-			dst = DstOf(addr)
+		addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+		if err != nil {
+			return 0, nil, E.New("spa_v3: knock at ", host, ", a name: resolve it first")
 		}
+		dst = DstOf(addr)
 	}
 	return p.packet(now, dst)
 }

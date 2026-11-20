@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -102,22 +103,24 @@ func spaV2From(ctx context.Context) bool {
 	return v2
 }
 
-type fromDNSKey struct{}
-
-// withFromDNS: the address of this dial is a DNS answer, not the signed data's (an outbound without node_addresses
-// dialling a name)
-func withFromDNS(ctx context.Context) context.Context {
-	return context.WithValue(ctx, fromDNSKey{}, true)
+// signed reports whether addr is one of the node's signed addresses (node_addresses), the only ones v2 may follow a
+// v3 that opened nothing at (§6 p. 3, 4). Without them nothing is: a node known by its name alone, whose addresses
+// come from DNS (spa-v3 §5).
+func (o *Outbound) signed(addr netip.Addr) bool {
+	return o.signedAddrs != nil && o.signedAddrs.set[addr.Unmap()]
 }
 
-// signed reports whether addr comes from the node's signed data (node_addresses, the config's address), where v2
-// may follow a v3 that did not open (§6 p. 3, 4).
-func (o *Outbound) signed(ctx context.Context, addr netip.Addr) bool {
-	if o.node != nil {
-		return o.node.set[addr.Unmap()]
+// detourTargets: SPA v3 through a detour knocks at the node's signed addresses, naming them, and never v2 at its
+// name, which the detour's resolver would answer (spa-v3 §6, "the knock through a detour"); nil otherwise.
+func (o *Outbound) detourTargets(destination M.Socksaddr) []M.Socksaddr {
+	if !o.hasDetour || o.signedAddrs == nil || o.spa2 == nil || !o.spa2.v3 || !destination.IsFqdn() {
+		return nil
 	}
-	fromDNS, _ := ctx.Value(fromDNSKey{}).(bool)
-	return !fromDNS
+	targets := make([]M.Socksaddr, 0, len(o.signedAddrs.known))
+	for _, addr := range o.signedAddrs.fallback(o.generation.Load()) {
+		targets = append(targets, M.SocksaddrFrom(addr, destination.Port))
+	}
+	return targets
 }
 
 // spaDst is the dst of a knock at destination: none (v2) without v3, at a name, in a v2 dial, or at an address
@@ -144,10 +147,19 @@ func (o *Outbound) setV2(destination M.Socksaddr, v2 bool) {
 }
 
 // dialSPA2 dials after SPA (dialSPA2Once); a v3 knock at an address of the signed data that opened nothing is
-// followed by v2 at the same address, with the same carriers (spa-v3 §6 p. 3).
+// followed by v2 at the same address, with the same carriers (spa-v3 §6 p. 3). An attempt with a deadline (one
+// address of several) gives v3 half of it, so that a node rolled back is reached in the other half.
 func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	conn, err := o.dialSPA2Once(ctx, network, destination)
-	if err == nil || ctx.Err() != nil || !o.spaDst(ctx, destination).IsValid() || !o.signed(ctx, destination.Addr) {
+	if !o.spaDst(ctx, destination).IsValid() || !o.signed(destination.Addr) {
+		return o.dialSPA2Once(ctx, network, destination)
+	}
+	v3ctx, cancel := ctx, context.CancelFunc(func() {})
+	if deadline, ok := ctx.Deadline(); ok {
+		v3ctx, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+	}
+	conn, err := o.dialSPA2Once(v3ctx, network, destination)
+	cancel()
+	if err == nil || ctx.Err() != nil {
 		return conn, err
 	}
 	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)
@@ -160,6 +172,16 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	}
 	o.logger.InfoContext(ctx, "SPA v2 opened ", destination.AddrString(), ": v2 there from now on")
 	return conn, nil
+}
+
+// TakesV3 reports whether the node of options takes SPA v3 (its versions, and lengths that fit the address): a
+// request to it by name resolves the name and knocks at each address, never v2 at the name (SPAv2Packet).
+func TakesV3(options SPAv2Options) bool {
+	if !slices.Contains(options.Versions, 3) {
+		return false
+	}
+	p, err := parseSPAv2(options)
+	return err == nil && p.v3
 }
 
 // KnocksV3 reports whether a knock with options at host, outside an outbound (libcore's requests), is v3: the node

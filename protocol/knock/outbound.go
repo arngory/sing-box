@@ -151,6 +151,9 @@ type Outbound struct {
 	hosts *knockHosts
 	// the node's addresses (Options.NodeAddresses, names.go); nil: names are resolved as any other
 	node *nodeAddresses
+	// the node's signed addresses (node_addresses) with or without a detour: SPA v3 knocks at them through one, and
+	// only at them does v2 follow a v3 that opened nothing (spa3.go)
+	signedAddrs *nodeAddresses
 }
 
 // knockHosts: Options.Hosts, names in lower case and addresses, with what the names resolved to
@@ -303,6 +306,7 @@ func New(ctx context.Context, router adapter.Router, logger log.ContextLogger, t
 	if err != nil {
 		return nil, err
 	}
+	signedAddrs := node
 	if options.Detour != "" {
 		// through a detour (a chain's later hop, a mesh) the name is the detour's to resolve, as resolve() leaves
 		// it: a lookup here would ask the local network for the node behind the chain (neko)
@@ -350,6 +354,7 @@ func New(ctx context.Context, router adapter.Router, logger log.ContextLogger, t
 		silence:        silence,
 		hosts:          parseHosts(options.Hosts),
 		node:           node,
+		signedAddrs:    signedAddrs,
 		targets:        make(map[string]*target),
 		carriers:       carriers,
 	}
@@ -411,8 +416,11 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 	if o.node != nil && !plain {
 		return o.dialNode(ctx, network, destination)
 	}
+	if targets := o.detourTargets(destination); targets != nil && !plain {
+		return o.dialTargets(o.withServerName(ctx, destination.Fqdn), network, targets)
+	}
 	if destination.IsFqdn() {
-		ctx = withFromDNS(o.withServerName(ctx, destination.Fqdn))
+		ctx = o.withServerName(ctx, destination.Fqdn)
 	}
 	destination, err := o.resolve(ctx, destination)
 	if err != nil {
@@ -468,9 +476,13 @@ func (o *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		}
 		ctx = o.withServerName(ctx, name)
 		destination = targets[0]
+	} else if targets := o.detourTargets(destination); targets != nil && !plain {
+		// SPA v3 through a detour: the node's first signed address (spa-v3 §6)
+		ctx = o.withServerName(ctx, destination.Fqdn)
+		destination = targets[0]
 	} else {
 		if destination.IsFqdn() {
-			ctx = withFromDNS(o.withServerName(ctx, destination.Fqdn))
+			ctx = o.withServerName(ctx, destination.Fqdn)
 		}
 		destination, err = o.resolve(ctx, destination)
 		if err != nil {
