@@ -57,49 +57,61 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 	if err != nil {
 		return nil, err
 	}
-	s.daemon.lifecycleAccess.Lock()
-	defer s.daemon.lifecycleAccess.Unlock()
-	if s.daemon.closed {
-		return nil, os.ErrClosed
+	// niko: the start is the daemon's, shared with Host.StartService of an added service (services.go)
+	err = s.daemon.startServiceFor(ctx, identity, request.ConfigContent, request.Options)
+	if err != nil {
+		return nil, err
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// startServiceFor starts or reloads the core with a config for a caller, who becomes the daemon's owner; refused when
+// another user owns it. The options given replace the stored ones; nil keeps them. The config and the options are kept
+// for the daemon's next start.
+func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, configContent string, options *StartOptions) error {
+	d.lifecycleAccess.Lock()
+	defer d.lifecycleAccess.Unlock()
+	if d.closed {
+		return os.ErrClosed
 	}
 	ownerUserID, err := loadOwner()
 	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+		return err
 	}
 	if ownerUserID != "" && ownerUserID != identity.UserID {
-		return nil, status.Error(codes.PermissionDenied, "the service is owned by another user")
+		return status.Error(codes.PermissionDenied, "the service is owned by another user")
 	}
-	err = s.daemon.preparePlatformOwnerLocked(identity)
+	err = d.preparePlatformOwnerLocked(identity)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	err = saveOwner(identity.UserID, identity.SessionID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	currentOptions, err := loadStartOptions(identity.UserID)
 	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+		return err
 	}
 	mergedOptions := currentOptions
 	mergedOptions.WasRunning = true
-	if request.Options != nil {
-		mergedOptions.OOMKillerEnabled = request.Options.OomKillerEnabled
-		mergedOptions.OOMKillerDisabled = request.Options.OomKillerDisabled
-		mergedOptions.OOMMemoryLimit = request.Options.OomMemoryLimit
-		mergedOptions.PowerReportEnabled = request.Options.PowerReportEnabled
+	if options != nil {
+		mergedOptions.OOMKillerEnabled = options.OomKillerEnabled
+		mergedOptions.OOMKillerDisabled = options.OomKillerDisabled
+		mergedOptions.OOMMemoryLimit = options.OomMemoryLimit
+		mergedOptions.PowerReportEnabled = options.PowerReportEnabled
 	}
-	err = s.daemon.startServiceLocked(ctx, identity.UserID, request.ConfigContent, mergedOptions)
+	err = d.startServiceLocked(ctx, identity.UserID, configContent, mergedOptions)
 	if err != nil {
-		return nil, s.daemon.cleanFailedStartLocked(identity.UserID, mergedOptions, err)
+		return d.cleanFailedStartLocked(identity.UserID, mergedOptions, err)
 	}
 	directory := userWorkingDirectory(identity.UserID)
-	configError := atomicfile.WriteFile(filepath.Join(directory, serviceConfigFileName), []byte(request.ConfigContent), 0o600)
+	configError := atomicfile.WriteFile(filepath.Join(directory, serviceConfigFileName), []byte(configContent), 0o600)
 	optionsError := saveStartOptions(identity.UserID, mergedOptions)
 	if configError != nil || optionsError != nil {
-		return nil, s.daemon.cleanFailedStartLocked(identity.UserID, mergedOptions, E.Errors(configError, optionsError))
+		return d.cleanFailedStartLocked(identity.UserID, mergedOptions, E.Errors(configError, optionsError))
 	}
-	return &emptypb.Empty{}, nil
+	return nil
 }
 
 func (s *desktopService) ClaimService(ctx context.Context, empty *emptypb.Empty) (*emptypb.Empty, error) {

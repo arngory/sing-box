@@ -13,6 +13,8 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Options are what a program adds to the daemon.
@@ -56,6 +58,11 @@ type Host interface {
 	// StartedService runs the core: its RunningInstance is the core running now, or nil.
 	StartedService() *daemon.StartedService
 	Logger() log.ContextLogger
+	// StartService starts or reloads the core with a config for the caller of ctx, as DesktopService.StartService
+	// does with no options: the caller becomes the daemon's owner, the stored start options stay, and the config is
+	// kept for the daemon's next start. PermissionDenied when another user owns the daemon; the core's own error for a
+	// config it refuses. It takes the lifecycle lock: a method that calls it is not PolicyOwner's.
+	StartService(ctx context.Context, configContent string) error
 }
 
 // the services Main was given; newDaemon registers them
@@ -71,6 +78,14 @@ func (d *Daemon) StartedService() *daemon.StartedService {
 
 func (d *Daemon) Logger() log.ContextLogger {
 	return d.logger
+}
+
+func (d *Daemon) StartService(ctx context.Context, configContent string) error {
+	identity, err := peerIdentityFromContext(ctx)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, err.Error())
+	}
+	return d.startServiceFor(ctx, identity, configContent, nil)
 }
 
 // registerServices makes and registers the added services, refusing one whose name is taken or whose Methods name a

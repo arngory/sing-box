@@ -8,6 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/daemon"
+	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/service/powerreport"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -208,5 +213,81 @@ func TestNekoAddedServiceUnlocked(t *testing.T) {
 	close(hold)
 	if err := <-done; err != nil {
 		t.Fatalf("Read: %v", err)
+	}
+}
+
+// startingDaemon is testDaemon with a core to start: the daemon's context, its StartedService and power manager. The
+// owner's directory is taken as the daemon's own already, so that a start neither changes the test's directory nor
+// redirects its stderr (libbox.Setup).
+func startingDaemon(t *testing.T, owner string) *Daemon {
+	t.Helper()
+	d, err := testDaemon(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.ctx = include.Context(context.Background())
+	d.logger = log.StdLogger()
+	d.startedService = daemon.NewStartedService(daemon.ServiceOptions{Context: d.ctx})
+	d.powerManager = powerreport.NewManager()
+	d.runtimeWorkingDirectory = userWorkingDirectory(owner)
+	if err = os.MkdirAll(d.runtimeWorkingDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.startedService.CloseService() })
+	return d
+}
+
+// An added service's start (Host.StartService) is DesktopService.StartService's with no options: the caller made the
+// owner, the core started, the config and the stored options kept with WasRunning; another user refused.
+func TestNekoHostStartService(t *testing.T) {
+	d := startingDaemon(t, "1000")
+	const config = `{"log": {"level": "error"}, "outbounds": [{"type": "direct", "tag": "direct"}]}`
+	stored := startOptions{OOMMemoryLimit: 123}
+	if err := saveStartOptions("1000", stored); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartService(verified("1000"), config); err != nil {
+		t.Fatal(err)
+	}
+	if d.startedService.Instance() == nil {
+		t.Fatal("no core runs")
+	}
+	if owner, err := loadOwner(); err != nil || owner != "1000" {
+		t.Fatalf("owner %q: %v", owner, err)
+	}
+	if kept, err := loadServiceConfig("1000"); err != nil || kept != config {
+		t.Fatalf("config %q: %v", kept, err)
+	}
+	if options, err := loadStartOptions("1000"); err != nil || !options.WasRunning || options.OOMMemoryLimit != 123 {
+		t.Fatalf("options %+v: %v", options, err)
+	}
+
+	// another user: refused, the owner's core as it was
+	running := d.startedService.Instance()
+	if err := d.StartService(verified("1001"), config); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("another user: %v", err)
+	}
+	if d.startedService.Instance() != running {
+		t.Fatal("another user's start touched the core")
+	}
+
+	// a config the core refuses: its error, nothing runs, not to be started again with the daemon
+	if err := d.StartService(verified("1000"), `{"inbounds": [{"type": "no-such-inbound"}]}`); err == nil {
+		t.Fatal("a refused config started")
+	}
+	if d.startedService.Instance() != nil {
+		t.Fatal("a core runs after a refused config")
+	}
+	if options, err := loadStartOptions("1000"); err != nil || options.WasRunning {
+		t.Fatalf("options after a refused config %+v: %v", options, err)
+	}
+
+	// DesktopService.StartService as before: its options replace the stored ones
+	request := &StartServiceRequest{ConfigContent: config, Options: &StartOptions{OomMemoryLimit: 456}}
+	if _, err := (&desktopService{daemon: d}).StartService(verified("1000"), request); err != nil {
+		t.Fatal(err)
+	}
+	if options, err := loadStartOptions("1000"); err != nil || !options.WasRunning || options.OOMMemoryLimit != 456 {
+		t.Fatalf("options from the request %+v: %v", options, err)
 	}
 }
