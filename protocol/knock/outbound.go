@@ -47,7 +47,7 @@ const (
 	// After a round of knocks that a dial did not get through (the node down, its port shut, the access refused), the
 	// next round to that address waits: 2 s, then twice as long each time, at most 30 s. It spares the node's quotas
 	// and the neighbours behind one CGNAT address, who share its rate limit. A dial through, another network or a
-	// quiet minute starts it over (roundFailed).
+	// quiet minute starts it over (roundBook).
 	minRoundGap = 2 * time.Second
 	maxRoundGap = 30 * time.Second
 	roundQuiet  = time.Minute
@@ -127,36 +127,103 @@ type target struct {
 	// its network: access it opened is v2's, so a dial on it proves nothing of v3 (v3Alone)
 	lastV2At         time.Time
 	lastV2Generation uint64
-	// the last dial through after a knock (passed)
+	// the last dial through after a knock of this outbound (passed)
 	passedAt time.Time
-	// the rounds that failed in a row here on one network (failedGeneration), the last at lastFailed; the next round
-	// starts no sooner than nextRound
-	failedRounds     int
-	failedGeneration uint64
-	lastFailed       time.Time
-	nextRound        time.Time
 }
 
-// roundFailed counts the round of the knock in lastKnock as failed and sets when the next may start.
-func (t *target) roundFailed(generation uint64, now time.Time) {
-	if t.failedGeneration != generation || now.Sub(t.lastFailed) > roundQuiet {
-		t.failedRounds = 0
+// roundBook holds the failed rounds of knocks to each address for all the knock outbounds of a box: the node's quota
+// of knocks per device and its rate limit count every outbound's knocks, the profiles' and the tests' alike. Locked
+// after a target's lock, never before. A nil book keeps nothing.
+type roundBook struct {
+	access sync.Mutex
+	hosts  map[string]*rounds
+	// a network change (any outbound's) starts every count over
+	network uint64
+}
+
+// rounds: the rounds that failed in a row to one address on one network, the last at lastFailed; the next starts no
+// sooner than next.
+type rounds struct {
+	failed     int
+	network    uint64
+	lastFailed time.Time
+	next       time.Time
+}
+
+// roundBookAccess orders the outbounds of a box looking for their book.
+var roundBookAccess sync.Mutex
+
+// roundBookFrom is the box's book, made by its first knock outbound; without a registry in ctx, a book of its own.
+func roundBookFrom(ctx context.Context) *roundBook {
+	roundBookAccess.Lock()
+	defer roundBookAccess.Unlock()
+	if book := service.PtrFromContext[roundBook](ctx); book != nil {
+		return book
 	}
-	t.failedGeneration, t.lastFailed = generation, now
-	t.failedRounds++
+	book := &roundBook{hosts: make(map[string]*rounds)}
+	if service.RegistryFromContext(ctx) != nil {
+		service.MustRegisterPtr(ctx, book)
+	}
+	return book
+}
+
+// failed counts a round to host, its knock sent at knockedAt, as failed and sets when the next may start.
+func (b *roundBook) failed(host string, knockedAt, now time.Time) {
+	if b == nil {
+		return
+	}
+	b.access.Lock()
+	defer b.access.Unlock()
+	r := b.hosts[host]
+	if r == nil {
+		r = &rounds{}
+		b.hosts[host] = r
+	}
+	if r.network != b.network || now.Sub(r.lastFailed) > roundQuiet {
+		r.failed = 0
+	}
+	r.network, r.lastFailed = b.network, now
+	r.failed++
 	gap := maxRoundGap
-	if t.failedRounds <= 5 {
-		gap = min(minRoundGap<<(t.failedRounds-1), maxRoundGap)
+	if r.failed <= 5 {
+		gap = min(minRoundGap<<(r.failed-1), maxRoundGap)
 	}
-	t.nextRound = t.lastKnock.Add(gap)
+	r.next = knockedAt.Add(gap)
 }
 
-// roundWait is how long a new round must wait on this network.
-func (t *target) roundWait(generation uint64, now time.Time) time.Duration {
-	if t.failedRounds == 0 || t.failedGeneration != generation {
-		return 0
+// passed: a dial to host got through after a knock; its next failure counts from one.
+func (b *roundBook) passed(host string) {
+	if b == nil {
+		return
 	}
-	return t.nextRound.Sub(now)
+	b.access.Lock()
+	delete(b.hosts, host)
+	b.access.Unlock()
+}
+
+// wait is how long a new round to host must wait, and how many failed before it.
+func (b *roundBook) wait(host string, now time.Time) (time.Duration, int) {
+	if b == nil {
+		return 0, 0
+	}
+	b.access.Lock()
+	defer b.access.Unlock()
+	r := b.hosts[host]
+	if r == nil || r.network != b.network {
+		return 0, 0
+	}
+	return r.next.Sub(now), r.failed
+}
+
+// newNetwork starts every count over.
+func (b *roundBook) newNetwork() {
+	if b == nil {
+		return
+	}
+	b.access.Lock()
+	b.network++
+	clear(b.hosts)
+	b.access.Unlock()
 }
 
 var (
@@ -187,6 +254,8 @@ type Outbound struct {
 
 	access  sync.Mutex
 	targets map[string]*target
+	// the failed rounds of the box's knock outbounds (roundBook)
+	rounds *roundBook
 	// TCP connections to a node still waiting for its first bytes (handshakes.go)
 	handshakes handshakeGate
 
@@ -401,6 +470,7 @@ func New(ctx context.Context, router adapter.Router, logger log.ContextLogger, t
 		node:           node,
 		signedAddrs:    signedAddrs,
 		targets:        make(map[string]*target),
+		rounds:         roundBookFrom(ctx),
 		carriers:       carriers,
 	}
 	o.spa2Carrier.Store(int32(carriers[0]))
@@ -561,6 +631,7 @@ func (o *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 // It must not block: sing-box calls it from ResetNetwork.
 func (o *Outbound) InterfaceUpdated(ctx context.Context) {
 	o.generation.Add(1)
+	o.rounds.newNetwork()
 	// a new network: the first carrier again
 	o.spa2Carrier.Store(int32(o.carriers[0]))
 	if o.spa2 != nil {
@@ -618,16 +689,15 @@ func (o *Outbound) forget(destination M.Socksaddr) {
 // the dial that failed: a knock sent after it (by a parallel dial) is not
 // disproved by this failure, and dropping it would make every dial knock anew.
 //
-// The knock dropped is a failed round (roundFailed) when it was one of this network and no dial got through after it:
+// The knock dropped is a failed round (roundBook.failed) when it was one of this network and no dial got through after it:
 // a knock that opened the access and then ran out is no failure. The parallel dials that fail with it count once,
 // the first drops it.
 func (o *Outbound) forgetBefore(destination M.Socksaddr, attempt time.Time) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	if !t.lastKnock.After(attempt) {
-		if generation := o.generation.Load(); !t.lastKnock.IsZero() && t.generation == generation &&
-			t.passedAt.Before(t.lastKnock) {
-			t.roundFailed(generation, time.Now())
+		if !t.lastKnock.IsZero() && t.generation == o.generation.Load() && t.passedAt.Before(t.lastKnock) {
+			o.rounds.failed(destination.AddrString(), t.lastKnock, time.Now())
 		}
 		t.lastKnock = time.Time{}
 	}
@@ -639,7 +709,7 @@ func (o *Outbound) passed(destination M.Socksaddr) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	t.passedAt = time.Now()
-	t.failedRounds = 0
+	o.rounds.passed(destination.AddrString())
 	t.access.Unlock()
 }
 
@@ -692,8 +762,7 @@ func (o *Outbound) knockOnce(ctx context.Context, destination M.Socksaddr, fresh
 		}
 		if t.inflight == nil {
 			// a round after failed ones waits its turn; a caller whose time runs out first is told so at once
-			if wait := t.roundWait(generation, time.Now()); wait > 0 {
-				rounds := t.failedRounds
+			if wait, rounds := o.rounds.wait(destination.AddrString(), time.Now()); wait > 0 {
 				t.access.Unlock()
 				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait {
 					return false, E.New("knock: ", destination.AddrString(), " did not open after ", rounds,

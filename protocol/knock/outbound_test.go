@@ -22,6 +22,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/direct"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	singservice "github.com/sagernet/sing/service"
 )
 
 type recorder struct {
@@ -471,15 +472,16 @@ func TestWatchdogStartsUnread(t *testing.T) {
 	}
 }
 
-// The pause before a round after failed ones: 2 s, twice as long each time, at most 30 s; none on another network;
-// counted from one again after a quiet minute.
+// The pause before a round after failed ones: 2 s, twice as long each time, at most 30 s; none after another network
+// or a dial through; counted from one again after a quiet minute.
 func TestRoundGaps(t *testing.T) {
 	now := time.Now()
-	tg := &target{lastKnock: now}
+	book := &roundBook{hosts: make(map[string]*rounds)}
 	var gaps []time.Duration
 	for i := 0; i < 7; i++ {
-		tg.roundFailed(1, now)
-		gaps = append(gaps, tg.roundWait(1, now))
+		book.failed("192.0.2.1", now, now)
+		wait, _ := book.wait("192.0.2.1", now)
+		gaps = append(gaps, wait)
 	}
 	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second,
 		30 * time.Second, 30 * time.Second}
@@ -488,14 +490,27 @@ func TestRoundGaps(t *testing.T) {
 			t.Fatalf("gaps %v, want %v", gaps, want)
 		}
 	}
-	if wait := tg.roundWait(2, now); wait != 0 {
-		t.Fatalf("another network waits %v", wait)
+	if wait, _ := book.wait("192.0.2.2", now); wait != 0 {
+		t.Fatalf("another address waits %v", wait)
 	}
 	later := now.Add(roundQuiet + time.Second)
-	tg.lastKnock = later
-	tg.roundFailed(1, later)
-	if wait := tg.roundWait(1, later); wait != minRoundGap {
-		t.Fatalf("after a quiet minute: %v", wait)
+	book.failed("192.0.2.1", later, later)
+	if wait, n := book.wait("192.0.2.1", later); wait != minRoundGap || n != 1 {
+		t.Fatalf("after a quiet minute: %v, %d", wait, n)
+	}
+	book.newNetwork()
+	if wait, _ := book.wait("192.0.2.1", later); wait != 0 {
+		t.Fatalf("on another network: %v", wait)
+	}
+	book.failed("192.0.2.1", later, later)
+	book.passed("192.0.2.1")
+	if wait, _ := book.wait("192.0.2.1", later); wait != 0 {
+		t.Fatalf("after a dial through: %v", wait)
+	}
+	var none *roundBook
+	none.failed("192.0.2.1", now, now)
+	if wait, _ := none.wait("192.0.2.1", now); wait != 0 {
+		t.Fatal("a nil book waits")
 	}
 }
 
@@ -549,11 +564,7 @@ func TestRoundBackoffOnFailedDials(t *testing.T) {
 	if n := knocks(); n <= first {
 		t.Fatalf("no knock in the second round: %d", n)
 	}
-	tg := outbound.target(destination.AddrString())
-	tg.access.Lock()
-	rounds := tg.failedRounds
-	tg.access.Unlock()
-	if rounds != 2 {
+	if _, rounds := outbound.rounds.wait(destination.AddrString(), time.Now()); rounds != 2 {
 		t.Fatalf("failed rounds: %d", rounds)
 	}
 
@@ -579,10 +590,22 @@ func TestRoundBackoffOnFailedDials(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn.Close()
-	tg.access.Lock()
-	rounds = tg.failedRounds
-	tg.access.Unlock()
-	if rounds != 0 {
+	if _, rounds := outbound.rounds.wait(destination.AddrString(), time.Now()); rounds != 0 {
 		t.Fatalf("failed rounds after a dial through: %d", rounds)
+	}
+}
+
+// One book for the knock outbounds of a box, another for another box's.
+func TestRoundBookPerBox(t *testing.T) {
+	box1 := singservice.ContextWithDefaultRegistry(context.Background())
+	box2 := singservice.ContextWithDefaultRegistry(context.Background())
+	if roundBookFrom(box1) != roundBookFrom(box1) {
+		t.Fatal("two books in one box")
+	}
+	if roundBookFrom(box1) == roundBookFrom(box2) {
+		t.Fatal("one book for two boxes")
+	}
+	if roundBookFrom(context.Background()) == nil {
+		t.Fatal("no book without a registry")
 	}
 }
