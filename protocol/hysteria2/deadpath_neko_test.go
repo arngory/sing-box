@@ -15,7 +15,7 @@ import (
 // neko: a Hysteria2 connection whose path is gone (the node's conntrack entry or the NAT's binding lost while the
 // phone slept, the node restarted; salamander has no stateless reset) is closed by the client within seconds of
 // sending into it, not at the idle timeout (60 s on a raycontrol row), and the next dial takes a new one. A live
-// connection to a slow destination stays.
+// connection to a slow destination (12 s, past the 10 s the check waits at least) stays.
 func TestNekoHysteria2DeadPath(t *testing.T) {
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -36,7 +36,7 @@ func TestNekoHysteria2DeadPath(t *testing.T) {
 					return
 				}
 				if bytes.HasPrefix(question[:n], []byte("slow")) {
-					time.Sleep(8 * time.Second)
+					time.Sleep(12 * time.Second)
 				}
 				conn.Write(append([]byte("answer to "), question[:n]...))
 			}()
@@ -79,7 +79,7 @@ func TestNekoHysteria2DeadPath(t *testing.T) {
 	if err := ask("one", 10*time.Second); err != nil {
 		t.Fatal("before the cut: ", err)
 	}
-	if err := ask("slow one", 15*time.Second); err != nil {
+	if err := ask("slow one", 20*time.Second); err != nil {
 		t.Fatal("a live connection to a slow destination: ", err)
 	}
 	if relay.flows() != 1 {
@@ -99,7 +99,7 @@ func TestNekoHysteria2DeadPath(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 	t.Logf("answered %v after the path went", elapsed.Round(100*time.Millisecond))
-	if elapsed > 15*time.Second {
+	if elapsed > 20*time.Second {
 		t.Fatalf("answered %v after the path went: the dead connection was not closed before its idle timeout", elapsed)
 	}
 	if relay.flows() != 2 {

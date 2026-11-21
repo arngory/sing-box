@@ -20,9 +20,14 @@ import (
 // one. A live path answers every ack-eliciting packet within an RTT and max_ack_delay. Nothing is armed while
 // nothing is written, so an idle connection costs no timer; a write blocked by flow control sends nothing and is
 // no sign of a dead path.
+//
+// The price: a path that only goes quiet for longer (a lift, a tunnel, Wi-Fi roaming within one network) loses the
+// connection with its streams and UDP sessions, which quic-go would have carried on after the gap. 10 s at least
+// keeps the short gaps; a network that changes or goes away resets the connections anyway (the app's
+// networkChangeResetConnections). Against that, 60 s of no DNS on every dead path.
 const (
-	deadPathMin  = 5 * time.Second
-	deadPathMax  = 15 * time.Second
+	deadPathMin  = 10 * time.Second
+	deadPathMax  = 20 * time.Second
 	deadPathPTOs = 3
 	// the write's own packet and a probe at least: an ACK sent for a packet received just before the check began
 	// expects no answer
