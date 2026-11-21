@@ -483,7 +483,8 @@ func (o *Outbound) dialSPA2Once(ctx context.Context, network string, destination
 		return nil, err
 	}
 	o.passed(destination)
-	// a new TCP connection waits its turn to say hello when three to the node have not heard from it yet (R5);
+	// a new TCP connection waits its turn to say hello past a burst's first eight, while three to the node have not
+	// heard from it yet (R5, handshakes.go);
 	// the dial itself is not held, so the SPA retries of parallel dials stay shared
 	if N.NetworkName(network) == N.NetworkTCP {
 		release, err := o.handshakes.acquire(ctx, destination.String())
