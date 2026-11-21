@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -467,5 +468,121 @@ func TestWatchdogStartsUnread(t *testing.T) {
 	w.onRead()
 	if w.lastRead.Load() == 0 {
 		t.Fatal("a read is not noted")
+	}
+}
+
+// The pause before a round after failed ones: 2 s, twice as long each time, at most 30 s; none on another network;
+// counted from one again after a quiet minute.
+func TestRoundGaps(t *testing.T) {
+	now := time.Now()
+	tg := &target{lastKnock: now}
+	var gaps []time.Duration
+	for i := 0; i < 7; i++ {
+		tg.roundFailed(1, now)
+		gaps = append(gaps, tg.roundWait(1, now))
+	}
+	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second,
+		30 * time.Second, 30 * time.Second}
+	for i := range want {
+		if gaps[i] != want[i] {
+			t.Fatalf("gaps %v, want %v", gaps, want)
+		}
+	}
+	if wait := tg.roundWait(2, now); wait != 0 {
+		t.Fatalf("another network waits %v", wait)
+	}
+	later := now.Add(roundQuiet + time.Second)
+	tg.lastKnock = later
+	tg.roundFailed(1, later)
+	if wait := tg.roundWait(1, later); wait != minRoundGap {
+		t.Fatalf("after a quiet minute: %v", wait)
+	}
+}
+
+// Dials to a port that stays shut: the second round waits its pause, a dial whose time runs out first is refused
+// without a knock, and a dial through starts the count over.
+func TestRoundBackoffOnFailedDials(t *testing.T) {
+	r := &recorder{}
+	knockPort := listenTCP(t, r, "knock")
+	outbound := newBox(t, Options{Sequence: []Step{{Port: knockPort}}})
+	outbound.interval = 20 * time.Millisecond
+	outbound.ttl = time.Minute
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(closed.Addr().(*net.TCPAddr).Port)
+	destination := M.ParseSocksaddrHostPort("127.0.0.1", port)
+	closed.Close()
+	knocks := func() int {
+		time.Sleep(100 * time.Millisecond)
+		return count(r.snapshot(), "knock")
+	}
+
+	// the first round: the knock, the dial, the forced knock, the dial; both fail
+	if _, err = outbound.DialContext(context.Background(), N.NetworkTCP, destination); err == nil {
+		t.Fatal("dial to a closed port succeeded")
+	}
+	first := knocks()
+	if first == 0 {
+		t.Fatal("no knock")
+	}
+	// a dial with less time than the pause: refused at once, no knock
+	short, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	started := time.Now()
+	_, err = outbound.DialContext(short, N.NetworkTCP, destination)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "the next in") || time.Since(started) > 200*time.Millisecond {
+		t.Fatalf("a dial within the pause: %v after %v", err, time.Since(started))
+	}
+	if n := knocks(); n != first {
+		t.Fatalf("knocks within the pause: %d, then %d", first, n)
+	}
+	// a dial with time enough: the round after the pause
+	long, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	started = time.Now()
+	_, err = outbound.DialContext(long, N.NetworkTCP, destination)
+	cancel()
+	if err == nil || time.Since(started) < minRoundGap-300*time.Millisecond {
+		t.Fatalf("the second round: %v after %v", err, time.Since(started))
+	}
+	if n := knocks(); n <= first {
+		t.Fatalf("no knock in the second round: %d", n)
+	}
+	tg := outbound.target(destination.AddrString())
+	tg.access.Lock()
+	rounds := tg.failedRounds
+	tg.access.Unlock()
+	if rounds != 2 {
+		t.Fatalf("failed rounds: %d", rounds)
+	}
+
+	// the port opens: a dial through after the pause, and the count starts over
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+	if err != nil {
+		t.Skip("the port was taken meanwhile: ", err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	long, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	conn, err := outbound.DialContext(long, N.NetworkTCP, destination)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	tg.access.Lock()
+	rounds = tg.failedRounds
+	tg.access.Unlock()
+	if rounds != 0 {
+		t.Fatalf("failed rounds after a dial through: %d", rounds)
 	}
 }

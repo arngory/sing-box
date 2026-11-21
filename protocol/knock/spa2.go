@@ -473,6 +473,7 @@ func (o *Outbound) dialSPA2Once(ctx context.Context, network string, destination
 		o.forgetBefore(destination, attempt)
 		return nil, err
 	}
+	o.passed(destination)
 	// a new TCP connection waits its turn to say hello when three to the node have not heard from it yet (R5);
 	// the dial itself is not held, so the SPA retries of parallel dials stay shared
 	if N.NetworkName(network) == N.NetworkTCP {

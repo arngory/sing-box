@@ -44,6 +44,13 @@ const (
 	maxPayload      = 1024
 	// lower bound between forced knocks to the same host
 	minReknockGap = 2 * time.Second
+	// After a round of knocks that a dial did not get through (the node down, its port shut, the access refused), the
+	// next round to that address waits: 2 s, then twice as long each time, at most 30 s. It spares the node's quotas
+	// and the neighbours behind one CGNAT address, who share its rate limit. A dial through, another network or a
+	// quiet minute starts it over (roundFailed).
+	minRoundGap = 2 * time.Second
+	maxRoundGap = 30 * time.Second
+	roundQuiet  = time.Minute
 	// A TCP knock is abandoned before the kernel retransmits its SYN (initial
 	// RTO is 1s): knockd counts any TCP packet, and a late SYN to the previous
 	// port resets the sequence. The floor leaves time for protect() + connect().
@@ -120,6 +127,36 @@ type target struct {
 	// its network: access it opened is v2's, so a dial on it proves nothing of v3 (v3Alone)
 	lastV2At         time.Time
 	lastV2Generation uint64
+	// the last dial through after a knock (passed)
+	passedAt time.Time
+	// the rounds that failed in a row here on one network (failedGeneration), the last at lastFailed; the next round
+	// starts no sooner than nextRound
+	failedRounds     int
+	failedGeneration uint64
+	lastFailed       time.Time
+	nextRound        time.Time
+}
+
+// roundFailed counts the round of the knock in lastKnock as failed and sets when the next may start.
+func (t *target) roundFailed(generation uint64, now time.Time) {
+	if t.failedGeneration != generation || now.Sub(t.lastFailed) > roundQuiet {
+		t.failedRounds = 0
+	}
+	t.failedGeneration, t.lastFailed = generation, now
+	t.failedRounds++
+	gap := maxRoundGap
+	if t.failedRounds <= 5 {
+		gap = min(minRoundGap<<(t.failedRounds-1), maxRoundGap)
+	}
+	t.nextRound = t.lastKnock.Add(gap)
+}
+
+// roundWait is how long a new round must wait on this network.
+func (t *target) roundWait(generation uint64, now time.Time) time.Duration {
+	if t.failedRounds == 0 || t.failedGeneration != generation {
+		return 0
+	}
+	return t.nextRound.Sub(now)
 }
 
 var (
@@ -463,6 +500,7 @@ func (o *Outbound) dialResolved(ctx context.Context, network string, destination
 		o.forget(destination)
 		return nil, err
 	}
+	o.passed(destination)
 	if N.NetworkName(network) == N.NetworkUDP {
 		// e.g. WireGuard with one peer dials its UDP socket
 		return o.watchConn(conn, destination), nil
@@ -579,12 +617,29 @@ func (o *Outbound) forget(destination M.Socksaddr) {
 // forgetBefore drops the knock unless it finished after attempt, the start of
 // the dial that failed: a knock sent after it (by a parallel dial) is not
 // disproved by this failure, and dropping it would make every dial knock anew.
+//
+// The knock dropped is a failed round (roundFailed) when it was one of this network and no dial got through after it:
+// a knock that opened the access and then ran out is no failure. The parallel dials that fail with it count once,
+// the first drops it.
 func (o *Outbound) forgetBefore(destination M.Socksaddr, attempt time.Time) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	if !t.lastKnock.After(attempt) {
+		if generation := o.generation.Load(); !t.lastKnock.IsZero() && t.generation == generation &&
+			t.passedAt.Before(t.lastKnock) {
+			t.roundFailed(generation, time.Now())
+		}
 		t.lastKnock = time.Time{}
 	}
+	t.access.Unlock()
+}
+
+// passed: a dial after a knock got through; the next failure counts from one.
+func (o *Outbound) passed(destination M.Socksaddr) {
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	t.passedAt = time.Now()
+	t.failedRounds = 0
 	t.access.Unlock()
 }
 
@@ -636,6 +691,19 @@ func (o *Outbound) knockOnce(ctx context.Context, destination M.Socksaddr, fresh
 			return false, nil
 		}
 		if t.inflight == nil {
+			// a round after failed ones waits its turn; a caller whose time runs out first is told so at once
+			if wait := t.roundWait(generation, time.Now()); wait > 0 {
+				rounds := t.failedRounds
+				t.access.Unlock()
+				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait {
+					return false, E.New("knock: ", destination.AddrString(), " did not open after ", rounds,
+						" round(s), the next in ", wait.Round(100*time.Millisecond))
+				}
+				if err := sleep(ctx, wait); err != nil {
+					return false, err
+				}
+				continue
+			}
 			done := make(chan struct{})
 			t.inflight = done
 			t.access.Unlock()
