@@ -12,6 +12,7 @@ package browserhello
 import (
 	"embed"
 	"encoding/hex"
+	"errors"
 	"io/fs"
 	"path"
 	"sort"
@@ -32,6 +33,9 @@ type Capture struct {
 	Raw     []byte // the TLS record, header included
 	Source  string
 	Shuffle bool
+	// ReuseX25519: the client puts one X25519 key in its X25519MLKEM768 share and in its X25519 one (Firefox does,
+	// Chromium and Safari do not). A hello with two different keys there is told from the client's at a glance.
+	ReuseX25519 bool
 }
 
 var all = sync.OnceValues(func() (map[string]*Capture, error) {
@@ -55,11 +59,16 @@ var all = sync.OnceValues(func() (map[string]*Capture, error) {
 		}
 		source, _ := fs.ReadFile(captures, path.Join(dir, "SOURCE"))
 		shuffle, _ := fs.ReadFile(captures, path.Join(dir, "SHUFFLE"))
+		reuse, err := reusesX25519(raw)
+		if err != nil {
+			return nil, err
+		}
 		out[entry.Name()] = &Capture{
-			Name:    entry.Name(),
-			Raw:     raw,
-			Source:  strings.TrimSpace(string(source)),
-			Shuffle: strings.TrimSpace(string(shuffle)) == "yes",
+			Name:        entry.Name(),
+			Raw:         raw,
+			Source:      strings.TrimSpace(string(source)),
+			Shuffle:     strings.TrimSpace(string(shuffle)) == "yes",
+			ReuseX25519: reuse,
 		}
 	}
 	return out, nil
@@ -105,4 +114,65 @@ func (c *Capture) Spec() (*utls.ClientHelloSpec, error) {
 		spec.Extensions = utls.ShuffleChromeTLSExtensions(spec.Extensions)
 	}
 	return spec, nil
+}
+
+// Apply makes u send the capture (a fresh spec), and where the client reuses its X25519 key gives the X25519 share the
+// X25519 half of the hybrid one, that key then answering for both.
+func (c *Capture) Apply(u *utls.UConn) error {
+	spec, err := c.Spec()
+	if err != nil {
+		return err
+	}
+	if err = u.ApplyPreset(spec); err != nil {
+		return err
+	}
+	if !c.ReuseX25519 {
+		return nil
+	}
+	keys := u.HandshakeState.State13.KeyShareKeys
+	if keys == nil || keys.MlkemEcdhe == nil {
+		return errors.New("no hybrid X25519 key to reuse")
+	}
+	for _, extension := range u.Extensions {
+		if shares, ok := extension.(*utls.KeyShareExtension); ok {
+			for i := range shares.KeyShares {
+				if shares.KeyShares[i].Group == utls.X25519 {
+					shares.KeyShares[i].Data = keys.MlkemEcdhe.PublicKey().Bytes()
+				}
+			}
+		}
+	}
+	keys.Ecdhe = keys.MlkemEcdhe
+	return nil
+}
+
+// KeyShares are the key shares of a ClientHello record, by group.
+func KeyShares(raw []byte) (map[uint16][]byte, error) {
+	h, err := chromehello.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	data := h.Data[0x0033]
+	out := make(map[uint16][]byte)
+	if len(data) < 2 {
+		return out, nil
+	}
+	for k := 2; k+4 <= len(data); {
+		group, size := uint16(data[k])<<8|uint16(data[k+1]), int(data[k+2])<<8|int(data[k+3])
+		if k+4+size > len(data) {
+			return nil, errors.New("key share cut short")
+		}
+		out[group] = data[k+4 : k+4+size]
+		k += 4 + size
+	}
+	return out, nil
+}
+
+func reusesX25519(raw []byte) (bool, error) {
+	shares, err := KeyShares(raw)
+	if err != nil {
+		return false, err
+	}
+	hybrid, x25519 := shares[uint16(utls.X25519MLKEM768)], shares[uint16(utls.X25519)]
+	return len(hybrid) > 32 && len(x25519) == 32 && string(hybrid[len(hybrid)-32:]) == string(x25519), nil
 }

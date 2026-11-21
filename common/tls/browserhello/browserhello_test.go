@@ -13,17 +13,13 @@ import (
 
 func coreHello(t *testing.T, c *Capture) *chromehello.Hello {
 	t.Helper()
-	spec, err := c.Spec()
-	if err != nil {
-		t.Fatal(err)
-	}
 	conn, _ := net.Pipe()
 	defer conn.Close()
 	u := utls.UClient(conn, &utls.Config{ServerName: "www.example.com"}, utls.HelloCustom)
-	if err = u.ApplyPreset(spec); err != nil {
+	if err := c.Apply(u); err != nil {
 		t.Fatal(err)
 	}
-	if err = u.BuildHandshakeState(); err != nil {
+	if err := u.BuildHandshakeState(); err != nil {
 		t.Fatal(err)
 	}
 	h, err := chromehello.Parse(u.HandshakeState.Hello.Raw)
@@ -101,6 +97,40 @@ func TestPerConnection(t *testing.T) {
 			}
 			if !c.Shuffle && len(orders) != 1 {
 				t.Fatalf("a client that keeps its order sent %d orders", len(orders))
+			}
+		})
+	}
+}
+
+// TestX25519KeyAsTheClient: a client that puts one X25519 key in its hybrid and its X25519 share (Firefox) has the
+// core do the same, and one that does not, not; the key the handshake keeps for X25519 is the one in the hello.
+func TestX25519KeyAsTheClient(t *testing.T) {
+	for _, name := range Names() {
+		t.Run(name, func(t *testing.T) {
+			c, _ := Get(name)
+			conn, _ := net.Pipe()
+			defer conn.Close()
+			u := utls.UClient(conn, &utls.Config{ServerName: "www.example.com"}, utls.HelloCustom)
+			if err := c.Apply(u); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.BuildHandshakeState(); err != nil {
+				t.Fatal(err)
+			}
+			shares, err := KeyShares(u.HandshakeState.Hello.Raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hybrid, x25519 := shares[uint16(utls.X25519MLKEM768)], shares[uint16(utls.X25519)]
+			if len(hybrid) == 0 || len(x25519) == 0 {
+				return
+			}
+			reused := string(hybrid[len(hybrid)-32:]) == string(x25519)
+			if reused != c.ReuseX25519 {
+				t.Fatalf("the core reuses the X25519 key: %v, the client: %v", reused, c.ReuseX25519)
+			}
+			if keys := u.HandshakeState.State13.KeyShareKeys; string(keys.Ecdhe.PublicKey().Bytes()) != string(x25519) {
+				t.Fatal("the handshake's X25519 key is not the one in the hello")
 			}
 		})
 	}

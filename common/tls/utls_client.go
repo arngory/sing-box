@@ -119,28 +119,30 @@ func capturedOr(name string, preset utls.ClientHelloID) utls.ClientHelloID {
 // newUClient makes the uTLS connection for a fingerprint; the Chrome reference and the captures are applied as
 // custom specs.
 func newUClient(conn net.Conn, config *utls.Config, id utls.ClientHelloID) (*utls.UConn, error) {
-	var spec *utls.ClientHelloSpec
-	var err error
 	switch {
 	case id == helloChromeReference:
-		spec, err = chromehello.Spec()
+		spec, err := chromehello.Spec()
+		if err != nil {
+			return nil, E.Cause(err, "Chrome reference ClientHello")
+		}
+		uConn := utls.UClient(conn, config, utls.HelloCustom)
+		if err = uConn.ApplyPreset(spec); err != nil {
+			return nil, E.Cause(err, "Chrome reference ClientHello")
+		}
+		return uConn, nil
 	case id.Version == helloCaptured:
 		capture, ok := browserhello.Get(id.Client)
 		if !ok {
 			return nil, E.New("no ClientHello captured for ", id.Client)
 		}
-		spec, err = capture.Spec()
+		uConn := utls.UClient(conn, config, utls.HelloCustom)
+		if err := capture.Apply(uConn); err != nil {
+			return nil, E.Cause(err, id.Client, " ClientHello")
+		}
+		return uConn, nil
 	default:
 		return utls.UClient(conn, config, id), nil
 	}
-	if err != nil {
-		return nil, E.Cause(err, id.Client, " ClientHello")
-	}
-	uConn := utls.UClient(conn, config, utls.HelloCustom)
-	if err = uConn.ApplyPreset(spec); err != nil {
-		return nil, E.Cause(err, id.Client, " ClientHello")
-	}
-	return uConn, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
