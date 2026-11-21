@@ -816,3 +816,27 @@ func TestSPA2Hosts(t *testing.T) {
 	}
 	dial(kept, "127.0.0.1", true)
 }
+
+// A renewal comes from half the access to 80 % of it, no later than min(30 s, half the access) before its end
+// (raycontrol v0.35.1 does not take a knock that moves the end less than that), and no sooner than 2 s.
+func TestSPA2RenewalWithinTheNodesRule(t *testing.T) {
+	for _, ttl := range []uint16{0, 1, 2, 3, 4, 10, 45, 60, 100, 150, 300, 600, 3600} {
+		p := &spa2Params{ttl: ttl}
+		access := p.access()
+		latest := min(access*8/10, access-min(30*time.Second, access/2))
+		earliest := access / 2
+		for i := 0; i < 2000; i++ {
+			at := p.renewIn()
+			if at < minRenewal || (at > latest && at > minRenewal) || (at < earliest && access/2 >= minRenewal) {
+				t.Fatalf("ttl %d s: a renewal at %v, want %v…%v (not sooner than %v)", ttl, at, earliest, latest, minRenewal)
+			}
+		}
+	}
+	// at 60 s the latest is 30 s, where 80 % (48 s) was before
+	p := &spa2Params{ttl: 60}
+	for i := 0; i < 2000; i++ {
+		if at := p.renewIn(); at != 30*time.Second {
+			t.Fatalf("ttl 60 s: a renewal at %v", at)
+		}
+	}
+}

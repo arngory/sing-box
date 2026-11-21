@@ -357,12 +357,19 @@ func spa2Settle() time.Duration {
 	return 150*time.Millisecond + time.Duration(randomInt(251))*time.Millisecond
 }
 
-// renewIn is when to renew: at a random point in the second half of the access
-// time, so a renewal does not line up with connections.
+// renewIn is when to renew: at a random point from half the access time to 80 % of it, so a renewal does not line
+// up with connections, and no later than min(30 s, half the access) before its end (raycontrol v0.35.1, spa-v2 §6
+// p. 9: a knock that would move the end less than that is not taken, and the access it leaves runs that much short
+// of a whole one); never sooner than 2 s, which a node counts within its 32 knocks a minute that change its table.
 func (p *spa2Params) renewIn() time.Duration {
 	access := p.access()
-	return access/2 + time.Duration(randomInt(int64(access*3/10)+1))
+	from := access / 2
+	until := min(access*8/10, access-min(30*time.Second, access/2))
+	return max(from+time.Duration(randomInt(int64(until-from)+1)), minRenewal)
 }
+
+// minRenewal: renewals of a very short access (under about 4 s) come no more than every 2 s, within the node's limit
+const minRenewal = 2 * time.Second
 
 // sendSPA2 sends one packet to the port of the current slot over the carrier
 // in use, then waits a random 150-400 ms before the connection may start.
