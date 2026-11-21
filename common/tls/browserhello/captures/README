@@ -1,0 +1,4 @@
+One directory per uTLS fingerprint name the core takes from a capture: hello.hex (the first TLS record the client
+sent), SOURCE (which client, on what, when, from which run of niko's browser-hellos.yml) and SHUFFLE (yes: two
+captures in a row sent the extensions in different orders, so the core shuffles them per connection too). The files
+come from the run's "hellos-*" artifacts, as they are.

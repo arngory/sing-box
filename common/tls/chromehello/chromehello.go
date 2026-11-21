@@ -64,6 +64,11 @@ func IsGREASE(v uint16) bool {
 	return v&0x0f0f == 0x0a0a && v>>8 == v&0xff
 }
 
+// GREASEValue is a random GREASE value as BoringSSL draws one (browserhello redraws its captures' with it).
+func GREASEValue() uint16 {
+	return greaseValue()
+}
+
 // greaseValue is a random GREASE value as BoringSSL draws one: (seed & 0xf0) | 0x0a, in both bytes.
 func greaseValue() uint16 {
 	var b [1]byte

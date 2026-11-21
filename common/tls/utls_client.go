@@ -23,6 +23,7 @@ import (
 	"github.com/sagernet/sing/service/filemanager"
 
 	utls "github.com/metacubex/utls"
+	"github.com/sagernet/sing-box/common/tls/browserhello"
 	"github.com/sagernet/sing-box/common/tls/chromehello"
 	"golang.org/x/net/http2"
 )
@@ -104,18 +105,40 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 // (common/tls/chromehello), not uTLS's hand-written HelloChrome preset, which lags the browser (neko).
 var helloChromeReference = utls.ClientHelloID{Client: "Chrome", Version: "reference"}
 
-// newUClient makes the uTLS connection for a fingerprint; the Chrome reference is applied as a custom spec.
+// helloCaptured stands for a fingerprint the core has a capture of (browserhello): Client is its name.
+const helloCaptured = "capture"
+
+// capturedOr is the fingerprint name's capture if there is one, else uTLS's preset.
+func capturedOr(name string, preset utls.ClientHelloID) utls.ClientHelloID {
+	if _, ok := browserhello.Get(name); ok {
+		return utls.ClientHelloID{Client: name, Version: helloCaptured}
+	}
+	return preset
+}
+
+// newUClient makes the uTLS connection for a fingerprint; the Chrome reference and the captures are applied as
+// custom specs.
 func newUClient(conn net.Conn, config *utls.Config, id utls.ClientHelloID) (*utls.UConn, error) {
-	if id != helloChromeReference {
+	var spec *utls.ClientHelloSpec
+	var err error
+	switch {
+	case id == helloChromeReference:
+		spec, err = chromehello.Spec()
+	case id.Version == helloCaptured:
+		capture, ok := browserhello.Get(id.Client)
+		if !ok {
+			return nil, E.New("no ClientHello captured for ", id.Client)
+		}
+		spec, err = capture.Spec()
+	default:
 		return utls.UClient(conn, config, id), nil
 	}
-	spec, err := chromehello.Spec()
 	if err != nil {
-		return nil, E.Cause(err, "Chrome reference ClientHello")
+		return nil, E.Cause(err, id.Client, " ClientHello")
 	}
 	uConn := utls.UClient(conn, config, utls.HelloCustom)
 	if err = uConn.ApplyPreset(spec); err != nil {
-		return nil, E.Cause(err, "Chrome reference ClientHello")
+		return nil, E.Cause(err, id.Client, " ClientHello")
 	}
 	return uConn, nil
 }
@@ -426,10 +449,10 @@ var (
 func init() {
 	modernFingerprints := []utls.ClientHelloID{
 		helloChromeReference,
-		utls.HelloFirefox_Auto,
-		utls.HelloEdge_Auto,
-		utls.HelloSafari_Auto,
-		utls.HelloIOS_Auto,
+		capturedOr("firefox", utls.HelloFirefox_Auto),
+		capturedOr("edge", utls.HelloEdge_Auto),
+		capturedOr("safari", utls.HelloSafari_Auto),
+		capturedOr("ios", utls.HelloIOS_Auto),
 	}
 	randomFingerprint = modernFingerprints[rand.Intn(len(modernFingerprints))]
 
@@ -448,19 +471,19 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	case "chrome", "":
 		return helloChromeReference, nil
 	case "firefox":
-		return utls.HelloFirefox_Auto, nil
+		return capturedOr(name, utls.HelloFirefox_Auto), nil
 	case "edge":
-		return utls.HelloEdge_Auto, nil
+		return capturedOr(name, utls.HelloEdge_Auto), nil
 	case "safari":
-		return utls.HelloSafari_Auto, nil
+		return capturedOr(name, utls.HelloSafari_Auto), nil
 	case "360":
-		return utls.Hello360_Auto, nil
+		return capturedOr(name, utls.Hello360_Auto), nil
 	case "qq":
-		return utls.HelloQQ_Auto, nil
+		return capturedOr(name, utls.HelloQQ_Auto), nil
 	case "ios":
-		return utls.HelloIOS_Auto, nil
+		return capturedOr(name, utls.HelloIOS_Auto), nil
 	case "android":
-		return utls.HelloAndroid_11_OkHttp, nil
+		return capturedOr(name, utls.HelloAndroid_11_OkHttp), nil
 	case "random":
 		return randomFingerprint, nil
 	case "randomized":
