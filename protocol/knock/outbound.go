@@ -14,6 +14,7 @@ package knock
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/netip"
 	"slices"
@@ -704,14 +705,16 @@ func roundGoesOn(ctx context.Context) bool {
 //
 // The knock dropped is a failed round (roundBook.failed) when it was one of this network and no dial got through after it:
 // a knock that opened the access and then ran out is no failure. The parallel dials that fail with it count once,
-// the first drops it. A dial that ended with its caller (cancelled, out of time) says nothing of the node, and the v3
-// half of an attempt goes on with v2 (roundGoesOn): neither is counted.
+// the first drops it. A dial its caller cancelled (a lost happy-eyeballs race, a closed connection) says nothing of the
+// node, and the v3 half of an attempt goes on with v2 (roundGoesOn): neither is counted. A dial that hung until a
+// deadline is counted, whosever the deadline: the node's address's (dialTargets), a test's or the caller's, it is
+// how a knock that opened nothing shows (the SYN dropped).
 func (o *Outbound) forgetBefore(ctx context.Context, destination M.Socksaddr, attempt time.Time) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	if !t.lastKnock.After(attempt) {
 		if !t.lastKnock.IsZero() && t.generation == o.generation.Load() && t.passedAt.Before(t.lastKnock) &&
-			ctx.Err() == nil && !roundGoesOn(ctx) {
+			!errors.Is(ctx.Err(), context.Canceled) && !roundGoesOn(ctx) {
 			o.rounds.failed(destination.AddrString(), t.lastKnock, time.Now())
 		}
 		t.lastKnock = time.Time{}

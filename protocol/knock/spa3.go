@@ -2,6 +2,7 @@ package knock
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"slices"
@@ -225,6 +226,10 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 		return conn, nil
 	}
 	if ctx.Err() != nil {
+		// no v2 half after it: the v3 half was the attempt, and it counts as forgetBefore would count it
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			o.rounds.failed(destination.AddrString(), time.Now(), time.Now())
+		}
 		return nil, err
 	}
 	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)

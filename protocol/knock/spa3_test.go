@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -497,5 +498,41 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	access.Unlock()
 	if len(fourth) != 1 || fourth[0] != spa3Version || o.hadV2(destination) {
 		t.Fatalf("a dial after the hold: % x, v2 mark %v", fourth, o.hadV2(destination))
+	}
+}
+
+// A node that opens to nothing, its SYN dropped: the attempt (v3, then v2 in the other half of the time) hangs until
+// the deadline, and that is a failed round; the next attempt within the pause is refused at once.
+func TestSPA3HungAttemptIsAFailedRound(t *testing.T) {
+	spaConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spaConn.Close()
+	options := SPAv2Options{
+		NodeID: "33333333333333333333333333333333", EpochLen: 86400, SlotLen: 600,
+		PortKey:  "4444444444444444444444444444444444444444444444444444444444444444",
+		PortBase: uint16(spaConn.LocalAddr().(*net.UDPAddr).Port), PortRange: 1, LenMin: 96, LenMax: 160,
+		DeviceKey: "1111111111111111111111111111111111111111111111111111111111111111",
+		Carriers:  []string{"udp"}, Versions: []int{2, 3},
+	}
+	o := newBox(t, Options{SPAv2: &options, NodeAddresses: []string{"127.0.0.1"}})
+	o.testDialPeer = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	destination := M.ParseSocksaddrHostPort("127.0.0.1", 443)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err = o.DialContext(ctx, N.NetworkTCP, destination); err == nil {
+		t.Fatal("a dial to a node that opens to nothing went through")
+	}
+	if _, n := o.rounds.wait("127.0.0.1", time.Now()); n != 1 {
+		t.Fatalf("failed rounds after the hung attempt: %d", n)
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelShort()
+	if _, err = o.DialContext(short, N.NetworkTCP, destination); err == nil || !strings.Contains(err.Error(), "the next in") {
+		t.Fatalf("the next attempt within the pause: %v", err)
 	}
 }

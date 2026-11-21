@@ -610,8 +610,8 @@ func TestRoundBookPerBox(t *testing.T) {
 	}
 }
 
-// What counts as a failed round: not a dial its caller ended (cancelled, out of time), not the v3 half of an attempt
-// that goes on with v2; a dial that failed on its own does.
+// What counts as a failed round: not a dial its caller cancelled, not the v3 half of an attempt that goes on with v2;
+// a dial that failed on its own does, and one that hung until a deadline.
 func TestRoundCountsOnlyTheNodesFailure(t *testing.T) {
 	r := &recorder{}
 	knockPort := listenTCP(t, r, "knock")
@@ -645,6 +645,15 @@ func TestRoundCountsOnlyTheNodesFailure(t *testing.T) {
 	outbound.forget(context.Background(), destination)
 	if n := rounds(); n != 1 {
 		t.Fatalf("a dial that failed on its own: %d", n)
+	}
+	// one that hung until a deadline (the node's address's, a test's): the knock opened nothing, it counts
+	expired, cancelExpired := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelExpired()
+	<-expired.Done()
+	knocked()
+	outbound.forget(expired, destination)
+	if n := rounds(); n != 2 {
+		t.Fatalf("a dial that hung until its deadline: %d", n)
 	}
 }
 
