@@ -74,3 +74,34 @@ func TestCoreSendsTheCapture(t *testing.T) {
 		})
 	}
 }
+
+// TestPerConnection: what a client makes anew per connection is new in the core's hellos too: the key shares, the
+// GREASE ECH payload; the order of extensions where the client shuffles it, and only there.
+func TestPerConnection(t *testing.T) {
+	for _, name := range Names() {
+		t.Run(name, func(t *testing.T) {
+			c, _ := Get(name)
+			orders, shares, ech := map[string]bool{}, map[string]bool{}, map[string]bool{}
+			for range 20 {
+				h := coreHello(t, c)
+				orders[order(h)] = true
+				shares[fmt.Sprintf("%x", h.Data[0x0033])] = true
+				if payload, ok := h.Data[0xfe0d]; ok {
+					ech[fmt.Sprintf("%x", payload)] = true
+				}
+			}
+			if len(shares) != 20 {
+				t.Fatalf("key shares repeated: %d distinct of 20", len(shares))
+			}
+			if len(ech) != 0 && len(ech) != 20 {
+				t.Fatalf("the ECH payload repeated: %d distinct of 20", len(ech))
+			}
+			if c.Shuffle && len(orders) < 2 {
+				t.Fatal("a shuffling client's extensions came in one order 20 times")
+			}
+			if !c.Shuffle && len(orders) != 1 {
+				t.Fatalf("a client that keeps its order sent %d orders", len(orders))
+			}
+		})
+	}
+}
