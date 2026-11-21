@@ -2,7 +2,6 @@ package knock
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/netip"
 	"slices"
@@ -216,7 +215,7 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	// one attempt of two halves: a failed v3 half is not a failed round of its own (v2 goes on from it)
 	v3ctx, cancel := withRoundGoesOn(ctx), context.CancelFunc(func() {})
 	if deadline, ok := ctx.Deadline(); ok {
-		v3ctx, cancel = context.WithTimeout(v3ctx, time.Until(deadline)/2)
+		v3ctx, cancel = context.WithTimeoutCause(v3ctx, time.Until(deadline)/2, errOwnTimeout)
 	}
 	conn, err := o.dialSPA2Once(v3ctx, network, destination)
 	outOfTime := v3ctx.Err() != nil
@@ -226,10 +225,8 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 		return conn, nil
 	}
 	if ctx.Err() != nil {
-		// no v2 half after it: the v3 half was the attempt, and it counts as forgetBefore would count it
-		if !errors.Is(ctx.Err(), context.Canceled) {
-			o.rounds.failed(destination.AddrString(), time.Now(), time.Now())
-		}
+		// no v2 half after it: the v3 half was the attempt
+		o.endRound(ctx, destination)
 		return nil, err
 	}
 	o.logger.InfoContext(ctx, "SPA v3 did not open ", destination.AddrString(), ", v2 once more (a node before raycontrol v0.35.0?): ", err)

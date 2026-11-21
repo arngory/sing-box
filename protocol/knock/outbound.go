@@ -130,6 +130,8 @@ type target struct {
 	lastV2Generation uint64
 	// the last dial through after a knock of this outbound (passed)
 	passedAt time.Time
+	// the knock of a v3 half that failed, its round not yet counted (forgetBefore, endRound)
+	pendingRound time.Time
 }
 
 // roundBook holds the failed rounds of knocks to each address for all the knock outbounds of a box: the node's quota
@@ -686,6 +688,18 @@ func (o *Outbound) forget(ctx context.Context, destination M.Socksaddr) {
 	o.forgetBefore(ctx, destination, time.Now())
 }
 
+// errOwnTimeout is the cause of a dial the outbound gave up on by its own deadline: a node's address (dialTargets), the
+// v3 half of an attempt (dialSPA2). A knock that opened nothing runs into it (the SYN dropped).
+var errOwnTimeout = errors.New("knock: no answer in the time the outbound gives")
+
+// nodesFailure: whether a dial that failed under ctx says anything of the node. A dial that failed on its own does
+// (a refusal, or the dialer's own timeout on a dropped SYN), and one the outbound gave up on (errOwnTimeout); one
+// its caller ended does not: cancelled (a lost happy-eyeballs race, a closed connection), or out of the caller's time
+// (a URL test of a few seconds on a node alive but slow must not hold every profile's dials back).
+func nodesFailure(ctx context.Context) bool {
+	return ctx.Err() == nil || errors.Is(context.Cause(ctx), errOwnTimeout)
+}
+
 // roundGoesOnKey marks a dial whose failure is not the round's end: the v3 half of an attempt that tries v2 next
 // (dialSPA2)
 type roundGoesOnKey struct{}
@@ -705,20 +719,36 @@ func roundGoesOn(ctx context.Context) bool {
 //
 // The knock dropped is a failed round (roundBook.failed) when it was one of this network and no dial got through after it:
 // a knock that opened the access and then ran out is no failure. The parallel dials that fail with it count once,
-// the first drops it. A dial its caller cancelled (a lost happy-eyeballs race, a closed connection) says nothing of the
-// node, and the v3 half of an attempt goes on with v2 (roundGoesOn): neither is counted. A dial that hung until a
-// deadline is counted, whosever the deadline: the node's address's (dialTargets), a test's or the caller's, it is
-// how a knock that opened nothing shows (the SYN dropped).
+// the first drops it. Only a dial that says something of the node counts (nodesFailure). The v3 half of an attempt
+// that goes on with v2 (roundGoesOn) leaves its round pending: the v2 half counts it, or endRound when no v2 comes.
 func (o *Outbound) forgetBefore(ctx context.Context, destination M.Socksaddr, attempt time.Time) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	if !t.lastKnock.After(attempt) {
 		if !t.lastKnock.IsZero() && t.generation == o.generation.Load() && t.passedAt.Before(t.lastKnock) &&
-			!errors.Is(ctx.Err(), context.Canceled) && !roundGoesOn(ctx) {
-			o.rounds.failed(destination.AddrString(), t.lastKnock, time.Now())
+			nodesFailure(ctx) {
+			if roundGoesOn(ctx) {
+				t.pendingRound = t.lastKnock
+			} else {
+				o.rounds.failed(destination.AddrString(), t.lastKnock, time.Now())
+				t.pendingRound = time.Time{}
+			}
 		}
 		t.lastKnock = time.Time{}
 	}
+	t.access.Unlock()
+}
+
+// endRound counts the round the v3 half left pending (forgetBefore) when no v2 half comes after it, under the same
+// rules: a knock of this network, nothing through since, a failure that says something of the node.
+func (o *Outbound) endRound(ctx context.Context, destination M.Socksaddr) {
+	t := o.target(destination.AddrString())
+	t.access.Lock()
+	if !t.pendingRound.IsZero() && t.generation == o.generation.Load() && t.passedAt.Before(t.pendingRound) &&
+		nodesFailure(ctx) {
+		o.rounds.failed(destination.AddrString(), t.pendingRound, time.Now())
+	}
+	t.pendingRound = time.Time{}
 	t.access.Unlock()
 }
 
@@ -727,6 +757,7 @@ func (o *Outbound) passed(destination M.Socksaddr) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	t.passedAt = time.Now()
+	t.pendingRound = time.Time{}
 	o.rounds.passed(destination.AddrString())
 	t.access.Unlock()
 }

@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -501,8 +500,9 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	}
 }
 
-// A node that opens to nothing, its SYN dropped: the attempt (v3, then v2 in the other half of the time) hangs until
-// the deadline, and that is a failed round; the next attempt within the pause is refused at once.
+// A node that opens to nothing, its SYN dropped: at an address the outbound gives up on (nodeDialTimeout), the
+// attempt (v3, then v2 in the other half) is a failed round, counted once, from the knock; the last address, given up
+// on by the caller's deadline, is not.
 func TestSPA3HungAttemptIsAFailedRound(t *testing.T) {
 	spaConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -516,23 +516,21 @@ func TestSPA3HungAttemptIsAFailedRound(t *testing.T) {
 		DeviceKey: "1111111111111111111111111111111111111111111111111111111111111111",
 		Carriers:  []string{"udp"}, Versions: []int{2, 3},
 	}
-	o := newBox(t, Options{SPAv2: &options, NodeAddresses: []string{"127.0.0.1"}})
+	o := newBox(t, Options{SPAv2: &options, NodeAddresses: []string{"127.0.0.1", "127.0.0.2"}})
 	o.testDialPeer = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	destination := M.ParseSocksaddrHostPort("127.0.0.1", 443)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// by the node's name, which does not resolve: its addresses in their order
+	ctx, cancel := context.WithTimeout(context.Background(), nodeDialTimeout+time.Second)
 	defer cancel()
-	if _, err = o.DialContext(ctx, N.NetworkTCP, destination); err == nil {
+	if _, err = o.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("node.invalid", 443)); err == nil {
 		t.Fatal("a dial to a node that opens to nothing went through")
 	}
-	if _, n := o.rounds.wait("127.0.0.1", time.Now()); n != 1 {
-		t.Fatalf("failed rounds after the hung attempt: %d", n)
-	}
-	short, cancelShort := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancelShort()
-	if _, err = o.DialContext(short, N.NetworkTCP, destination); err == nil || !strings.Contains(err.Error(), "the next in") {
-		t.Fatalf("the next attempt within the pause: %v", err)
+	// the addresses are dialled in the node's order: the first given up on by the outbound, the last by the caller
+	_, first := o.rounds.wait("127.0.0.1", time.Now())
+	_, second := o.rounds.wait("127.0.0.2", time.Now())
+	if first+second != 1 {
+		t.Fatalf("failed rounds: %d at 127.0.0.1, %d at 127.0.0.2; want 1 at the address given up on alone", first, second)
 	}
 }

@@ -186,7 +186,7 @@ func (o *Outbound) dialTargets(ctx context.Context, network string, targets []M.
 	for i, target := range targets {
 		dialCtx, cancel := ctx, context.CancelFunc(func() {})
 		if i < len(targets)-1 {
-			dialCtx, cancel = context.WithTimeout(ctx, nodeDialTimeout)
+			dialCtx, cancel = context.WithTimeoutCause(ctx, nodeDialTimeout, errOwnTimeout)
 		}
 		conn, err := o.dialResolved(dialCtx, network, target)
 		cancel()
