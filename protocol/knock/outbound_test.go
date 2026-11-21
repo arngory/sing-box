@@ -609,3 +609,69 @@ func TestRoundBookPerBox(t *testing.T) {
 		t.Fatal("no book without a registry")
 	}
 }
+
+// What counts as a failed round: not a dial its caller ended (cancelled, out of time), not the v3 half of an attempt
+// that goes on with v2; a dial that failed on its own does.
+func TestRoundCountsOnlyTheNodesFailure(t *testing.T) {
+	r := &recorder{}
+	knockPort := listenTCP(t, r, "knock")
+	outbound := newBox(t, Options{Sequence: []Step{{Port: knockPort}}})
+	outbound.interval = 20 * time.Millisecond
+	outbound.ttl = time.Minute
+	destination := M.ParseSocksaddrHostPort("127.0.0.1", 9)
+	rounds := func() int {
+		_, n := outbound.rounds.wait(destination.AddrString(), time.Now())
+		return n
+	}
+	knocked := func() {
+		t.Helper()
+		if _, err := outbound.knock(context.Background(), destination, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	knocked()
+	outbound.forget(cancelled, destination)
+	if n := rounds(); n != 0 {
+		t.Fatalf("a dial its caller cancelled counted: %d", n)
+	}
+	knocked()
+	outbound.forget(withRoundGoesOn(context.Background()), destination)
+	if n := rounds(); n != 0 {
+		t.Fatalf("the v3 half counted: %d", n)
+	}
+	knocked()
+	outbound.forget(context.Background(), destination)
+	if n := rounds(); n != 1 {
+		t.Fatalf("a dial that failed on its own: %d", n)
+	}
+}
+
+// After failed rounds a round's first knock waits; the knocks within a round (forced, reknocks) do not.
+func TestOnlyTheRoundsFirstKnockWaits(t *testing.T) {
+	r := &recorder{}
+	knockPort := listenTCP(t, r, "knock")
+	outbound := newBox(t, Options{Sequence: []Step{{Port: knockPort}}})
+	outbound.interval = 20 * time.Millisecond
+	outbound.ttl = time.Minute
+	destination := M.ParseSocksaddrHostPort("127.0.0.1", 9)
+	now := time.Now()
+	outbound.rounds.failed(destination.AddrString(), now, now)
+	short := func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	if _, err := outbound.knock(short(), destination, false); err == nil || !strings.Contains(err.Error(), "the next in") {
+		t.Fatalf("a round's first knock within the pause: %v", err)
+	}
+	if knocked, err := outbound.knock(short(), destination, true); err != nil || !knocked {
+		t.Fatalf("a forced knock within the round: %v %v", knocked, err)
+	}
+	sent := 0
+	if knocked, err := outbound.reknock(short(), destination, time.Now(), CarrierUDP,
+		func(context.Context, M.Socksaddr) error { sent++; return nil }); err != nil || !knocked || sent != 1 {
+		t.Fatalf("a reknock within the round: %v %v, sent %d", knocked, err, sent)
+	}
+}

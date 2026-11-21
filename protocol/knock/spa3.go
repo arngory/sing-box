@@ -212,9 +212,10 @@ func (o *Outbound) dialSPA2(ctx context.Context, network string, destination M.S
 	if !o.spaDst(ctx, destination).IsValid() || !o.signed(destination.Addr) {
 		return o.dialSPA2Once(ctx, network, destination)
 	}
-	v3ctx, cancel := ctx, context.CancelFunc(func() {})
+	// one attempt of two halves: a failed v3 half is not a failed round of its own (v2 goes on from it)
+	v3ctx, cancel := withRoundGoesOn(ctx), context.CancelFunc(func() {})
 	if deadline, ok := ctx.Deadline(); ok {
-		v3ctx, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		v3ctx, cancel = context.WithTimeout(v3ctx, time.Until(deadline)/2)
 	}
 	conn, err := o.dialSPA2Once(v3ctx, network, destination)
 	outOfTime := v3ctx.Err() != nil

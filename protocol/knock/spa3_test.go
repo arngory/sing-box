@@ -239,7 +239,7 @@ func TestSPA3FallbackToV2(t *testing.T) {
 		t.Fatalf("versions % x", got)
 	}
 	// the address keeps v2
-	outbound.forget(M.ParseSocksaddrHostPort("127.0.0.1", servicePort))
+	outbound.forget(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", servicePort))
 	conn, err = outbound.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("127.0.0.1", servicePort))
 	if err != nil {
 		t.Fatal(err)
@@ -432,7 +432,7 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 		t.Fatalf("v3, then v2: % x", first)
 	}
 	// the next dial knocks v2 straight away
-	o.forget(destination)
+	o.forget(context.Background(), destination)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel2()
 	started := time.Now()
@@ -483,7 +483,7 @@ func TestSPA3FallbackAfterTimeout(t *testing.T) {
 	target.access.Lock()
 	target.lastV2At = time.Time{}
 	target.access.Unlock()
-	o.forget(destination)
+	o.forget(context.Background(), destination)
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel3()
 	conn, err = o.DialContext(ctx3, N.NetworkTCP, destination)

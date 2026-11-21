@@ -361,6 +361,8 @@ func spa2Settle() time.Duration {
 // up with connections, and no later than min(30 s, half the access) before its end (raycontrol v0.35.1, spa-v2 §6
 // p. 9: a knock that would move the end less than that is not taken, and the access it leaves runs that much short
 // of a whole one); never sooner than 2 s, which a node counts within its 32 knocks a minute that change its table.
+// The rule leaves one point for an access of a minute or less: half of it (sooner, the node does not take the knock),
+// so there the renewal has no spread.
 func (p *spa2Params) renewIn() time.Duration {
 	access := p.access()
 	from := access / 2
@@ -477,7 +479,7 @@ func (o *Outbound) dialSPA2Once(ctx context.Context, network string, destination
 		}
 	}
 	if err != nil {
-		o.forgetBefore(destination, attempt)
+		o.forgetBefore(ctx, destination, attempt)
 		return nil, err
 	}
 	o.passed(destination)

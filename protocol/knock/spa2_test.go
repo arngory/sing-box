@@ -796,7 +796,7 @@ func TestSPA2Hosts(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		node := newBox(t, Options{SPAv2: &options, Hosts: []string{"localhost"}})
 		dial(node, "localhost", true)
-		node.forget(M.ParseSocksaddrHostPort("127.0.0.1", server))
+		node.forget(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", server))
 		dial(node, "127.0.0.1", true)
 	}
 	// without a list, everything is knocked at

@@ -567,7 +567,7 @@ func (o *Outbound) dialResolved(ctx context.Context, network string, destination
 	}
 	if err != nil {
 		// the port may need a moment more, knock again on the next attempt
-		o.forget(destination)
+		o.forget(ctx, destination)
 		return nil, err
 	}
 	o.passed(destination)
@@ -681,8 +681,21 @@ func (o *Outbound) target(host string) *target {
 	return t
 }
 
-func (o *Outbound) forget(destination M.Socksaddr) {
-	o.forgetBefore(destination, time.Now())
+func (o *Outbound) forget(ctx context.Context, destination M.Socksaddr) {
+	o.forgetBefore(ctx, destination, time.Now())
+}
+
+// roundGoesOnKey marks a dial whose failure is not the round's end: the v3 half of an attempt that tries v2 next
+// (dialSPA2)
+type roundGoesOnKey struct{}
+
+func withRoundGoesOn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, roundGoesOnKey{}, true)
+}
+
+func roundGoesOn(ctx context.Context) bool {
+	goesOn, _ := ctx.Value(roundGoesOnKey{}).(bool)
+	return goesOn
 }
 
 // forgetBefore drops the knock unless it finished after attempt, the start of
@@ -691,12 +704,14 @@ func (o *Outbound) forget(destination M.Socksaddr) {
 //
 // The knock dropped is a failed round (roundBook.failed) when it was one of this network and no dial got through after it:
 // a knock that opened the access and then ran out is no failure. The parallel dials that fail with it count once,
-// the first drops it.
-func (o *Outbound) forgetBefore(destination M.Socksaddr, attempt time.Time) {
+// the first drops it. A dial that ended with its caller (cancelled, out of time) says nothing of the node, and the v3
+// half of an attempt goes on with v2 (roundGoesOn): neither is counted.
+func (o *Outbound) forgetBefore(ctx context.Context, destination M.Socksaddr, attempt time.Time) {
 	t := o.target(destination.AddrString())
 	t.access.Lock()
 	if !t.lastKnock.After(attempt) {
-		if !t.lastKnock.IsZero() && t.generation == o.generation.Load() && t.passedAt.Before(t.lastKnock) {
+		if !t.lastKnock.IsZero() && t.generation == o.generation.Load() && t.passedAt.Before(t.lastKnock) &&
+			ctx.Err() == nil && !roundGoesOn(ctx) {
 			o.rounds.failed(destination.AddrString(), t.lastKnock, time.Now())
 		}
 		t.lastKnock = time.Time{}
@@ -724,12 +739,15 @@ func (o *Outbound) cached(destination M.Socksaddr) bool {
 // knock sends the sequence to the host unless a knock is still valid (with
 // force: unless it was sent just now) and reports whether it sent one.
 // Concurrent callers share one knock in flight.
+//
+// A round's first knock (not forced) waits the pause after failed rounds (roundBook); the knocks within a round (a
+// forced one after a cached knock failed, the reknocks over the carriers), renewals and the watchdog's do not.
 func (o *Outbound) knock(ctx context.Context, destination M.Socksaddr, force bool) (bool, error) {
 	return o.knockOnce(ctx, destination, func(t *target, waited bool) bool {
 		since := time.Since(t.lastKnock)
 		// after waiting for a knock in flight: re-check, it may have failed or become stale
 		return since < o.ttl && (!force || waited) || since < minReknockGap
-	}, o.carrier(), o.sendSequence)
+	}, o.carrier(), o.sendSequence, !force)
 }
 
 // carrier is the SPA v2 carrier in use on this network (UDP for SPA v1 and port knocking).
@@ -744,13 +762,13 @@ func (o *Outbound) carrier() Carrier {
 func (o *Outbound) reknock(ctx context.Context, destination M.Socksaddr, attempt time.Time, carrier Carrier, send func(context.Context, M.Socksaddr) error) (bool, error) {
 	return o.knockOnce(ctx, destination, func(t *target, _ bool) bool {
 		return t.lastByCarrier[carrier].After(attempt)
-	}, carrier, send)
+	}, carrier, send, false)
 }
 
 // knockOnce runs send unless fresh (called under the target's lock, only for a
 // knock of this network) says the access is fresh; concurrent callers share
-// one send in flight and re-check after it.
-func (o *Outbound) knockOnce(ctx context.Context, destination M.Socksaddr, fresh func(t *target, waited bool) bool, carrier Carrier, send func(context.Context, M.Socksaddr) error) (bool, error) {
+// one send in flight and re-check after it. A paced send waits the pause after failed rounds.
+func (o *Outbound) knockOnce(ctx context.Context, destination M.Socksaddr, fresh func(t *target, waited bool) bool, carrier Carrier, send func(context.Context, M.Socksaddr) error, paced bool) (bool, error) {
 	t := o.target(destination.AddrString())
 	waited := false
 	for {
@@ -762,7 +780,7 @@ func (o *Outbound) knockOnce(ctx context.Context, destination M.Socksaddr, fresh
 		}
 		if t.inflight == nil {
 			// a round after failed ones waits its turn; a caller whose time runs out first is told so at once
-			if wait, rounds := o.rounds.wait(destination.AddrString(), time.Now()); wait > 0 {
+			if wait, rounds := o.rounds.wait(destination.AddrString(), time.Now()); paced && wait > 0 {
 				t.access.Unlock()
 				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait {
 					return false, E.New("knock: ", destination.AddrString(), " did not open after ", rounds,
