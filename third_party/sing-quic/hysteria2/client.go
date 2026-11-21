@@ -624,6 +624,7 @@ func (c *Client) authenticateAndWrap(ctx context.Context, rawConn io.Closer, cre
 		udpConnMap:  make(map[uint32]*udpPacketConn),
 		closeIdle:   &c.closeIdle,
 	}
+	conn.deadPath.logger = c.logger
 	if !c.udpDisabled {
 		go c.loopMessages(conn)
 	}
@@ -686,6 +687,7 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	conn.udpConnMap[sessionID] = clientPacketConn
 	conn.access.Unlock()
 	clientPacketConn.sessionID = sessionID
+	clientPacketConn.onSend = conn.sent
 	return clientPacketConn, nil
 }
 
@@ -751,6 +753,7 @@ type clientQUICConnection struct {
 	udpSessionID uint32
 	streams      int
 	closeIdle    *atomic.Bool
+	deadPath     deadPathWatch
 }
 
 func (c *clientQUICConnection) active() bool {
@@ -863,6 +866,7 @@ func (c *clientConn) Read(p []byte) (n int, err error) {
 }
 
 func (c *clientConn) Write(p []byte) (n int, err error) {
+	c.parent.sent()
 	if !c.requestWritten {
 		buffer := protocol.WriteTCPRequest(c.destination.String(), p)
 		defer buffer.Release()
@@ -890,6 +894,7 @@ const awaitDialFallback = 4 * time.Second
 // awaitDial sends the request now, with no payload, and reads the server's answer to it (AwaitDial).
 func (c *clientConn) awaitDial(ctx context.Context) error {
 	buffer := protocol.WriteTCPRequest(c.destination.String(), nil)
+	c.parent.sent()
 	_, err := c.Stream.Write(buffer.Bytes())
 	buffer.Release()
 	if err != nil {
@@ -945,6 +950,7 @@ func (c *clientConn) CloseWrite() error {
 	if !c.requestWritten {
 		buffer := protocol.WriteTCPRequest(c.destination.String(), nil)
 		defer buffer.Release()
+		c.parent.sent()
 		if _, err := c.Stream.Write(buffer.Bytes()); err != nil {
 			return qtls.WrapError(err)
 		}

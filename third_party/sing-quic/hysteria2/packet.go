@@ -121,16 +121,18 @@ func fragUDPMessage(message *udpMessage, maxPacketSize int) []*udpMessage {
 }
 
 type udpPacketConn struct {
-	ctx             context.Context
-	cancel          context.CancelCauseFunc
-	sessionID       uint32
-	quicConn        *quic.Conn
-	data            chan *udpMessage
-	udpMTU          int
-	packetId        atomic.Uint32
-	closeOnce       sync.Once
-	defragger       *udpDefragger
-	onDestroy       func()
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
+	sessionID uint32
+	quicConn  *quic.Conn
+	data      chan *udpMessage
+	udpMTU    int
+	packetId  atomic.Uint32
+	closeOnce sync.Once
+	defragger *udpDefragger
+	onDestroy func()
+	// onSend (neko): the client's dead-path watch, called before each datagram (deadpath_neko.go); nil on a server
+	onSend          func()
 	readWaitOptions N.ReadWaitOptions
 	readDeadline    pipe.Deadline
 }
@@ -324,6 +326,9 @@ func (c *udpPacketConn) writePackets(messages []*udpMessage) error {
 func (c *udpPacketConn) writePacket(message *udpMessage) error {
 	buffer := message.pack()
 	defer buffer.Release()
+	if c.onSend != nil {
+		c.onSend()
+	}
 	return c.quicConn.SendDatagram(buffer.Bytes())
 }
 
