@@ -159,3 +159,20 @@ func TestHTTP3UTLSLoads(t *testing.T) {
 		t.Fatalf("version = %s", version)
 	}
 }
+
+// TestSTDConfigForQUICRefusesDesync: tls.desync cuts a TCP first write; over HTTP/3 it is refused with
+// ErrDesyncOverQUIC for the std engine and for uTLS alike, never dropped silently (neko).
+func TestSTDConfigForQUICRefusesDesync(t *testing.T) {
+	_, hash := testCertificate(t)
+	for _, withUTLS := range []bool{false, true} {
+		options := quicTLSOptions(hash)
+		options.Desync = &option.TCPDesyncOptions{TLSRec: []string{"sni+1"}}
+		if withUTLS {
+			options.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"}
+		}
+		_, _, err := tls.STDConfigForQUIC(newTestTLSClient(t, options))
+		if !errors.Is(err, tls.ErrDesyncOverQUIC) {
+			t.Fatalf("utls=%v: err %v, want ErrDesyncOverQUIC", withUTLS, err)
+		}
+	}
+}

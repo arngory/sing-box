@@ -102,13 +102,13 @@ func newHTTP3Transport(dialer N.Dialer, serverAddr M.Socksaddr, tlsConfig tls.Co
 	stdConfig, fromUTLS, err := tls.STDConfigForQUIC(tlsConfig)
 	var dialErr error
 	if err != nil {
-		if !errors.Is(err, tls.ErrECHOverQUIC) {
+		if !errors.Is(err, tls.ErrECHOverQUIC) && !errors.Is(err, tls.ErrDesyncOverQUIC) {
 			return nil, E.Cause(err, "v2ray-xhttp: HTTP/3 TLS config")
 		}
 		// One bad subscription node must not fail the whole config: it loads, its
 		// dials fail.
-		warn("ECH is not supported over HTTP/3")
-		dialErr = E.New("v2ray-xhttp: ECH is not supported over HTTP/3")
+		warn(err.Error())
+		dialErr = E.Cause(err, "v2ray-xhttp")
 		stdConfig = &stdTLS.Config{}
 	}
 	if fromUTLS {
