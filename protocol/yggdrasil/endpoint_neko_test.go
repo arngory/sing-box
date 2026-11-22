@@ -414,3 +414,21 @@ func (d *answeringDevice) Close() error {
 	d.closeOnce.Do(func() { close(d.done) })
 	return nil
 }
+
+// pq: off (or none) leaves the core's sessions classic, answer and on give ironwood's PQ sessions their mode.
+func TestNekoYggdrasilPQSetup(t *testing.T) {
+	for _, off := range []string{"", "off"} {
+		if pq, err := pqSetup(off); err != nil || pq != nil {
+			t.Fatalf("%q: %v %v", off, pq, err)
+		}
+	}
+	if pq, err := pqSetup("answer"); err != nil || pq == nil || !pq.AnswerOnly {
+		t.Fatalf("answer: %+v %v", pq, err)
+	}
+	if pq, err := pqSetup("on"); err != nil || pq == nil || pq.AnswerOnly {
+		t.Fatalf("on: %+v %v", pq, err)
+	}
+	if _, err := pqSetup("yes"); err == nil {
+		t.Fatal("yes taken")
+	}
+}

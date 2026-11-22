@@ -37,6 +37,10 @@ type YggdrasilEndpointOptions struct {
 	// interfaces an entry names, a beacon sent and the others' heard, and a link to each node found that knows the
 	// same password. The links dial as the peers' do (DialerOptions)
 	Multicast []YggdrasilMulticastOptions `json:"multicast,omitempty"`
+	// PQ: the hybrid post-quantum sessions of arngory/ironwood (neko): "" or "off", the classic sessions alone (as
+	// upstream); "answer", PQ for the peers that start it, none started here; "on", PQ started with every peer that
+	// announces an ML-KEM key, classic with the others
+	PQ string `json:"pq,omitempty"`
 }
 
 // YggdrasilMulticastOptions is one entry of yggdrasil-go's MulticastInterfaces (neko).

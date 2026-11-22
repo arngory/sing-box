@@ -140,6 +140,11 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	for _, listen := range options.Listen {
 		setup = append(setup, core.ListenAddress(listen))
 	}
+	if pq, err := pqSetup(options.PQ); err != nil {
+		return nil, err
+	} else if pq != nil {
+		setup = append(setup, *pq)
+	}
 	// peers are added in Start: the core dials them at once, and resolving a peer name
 	// needs the DNS router, which is not running yet here
 	peers := make([]*url.URL, 0, len(options.Peers))
@@ -569,3 +574,18 @@ func (l *coreLogger) Errorln(args ...any)               { l.Error(fmt.Sprint(arg
 func (l *coreLogger) Debugf(format string, args ...any) { l.Debug(fmt.Sprintf(format, args...)) }
 func (l *coreLogger) Debugln(args ...any)               { l.Debug(fmt.Sprint(args...)) }
 func (l *coreLogger) Traceln(args ...any)               { l.Trace(fmt.Sprint(args...)) }
+
+// pqSetup: the core's option for the endpoint's pq (ironwood's hybrid post-quantum sessions): none for off, answer
+// only, or on.
+func pqSetup(mode string) (*core.PQSessions, error) {
+	switch mode {
+	case "", "off":
+		return nil, nil
+	case "answer":
+		return &core.PQSessions{AnswerOnly: true}, nil
+	case "on":
+		return &core.PQSessions{}, nil
+	default:
+		return nil, E.New("yggdrasil pq: off, answer or on, not ", mode)
+	}
+}
