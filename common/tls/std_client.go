@@ -75,6 +75,11 @@ func (c *STDClientConfig) SetHandshakeTimeout(timeout time.Duration) {
 }
 
 func (c *STDClientConfig) STDConfig() (*STDConfig, error) {
+	// neko: the raw config goes around Client(), where tls.desync cuts the first write (QUIC, shadowtls, the HTTP
+	// client): refused rather than ignored
+	if c.desync != nil {
+		return nil, E.New("tls.desync is not supported here: it cuts a TCP connection's first write")
+	}
 	return c.config, nil
 }
 

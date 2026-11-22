@@ -133,3 +133,19 @@ func TestNekoOutboundDesyncConfigErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestDesyncRefusedOnRawConfig: a path that takes the raw config (QUIC, shadowtls, the HTTP client) goes around
+// Client(), where desync applies: it gets an error, not a config silently without the cut.
+func TestDesyncRefusedOnRawConfig(t *testing.T) {
+	config, err := NewClient(context.Background(), nil, "example.com", option.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: "example.com",
+		Desync:     &option.TCPDesyncOptions{TLSRec: []string{"sni+1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = config.STDConfig(); err == nil {
+		t.Fatal("STDConfig with tls.desync: no error")
+	}
+}
