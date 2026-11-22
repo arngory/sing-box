@@ -96,8 +96,7 @@ func (c *Client) diagSample(conn *clientQUICConnection, d *connDiag) {
 	prev := conn.quicConn.ConnectionStats()
 	sum := prev
 	sumAt := time.Now()
-	inAt := sumAt // the last tick packets came in (or the start)
-	var stalled, quiet bool
+	var st stallWatch
 	for {
 		select {
 		case <-d.done:
@@ -110,21 +109,18 @@ func (c *Client) diagSample(conn *clientQUICConnection, d *connDiag) {
 			in, out := s.PacketsReceived > prev.PacketsReceived, s.PacketsSent > prev.PacketsSent
 			if in {
 				d.lastIn.Store(now.UnixNano())
-				if stalled || quiet {
-					c.logger.Info(fmt.Sprint("hysteria2 conn #", d.id, ": packets in again after ", now.Sub(inAt).Round(time.Second)))
-				}
-				inAt, stalled, quiet = now, false, false
-			} else if gap := now.Sub(inAt); gap >= diagStall {
-				switch {
-				case out && !stalled:
-					stalled = true
-					c.logger.Warn(fmt.Sprint("hysteria2 conn #", d.id, ": stall, packets out and none in for ", gap.Round(time.Second),
-						" (", s.PacketsSent-sum.PacketsSent, " out since the last line, ", streams, " streams, ", sessions, " udp)"))
-				case !out && !quiet && !stalled && streams+sessions > 0:
-					quiet = true
-					c.logger.Info(fmt.Sprint("hysteria2 conn #", d.id, ": quiet both ways for ", gap.Round(time.Second), " with ",
-						streams, " streams and ", sessions, " udp open"))
-				}
+			}
+			switch event, gap := st.tick(now, in, out, streams+sessions > 0); event {
+			case stallOneWay:
+				c.logger.Warn(fmt.Sprint("hysteria2 conn #", d.id, ": stall, packets out and none in for ", gap.Round(time.Second),
+					" (", s.PacketsSent-sum.PacketsSent, " out since the last line, ", streams, " streams, ", sessions, " udp)"))
+			case stallQuiet:
+				c.logger.Info(fmt.Sprint("hysteria2 conn #", d.id, ": quiet both ways for ", gap.Round(time.Second), " with ",
+					streams, " streams and ", sessions, " udp open"))
+			case stallOverOneWay:
+				c.logger.Info(fmt.Sprint("hysteria2 conn #", d.id, ": packets in again after ", gap.Round(time.Second), " of none"))
+			case stallOverQuiet:
+				c.logger.Info(fmt.Sprint("hysteria2 conn #", d.id, ": packets in again after ", gap.Round(time.Second), " of quiet"))
 			}
 			prev = s
 			if now.Sub(sumAt) >= diagSummary {
@@ -137,6 +133,59 @@ func (c *Client) diagSample(conn *clientQUICConnection, d *connDiag) {
 			}
 		}
 	}
+}
+
+type stallEvent int
+
+const (
+	stallNone stallEvent = iota
+	stallOneWay
+	stallQuiet
+	stallOverOneWay
+	stallOverQuiet
+)
+
+// stallWatch tells stalls from the sampler's ticks. outSince: the first tick that saw packets go out and none come
+// in since the last packet in; quietSince: the first tick of no packets either way with streams or UDP sessions open
+// and nothing sent unanswered. Zero while neither holds. A stall counts from them, not from the last packet in, so a
+// keepalive or a request after an idle spell is no stall: its answer has diagStall to come back.
+type stallWatch struct {
+	outSince, quietSince time.Time
+	stalled, quiet       bool
+}
+
+// tick takes one sample: whether packets came in and went out since the last, and whether streams or UDP sessions
+// are open. It returns what began or ended at this tick, with how long it lasted.
+func (w *stallWatch) tick(now time.Time, in, out, open bool) (stallEvent, time.Duration) {
+	switch {
+	case in:
+		event, gap := stallNone, time.Duration(0)
+		if w.stalled {
+			event, gap = stallOverOneWay, now.Sub(w.outSince)
+		} else if w.quiet {
+			event, gap = stallOverQuiet, now.Sub(w.quietSince)
+		}
+		*w = stallWatch{}
+		return event, gap
+	case out:
+		w.quietSince, w.quiet = time.Time{}, false
+		if w.outSince.IsZero() {
+			w.outSince = now
+		} else if gap := now.Sub(w.outSince); gap >= diagStall && !w.stalled {
+			w.stalled = true
+			return stallOneWay, gap
+		}
+	case w.outSince.IsZero() && open:
+		if w.quietSince.IsZero() {
+			w.quietSince = now
+		} else if gap := now.Sub(w.quietSince); gap >= diagStall && !w.quiet {
+			w.quiet = true
+			return stallQuiet, gap
+		}
+	case w.outSince.IsZero():
+		w.quietSince, w.quiet = time.Time{}, false
+	}
+	return stallNone, 0
 }
 
 func diagBytes(n uint64) string {

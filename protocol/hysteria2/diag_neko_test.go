@@ -89,7 +89,7 @@ func TestNekoHysteria2ConnLog(t *testing.T) {
 	for _, want := range []string{
 		`hysteria2 conn #\d+ open to 127\.0\.0\.1:\d+: (brutal at \d+|bbr standard \(node rx auto true\)).*, packet \d+ B, parrot true`,
 		`hysteria2 conn #\d+: 1\ds out \d+ (B|KiB)/\d+ pkts, in \d+ (B|KiB)/\d+ pkts, lost \d+, rtt`,
-		`hysteria2 conn #\d+: stall, packets out and none in for [3-9]s`,
+		`hysteria2 conn #\d+: stall, packets out and none in for \d+s`,
 		`hysteria2 conn #\d+ ended after \d+s: .* pkts out, .* pkts in, \d+ lost, rtt .*, [1-9]\d* streams, last in \d+s before: hysteria2: no packet back while sending`,
 	} {
 		if !regexp.MustCompile(want).MatchString(log) {
