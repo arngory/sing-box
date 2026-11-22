@@ -251,20 +251,27 @@ func TestNekoSystemProxyRefused(t *testing.T) {
 	again.restore()
 	stoppedForProxy(t, again, "restored without its proxy", os.ErrInvalid)
 
-	// a config whose TUN sets platform.http_proxy: refused before the core starts, the platform not asked
+	// a config whose TUN sets platform.http_proxy: refused before anything is touched, the running core and its
+	// status as they were, the platform not asked
 	const tunConfig = `{"log": {"level": "error"}, "inbounds": [{"type": "tun", "address": ["172.19.0.1/30"],
 		"platform": {"http_proxy": {"enabled": true, "server": "127.0.0.1", "server_port": 2080}}}]}`
 	platform2.failSet = false
+	if err = again.StartService(caller("1000"), config, nil); err != nil {
+		t.Fatal(err)
+	}
+	running, statusBefore := again.startedService.Instance(), coreStatus(again)
 	platform2.take()
 	err = again.StartService(caller("1000"), tunConfig, proxy)
-	if status.Code(err) != codes.InvalidArgument || again.startedService.Instance() != nil {
-		t.Fatalf("a TUN's own: %v, the core running %v", err, again.startedService.Instance() != nil)
+	if status.Code(err) != codes.InvalidArgument || again.startedService.Instance() != running {
+		t.Fatalf("a TUN's own: %v, the running core changed", err)
 	}
-	for _, call := range platform2.take() {
-		if call != "reset" {
-			t.Fatalf("the platform asked %q before the refusal", call)
-		}
+	if got := coreStatus(again); got.Status != daemon.ServiceStatus_STARTED || got.String() != statusBefore.String() {
+		t.Fatalf("the status %v, before %v", got, statusBefore)
 	}
+	if calls := platform2.take(); len(calls) != 0 {
+		t.Fatalf("the platform asked %q before the refusal", calls)
+	}
+	_ = again.startedService.CloseService()
 
 	// the backstop: a TUN's platform.http_proxy took the system proxy as the core started: refused as such
 	platform2.takenByCore = true

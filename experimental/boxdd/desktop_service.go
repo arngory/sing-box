@@ -81,6 +81,11 @@ func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, con
 	if ownerUserID != "" && ownerUserID != identity.UserID {
 		return status.Error(codes.PermissionDenied, "the service is owned by another user")
 	}
+	// niko: a system proxy asked beside a TUN that sets its own is refused before anything of the running core is
+	// touched (services.go)
+	if systemProxy != nil && d.platform != nil && d.configSetsSystemProxy(configContent) {
+		return errTunSystemProxy
+	}
 	err = d.preparePlatformOwnerLocked(identity)
 	if err != nil {
 		return err

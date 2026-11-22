@@ -239,10 +239,6 @@ func (d *Daemon) startServiceLocked(ctx context.Context, ownerUserID string, con
 	} else {
 		d.powerManager.Close()
 	}
-	// niko: a system proxy asked beside a TUN that sets its own is refused before the TUN comes up (services.go)
-	if options.SystemProxy != nil && d.platform != nil && d.configSetsSystemProxy(configContent) {
-		return errTunSystemProxy
-	}
 	if d.platform != nil {
 		d.platform.SetSystemProxyPreference(options.systemProxyEnabled())
 		err = d.platform.ResetPlatformOptions()
