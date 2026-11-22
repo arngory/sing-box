@@ -16,11 +16,7 @@ type desyncCarrier interface {
 	hasDesync() bool
 }
 
-func (c *STDClientConfig) hasDesync() bool  { return c.desync != nil }
-func (c *UTLSClientConfig) hasDesync() bool { return c.desync != nil }
-func (e *RealityClientConfig) hasDesync() bool {
-	return e.uClient != nil && e.uClient.desync != nil
-}
+func (c *STDClientConfig) hasDesync() bool { return c.desync != nil }
 
 // lxSTDConvertible is implemented by client configs whose STDConfig() refuses
 // but that can still describe themselves as a crypto/tls config (uTLS).
