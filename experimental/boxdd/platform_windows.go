@@ -38,7 +38,7 @@ type windowsPlatformInterface struct {
 	ownerUserID        string
 	sessionID          uint32
 	token              windows.Token
-	systemProxy        *settings.WindowsSystemProxy
+	systemProxy        systemProxySetter
 	systemProxyEnabled bool
 }
 
@@ -420,16 +420,10 @@ func (p *windowsPlatformInterface) applySystemProxyLocked() error {
 		if p.systemProxy.IsEnabled() {
 			return nil
 		}
-		return p.runUserOperationLocked(p.systemProxy.Enable)
+		// niko: the owner's own settings kept first, and put back when it goes off (system_proxy_windows.go)
+		return p.enableSystemProxyLocked()
 	}
 	return p.disableSystemProxyLocked()
-}
-
-func (p *windowsPlatformInterface) disableSystemProxyLocked() error {
-	if p.systemProxy == nil || !p.systemProxy.IsEnabled() {
-		return nil
-	}
-	return p.runUserOperationLocked(p.systemProxy.Disable)
 }
 
 func (p *windowsPlatformInterface) runUserOperationLocked(operation func() error) error {
