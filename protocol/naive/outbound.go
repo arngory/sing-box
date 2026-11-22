@@ -134,7 +134,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		logger.Warn("udp_desync: no QUIC connection without quic or udp_datagram, ignored")
 		desyncOptions = udpdesync.Options{}
 	}
-	cronetDialer := udpdesync.WrapSocketDialer(outboundDialer, desyncOptions, logger)
+	// neko: names-v1, the node's name to the knock as it is (nodeDialer), not looked up before it
+	cronetDialer := udpdesync.WrapSocketDialer(newNodeDialer(ctx, outboundDialer, options.Detour, serverAddress), desyncOptions, logger)
 
 	var trustedRootCertificates string
 	if len(options.TLS.Certificate) > 0 {

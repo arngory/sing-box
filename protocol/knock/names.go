@@ -98,6 +98,12 @@ func (n *nodeAddresses) serverName() string {
 	return n.name
 }
 
+// HasNode: the knock has the node's name and addresses (names-v1): a destination by the node's name is resolved
+// here (nodeTargets), its own addresses the fallback.
+func (o *Outbound) HasNode() bool {
+	return o.node != nil
+}
+
 // ResolveNode resolves the node's name once for an attempt: the addresses of the answer that are the node's, in
 // the answer's order; else the node's own (§5 p. 3–5).
 func (o *Outbound) ResolveNode(ctx context.Context, name string) ([]netip.Addr, bool) {
