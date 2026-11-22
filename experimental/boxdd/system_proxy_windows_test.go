@@ -271,7 +271,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 
 	// the daemon's own proxy on another port (the local proxy's changed since a crash): told by the last server set,
 	// not kept either
-	if err := saveLastSystemProxyServer("1000", moved); err != nil {
+	if err := saveLastSystemProxyServers("1000", []string{moved}); err != nil {
 		t.Fatal(err)
 	}
 	current = moved
@@ -283,13 +283,55 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if kept() {
 		t.Fatal("a daemon's proxy on another port kept as the owner's")
 	}
-	if last := loadLastSystemProxyServer("1000"); last != ours {
-		t.Fatalf("the last server set %q", last)
+	if last := loadLastSystemProxyServers("1000"); !reflect.DeepEqual(last, []string{ours}) {
+		t.Fatalf("the servers set %q", last)
 	}
 	if err := movedPort.ResetPlatformOptions(); err != nil {
 		t.Fatal(err)
 	}
 	expect("its stop", "clear")
+
+	// a crash on 2080 (ours), then a run on 2081 (moved) whose Enable fails: the next run on 2081 still tells 2080 for
+	// the daemon's, keeps nothing, and its stop clears alone
+	if err := saveLastSystemProxyServers("1000", []string{ours}); err != nil {
+		t.Fatal(err)
+	}
+	current = ours
+	failedRun := platform(&fakeSetter{failEnable: true})
+	failedRun.systemProxyServer = moved
+	if err := failedRun.applySystemProxyLocked(); err == nil {
+		t.Fatal("a failed Enable said nothing")
+	}
+	if err := failedRun.disableSystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("a run on 2081 that fails over a crash's 2080", "read ours", "enable")
+	if last := loadLastSystemProxyServers("1000"); !reflect.DeepEqual(last, []string{ours, moved}) {
+		t.Fatalf("the servers set %q", last)
+	}
+	nextRun := platform(&fakeSetter{})
+	nextRun.systemProxyServer = moved
+	if err := nextRun.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("the next run on 2081", "read ours", "enable")
+	if kept() {
+		t.Fatal("a crash's 2080 kept as the owner's")
+	}
+	if last := loadLastSystemProxyServers("1000"); !reflect.DeepEqual(last, []string{moved}) {
+		t.Fatalf("the servers set once on %q", last)
+	}
+	if err := nextRun.ResetPlatformOptions(); err != nil {
+		t.Fatal(err)
+	}
+	expect("its stop", "clear")
+	// an older daemon's file of one line: a set of one
+	if err := os.WriteFile(lastSystemProxyServerPath("1000"), []byte(ours), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if last := loadLastSystemProxyServers("1000"); !reflect.DeepEqual(last, []string{ours}) {
+		t.Fatalf("one line read as %q", last)
+	}
 
 	// another local proxy of the user's (another client, an agent), not one the daemon set: kept and put back
 	if err := os.Remove(lastSystemProxyServerPath("1000")); err != nil {

@@ -15,6 +15,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"unicode/utf16"
 
@@ -209,28 +211,36 @@ func (s *savedSystemProxy) isDaemons(servers ...string) bool {
 	return false
 }
 
-// lastSystemProxyServerFileName holds the server the daemon set last for the owner, written before it goes on and kept
-// after: a crash's proxy is told apart by it when the next run's is on another port.
+// lastSystemProxyServerFileName holds the servers the daemon may have left on for the owner, a line each: before its
+// proxy goes on, those it held and this run's; once it is on, this run's alone. A crash's proxy is told apart by them
+// when the next run's is on another port, also where a run in between failed to turn its own on. A file of one line
+// (an older daemon's) is a set of one.
 const lastSystemProxyServerFileName = "last_system_proxy_server"
 
 func lastSystemProxyServerPath(ownerUserID string) string {
 	return filepath.Join(userWorkingDirectory(ownerUserID), lastSystemProxyServerFileName)
 }
 
-func loadLastSystemProxyServer(ownerUserID string) string {
+func loadLastSystemProxyServers(ownerUserID string) []string {
 	content, err := os.ReadFile(lastSystemProxyServerPath(ownerUserID))
 	if err != nil {
-		return ""
+		return nil
 	}
-	return string(content)
+	var servers []string
+	for _, line := range strings.Split(string(content), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !slices.Contains(servers, line) {
+			servers = append(servers, line)
+		}
+	}
+	return servers
 }
 
-func saveLastSystemProxyServer(ownerUserID string, server string) error {
+func saveLastSystemProxyServers(ownerUserID string, servers []string) error {
 	err := os.MkdirAll(userWorkingDirectory(ownerUserID), 0o700)
 	if err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(lastSystemProxyServerPath(ownerUserID), []byte(server), 0o600)
+	return atomicfile.WriteFile(lastSystemProxyServerPath(ownerUserID), []byte(strings.Join(servers, "\n")), 0o600)
 }
 
 // systemProxySetter is the system proxy as the platform sets it (settings.WindowsSystemProxy); a test's own.
@@ -250,7 +260,9 @@ func (p *windowsPlatformInterface) canRunAsOwnerLocked() bool {
 // kept already are stale (a crash, a failed restore): put back first, so what is kept is the user's as they are now;
 // where that fails, the old ones stay kept and the proxy goes on all the same.
 func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
+	var last []string
 	if p.canRunAsOwnerLocked() {
+		last = loadLastSystemProxyServers(p.ownerUserID)
 		err := p.restoreKeptProxyLocked()
 		if errors.Is(err, errKeptSetAside) {
 			// set aside: the registry's kept anew as below, unless it is a daemon's own proxy of a crash
@@ -264,14 +276,13 @@ func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
 			p.warn(err)
 		default:
 			p.keptUnrestorable = false
-			last := loadLastSystemProxyServer(p.ownerUserID)
 			var saved *savedSystemProxy
 			err = p.runUserOperationLocked(func() (readError error) {
 				saved, readError = readProxyValues()
 				return readError
 			})
 			// the daemon's own proxy (a crash's, none kept) is not the owner's: not kept
-			if err == nil && saved != nil && !saved.isDaemons(p.systemProxyServer, last) {
+			if err == nil && saved != nil && !saved.isDaemons(append(last, p.systemProxyServer)...) {
 				err = writeSavedSystemProxy(p.ownerUserID, saved)
 			}
 			if err != nil {
@@ -279,13 +290,27 @@ func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
 			}
 		}
 		if p.systemProxyServer != "" {
-			err = saveLastSystemProxyServer(p.ownerUserID, p.systemProxyServer)
+			err = saveLastSystemProxyServers(p.ownerUserID, appendServer(last, p.systemProxyServer))
 			if err != nil {
 				return E.Cause(err, "keep the server set")
 			}
 		}
 	}
-	return p.runUserOperationLocked(p.systemProxy.Enable)
+	err := p.runUserOperationLocked(p.systemProxy.Enable)
+	if err == nil && p.canRunAsOwnerLocked() && p.systemProxyServer != "" {
+		// on: the servers a crash may have left are this run's alone now
+		if saveError := saveLastSystemProxyServers(p.ownerUserID, []string{p.systemProxyServer}); saveError != nil {
+			p.warn(E.Cause(saveError, "keep the server set"))
+		}
+	}
+	return err
+}
+
+func appendServer(servers []string, server string) []string {
+	if slices.Contains(servers, server) {
+		return servers
+	}
+	return append(slices.Clone(servers), server)
 }
 
 // disableSystemProxyLocked turns it off (upstream's clear) and puts the owner's own settings back: an error where
