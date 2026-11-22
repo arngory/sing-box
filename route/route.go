@@ -693,6 +693,9 @@ match:
 			if routeOptions.TLSRecordFragment {
 				metadata.TLSRecordFragment = true
 			}
+			if routeOptions.TCPDesync != nil {
+				metadata.TCPDesync = routeOptions.TCPDesync
+			}
 			if routeOptions.TLSSpoof != "" {
 				metadata.TLSSpoof = routeOptions.TLSSpoof
 				metadata.TLSSpoofMethod = routeOptions.TLSSpoofMethod

@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/sniff"
+	"github.com/sagernet/sing-box/common/tcpdesync"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	"github.com/sagernet/sing-box/common/urltest"
@@ -139,7 +140,14 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		m.logger.ErrorContext(ctx, err)
 		return
 	}
-	if metadata.TLSFragment || metadata.TLSRecordFragment {
+	if metadata.TCPDesync != nil {
+		// neko: tcp_desync takes the place of tls_fragment; it cuts only what goes to the socket as it is
+		if _, isSocket := tcpdesync.SocketOf(remoteConn); isSocket {
+			remoteConn = tcpdesync.NewConn(ctx, remoteConn, metadata.TCPDesync, m.logger)
+		} else {
+			m.logger.WarnContext(ctx, "tcp_desync ignored: the outbound connection is not a direct TCP socket")
+		}
+	} else if metadata.TLSFragment || metadata.TLSRecordFragment {
 		remoteConn = tf.NewConn(remoteConn, ctx, metadata.TLSFragment, metadata.TLSRecordFragment, metadata.TLSFragmentFallbackDelay)
 	}
 	if metadata.TLSSpoof != "" {

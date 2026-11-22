@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/sniff"
+	"github.com/sagernet/sing-box/common/tcpdesync"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -27,6 +28,13 @@ func newRuleActionRouteOptions(options option.RawRouteOptionsActionOptions) (Rul
 	if err != nil {
 		return RuleActionRouteOptions{}, err
 	}
+	desync, err := tcpdesync.Parse(options.TCPDesync)
+	if err != nil {
+		return RuleActionRouteOptions{}, err
+	}
+	if desync != nil && (options.TLSFragment || options.TLSRecordFragment) {
+		return RuleActionRouteOptions{}, E.New("`tcp_desync` and `tls_fragment`/`tls_record_fragment` are mutually exclusive")
+	}
 	return RuleActionRouteOptions{
 		OverrideAddress:           M.ParseSocksaddrHostPort(options.OverrideAddress, 0),
 		OverridePort:              options.OverridePort,
@@ -38,6 +46,7 @@ func newRuleActionRouteOptions(options option.RawRouteOptionsActionOptions) (Rul
 		TLSFragment:               options.TLSFragment,
 		TLSFragmentFallbackDelay:  time.Duration(options.TLSFragmentFallbackDelay),
 		TLSRecordFragment:         options.TLSRecordFragment,
+		TCPDesync:                 desync,
 		TLSSpoof:                  spoof,
 		TLSSpoofMethod:            spoofMethod,
 	}, nil
@@ -211,6 +220,7 @@ type RuleActionRouteOptions struct {
 	TLSFragment               bool
 	TLSFragmentFallbackDelay  time.Duration
 	TLSRecordFragment         bool
+	TCPDesync                 *tcpdesync.Strategy
 	TLSSpoof                  string
 	TLSSpoofMethod            tlsspoof.Method
 }
@@ -260,6 +270,9 @@ func (r *RuleActionRouteOptions) Descriptions() []string {
 	}
 	if r.TLSRecordFragment {
 		descriptions = append(descriptions, "tls-record-fragment")
+	}
+	if r.TCPDesync != nil {
+		descriptions = append(descriptions, F.ToString("tcp-desync=", r.TCPDesync))
 	}
 	if r.TLSSpoof != "" {
 		descriptions = append(descriptions, F.ToString("tls-spoof=", r.TLSSpoof))
