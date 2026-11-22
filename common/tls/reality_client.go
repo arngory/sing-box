@@ -175,6 +175,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	if e.uClient.fragment || e.uClient.recordFragment {
 		conn = tf.NewConn(conn, ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
 	}
+	conn = applyDesync(ctx, conn, e.uClient.desync, e.logger)
 	uConn, err := newUClient(conn, uConfig, e.uClient.id)
 	if err != nil {
 		return nil, err

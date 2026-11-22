@@ -125,6 +125,7 @@ type OutboundTLSOptions struct {
 	Fragment                   bool                                `json:"fragment,omitempty"`
 	FragmentFallbackDelay      badoption.Duration                  `json:"fragment_fallback_delay,omitempty"`
 	RecordFragment             bool                                `json:"record_fragment,omitempty"`
+	Desync                     *TCPDesyncOptions                   `json:"desync,omitempty"`
 	Spoof                      string                              `json:"spoof,omitempty"`
 	SpoofMethod                string                              `json:"spoof_method,omitempty" enum:"wrong-sequence,wrong-checksum,wrong-ack,wrong-md5,wrong-timestamp"`
 	KernelTx                   bool                                `json:"kernel_tx,omitempty"`

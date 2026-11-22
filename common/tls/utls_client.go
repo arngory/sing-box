@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/tcpdesync"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
@@ -41,6 +42,9 @@ type UTLSClientConfig struct {
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+	// neko: tls.desync
+	desync *tcpdesync.Strategy
+	logger logger.ContextLogger
 	// neko: curve_preferences narrows the fingerprint's groups (uTLS ignored it before)
 	curves []utls.CurveID
 }
@@ -90,6 +94,7 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if c.fragment || c.recordFragment {
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
+	conn = applyDesync(c.ctx, conn, c.desync, c.logger)
 	conn, err := applyTLSSpoof(conn, c.spoof, c.spoofMethod)
 	if err != nil {
 		return nil, err
@@ -163,6 +168,8 @@ func (c *UTLSClientConfig) Clone() Config {
 		recordFragment:        c.recordFragment,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
+		desync:                c.desync,
+		logger:                c.logger,
 		curves:                c.curves,
 	}
 	cloned.SetServerName(cloned.serverName)
@@ -402,6 +409,10 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
+	desync, err := parseDesync(options)
+	if err != nil {
+		return nil, err
+	}
 	var config Config = &UTLSClientConfig{
 		ctx:                   ctx,
 		config:                &tlsConfig,
@@ -415,6 +426,8 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		recordFragment:        options.RecordFragment,
 		spoof:                 spoof,
 		spoofMethod:           spoofMethod,
+		desync:                desync,
+		logger:                logger,
 	}
 	for _, curve := range options.CurvePreferences {
 		config.(*UTLSClientConfig).curves = append(config.(*UTLSClientConfig).curves, utls.CurveID(curve))

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/tcpdesync"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
@@ -34,6 +35,9 @@ type STDClientConfig struct {
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+	// neko: tls.desync
+	desync *tcpdesync.Strategy
+	logger logger.ContextLogger
 }
 
 func (c *STDClientConfig) ServerName() string {
@@ -78,6 +82,7 @@ func (c *STDClientConfig) Client(conn net.Conn) (Conn, error) {
 	if c.fragment || c.recordFragment {
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
+	conn = applyDesync(c.ctx, conn, c.desync, c.logger)
 	conn, err := applyTLSSpoof(conn, c.spoof, c.spoofMethod)
 	if err != nil {
 		return nil, err
@@ -98,6 +103,8 @@ func (c *STDClientConfig) Clone() Config {
 		recordFragment:        c.recordFragment,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
+		desync:                c.desync,
+		logger:                c.logger,
 	}
 	cloned.SetServerName(cloned.serverName)
 	return cloned
@@ -231,6 +238,10 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	if err != nil {
 		return nil, err
 	}
+	desync, err := parseDesync(options)
+	if err != nil {
+		return nil, err
+	}
 	var config Config = &STDClientConfig{
 		ctx:                   ctx,
 		config:                &tlsConfig,
@@ -243,6 +254,8 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 		recordFragment:        options.RecordFragment,
 		spoof:                 spoof,
 		spoofMethod:           spoofMethod,
+		desync:                desync,
+		logger:                logger,
 	}
 	config.SetServerName(serverName)
 	if options.ECH != nil && options.ECH.Enabled {

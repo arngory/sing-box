@@ -46,6 +46,9 @@ func ValidateSystemTLSOptions(ctx context.Context, options option.OutboundTLSOpt
 	if options.Fragment || options.RecordFragment {
 		return SystemTLSValidated{}, E.New("tls fragment is unsupported in ", engineName)
 	}
+	if options.Desync != nil {
+		return SystemTLSValidated{}, E.New("tls desync is unsupported in ", engineName)
+	}
 	if options.KernelTx || options.KernelRx {
 		return SystemTLSValidated{}, E.New("ktls is unsupported in ", engineName)
 	}

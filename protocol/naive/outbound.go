@@ -93,6 +93,9 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if options.TLS.Fragment || options.TLS.RecordFragment {
 		return nil, E.New("fragment is not supported on naive outbound")
 	}
+	if options.TLS.Desync != nil {
+		return nil, E.New("desync is not supported on naive outbound")
+	}
 	if options.TLS.KernelTx || options.TLS.KernelRx {
 		return nil, E.New("kernel TLS is not supported on naive outbound")
 	}
