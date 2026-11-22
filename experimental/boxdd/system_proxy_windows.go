@@ -165,6 +165,13 @@ func savedSystemProxyPath(ownerUserID string) string {
 	return filepath.Join(userWorkingDirectory(ownerUserID), savedSystemProxyFileName)
 }
 
+// errKeptUnreadable: the kept file was read and is not settings (errKeptSetAside once it is set aside); a failure to
+// read it is the file system's, and may pass.
+var (
+	errKeptUnreadable = errors.New("the owner's kept proxy settings are not readable")
+	errKeptSetAside   = errors.New("the owner's kept proxy settings were set aside")
+)
+
 func loadSavedSystemProxy(ownerUserID string) (*savedSystemProxy, error) {
 	content, err := os.ReadFile(savedSystemProxyPath(ownerUserID))
 	if err != nil {
@@ -172,9 +179,23 @@ func loadSavedSystemProxy(ownerUserID string) (*savedSystemProxy, error) {
 	}
 	saved, err := json.UnmarshalExtended[savedSystemProxy](content)
 	if err != nil {
-		return nil, err
+		return nil, E.Errors(errKeptUnreadable, err)
 	}
 	return &saved, nil
+}
+
+// isDaemons: the values are the daemon's own proxy on, as a crash leaves them, not the owner's settings.
+func (s *savedSystemProxy) isDaemons(server string) bool {
+	enabled, current := false, ""
+	for _, value := range s.Values {
+		switch {
+		case value.Name == "ProxyEnable" && value.Type == registry.DWORD && len(value.Data) == 4:
+			enabled = binary.LittleEndian.Uint32(value.Data) == 1
+		case value.Name == "ProxyServer" && value.Type == registry.SZ:
+			current = utf16String(value.Data)
+		}
+	}
+	return server != "" && enabled && current == server
 }
 
 // systemProxySetter is the system proxy as the platform sets it (settings.WindowsSystemProxy); a test's own.
@@ -196,18 +217,24 @@ func (p *windowsPlatformInterface) canRunAsOwnerLocked() bool {
 func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
 	if p.canRunAsOwnerLocked() {
 		err := p.restoreKeptProxyLocked()
-		if err != nil {
+		switch {
+		case errors.Is(err, errKeptSetAside):
+			// what the registry has may be the daemon's own proxy of a crash: none kept, the stop clears alone
+			p.keptUnrestorable = false
+			p.warn(err)
+		case err != nil:
 			// the kept ones cannot be put back: not this Enable's, so their failure does not stop the next stop
 			p.keptUnrestorable = true
 			p.warn(err)
-		} else {
+		default:
 			p.keptUnrestorable = false
 			var saved *savedSystemProxy
 			err = p.runUserOperationLocked(func() (readError error) {
 				saved, readError = readProxyValues()
 				return readError
 			})
-			if err == nil {
+			// the daemon's own proxy (a crash's, none kept) is not the owner's: not kept
+			if err == nil && saved != nil && !saved.isDaemons(p.systemProxyServer) {
 				err = writeSavedSystemProxy(p.ownerUserID, saved)
 			}
 			if err != nil {
@@ -228,7 +255,7 @@ func (p *windowsPlatformInterface) disableSystemProxyLocked() error {
 			return err
 		}
 		err = p.restoreKeptProxyLocked()
-		if err != nil && p.keptUnrestorable {
+		if err != nil && (p.keptUnrestorable || errors.Is(err, errKeptSetAside)) {
 			// kept before this run and not put back when it went on: told, kept for the next try
 			p.warn(err)
 			return nil
@@ -250,15 +277,17 @@ func (p *windowsPlatformInterface) restoreKeptProxyLocked() error {
 	if os.IsNotExist(err) {
 		return nil
 	}
-	if err != nil {
-		// a file that cannot be read never will be: set aside, not tried at every start and stop
-		p.warn(E.Cause(err, "read the owner's proxy settings; set aside as ", path, ".bad"))
+	if errors.Is(err, errKeptUnreadable) {
+		// read and not settings, which no later try changes: set aside, not tried at every start and stop; one
+		// that cannot be moved stays, told
 		if renameError := os.Rename(path, path+".bad"); renameError != nil {
-			if removeError := os.Remove(path); removeError != nil && !os.IsNotExist(removeError) {
-				p.warn(E.Cause(removeError, "forget the owner's proxy settings"))
-			}
+			p.warn(E.Cause(renameError, "set aside the owner's proxy settings"))
 		}
-		return nil
+		return E.Errors(errKeptSetAside, err)
+	}
+	if err != nil {
+		// the file system's (a lock, a denial): kept for the next try
+		return E.Cause(err, "read the owner's proxy settings")
 	}
 	err = p.runUserOperationLocked(func() error {
 		writeError := writeProxyValues(saved)

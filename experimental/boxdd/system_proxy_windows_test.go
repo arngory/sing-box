@@ -3,12 +3,25 @@
 package boxdd
 
 import (
+	"encoding/binary"
+	"errors"
 	"os"
 	"reflect"
 	"testing"
+	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
+
+// utf16Bytes is a REG_SZ's data: UTF-16, little-endian, its NUL included.
+func utf16Bytes(text string) []byte {
+	var data []byte
+	for _, unit := range append(utf16.Encode([]rune(text)), 0) {
+		data = binary.LittleEndian.AppendUint16(data, unit)
+	}
+	return data
+}
 
 // sessionChange: the owner's new session goes to the platform, which sets the proxy for it (replaceOwnerTokenLocked),
 // and is kept as the owner's; the daemon neither resets nor sets anything itself.
@@ -61,21 +74,29 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		readProxyValues, writeProxyValues, notifyProxyChanged = previousRead, previousWrite, previousNotify
 	})
 	var calls []string
-	// the owner's registry: their own proxy, until the daemon's is on
-	current := "corp"
+	// the owner's registry: their own proxy (corp), until the daemon's (ours) is on
+	const corp, ours = "http://corp.example:3128", "http://127.0.0.1:2080"
+	label := map[string]string{corp: "corp", ours: "ours"}
+	current := corp
 	failWrite := false
 	readProxyValues = func() (*savedSystemProxy, error) {
-		calls = append(calls, "read "+current)
-		return &savedSystemProxy{Values: []savedProxyValue{{Key: internetSettingsKey, Name: "ProxyServer",
-			Type: 1, Data: []byte(current)}}}, nil
+		calls = append(calls, "read "+label[current])
+		var enabled uint32
+		if current == ours {
+			enabled = 1
+		}
+		return &savedSystemProxy{Values: []savedProxyValue{
+			{Key: internetSettingsKey, Name: "ProxyEnable", Type: registry.DWORD, Data: binary.LittleEndian.AppendUint32(nil, enabled)},
+			{Key: internetSettingsKey, Name: "ProxyServer", Type: registry.SZ, Data: utf16Bytes(current)},
+		}}, nil
 	}
 	writeProxyValues = func(saved *savedSystemProxy) error {
 		if failWrite {
 			calls = append(calls, "write failed")
 			return os.ErrPermission
 		}
-		current = string(saved.Values[0].Data)
-		calls = append(calls, "write "+current)
+		current = utf16String(saved.Values[1].Data)
+		calls = append(calls, "write "+label[current])
 		return nil
 	}
 	notifyProxyChanged = func() error {
@@ -95,7 +116,8 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	}
 	platform := func(setter *fakeSetter) *windowsPlatformInterface {
 		setter.calls = &calls
-		return &windowsPlatformInterface{systemProxyEnabled: true, ownerUserID: "1000", systemProxy: setter}
+		return &windowsPlatformInterface{systemProxyEnabled: true, ownerUserID: "1000", systemProxy: setter,
+			systemProxyServer: ours}
 	}
 
 	p := platform(&fakeSetter{})
@@ -106,7 +128,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if !kept() {
 		t.Fatal("not kept on the disk")
 	}
-	current = "ours"
+	current = ours
 	if err := p.SetSystemProxyEnabled(false); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +142,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect("on again", "read corp", "enable")
-	current = "ours"
+	current = ours
 	// the next daemon: no system proxy yet as the owner is set
 	again := &windowsPlatformInterface{systemProxyEnabled: true}
 	if err := again.PrepareOwner(peerIdentity{UserID: "1000"}); err != nil {
@@ -137,13 +159,13 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect("on", "read corp", "enable")
-	current = "ours"
+	current = ours
 	restarted := platform(&fakeSetter{})
 	if err := restarted.applySystemProxyLocked(); err != nil {
 		t.Fatal(err)
 	}
 	expect("on after a crash", "write corp", "notify", "read corp", "enable")
-	current = "ours"
+	current = ours
 
 	// a restore that fails after this call turned the proxy off: said, the settings kept
 	failWrite = true
@@ -185,22 +207,63 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatal("still kept after it was put back")
 	}
 
-	// a kept file that cannot be read: set aside as .bad as the proxy goes on, kept anew; one stop puts them back
+	// a kept file that is not settings, after a crash (the daemon's proxy in the registry): set aside as .bad as the
+	// proxy goes on, nothing kept anew (what the registry has is the daemon's), and one stop clears alone
 	if err := os.WriteFile(savedSystemProxyPath("1000"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	current = ours
 	broken := platform(&fakeSetter{})
 	if err := broken.applySystemProxyLocked(); err != nil {
 		t.Fatal(err)
 	}
-	expect("on with a broken file", "read corp", "enable")
+	expect("on with a broken file", "enable")
 	if _, err := os.Stat(savedSystemProxyPath("1000") + ".bad"); err != nil {
 		t.Fatalf("not set aside: %v", err)
+	}
+	if kept() {
+		t.Fatal("kept anew after a broken file")
 	}
 	if err := broken.ResetPlatformOptions(); err != nil {
 		t.Fatalf("the stop after a broken file: %v", err)
 	}
-	expect("the stop after a broken file", "clear", "write corp", "notify")
+	expect("the stop after a broken file", "clear")
+
+	// none kept and the daemon's own proxy in the registry (a crash's, the file lost): not kept as the owner's
+	lost := platform(&fakeSetter{})
+	if err := lost.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("on over the daemon's own", "read ours", "enable")
+	if kept() {
+		t.Fatal("the daemon's own proxy kept as the owner's")
+	}
+	if err := lost.ResetPlatformOptions(); err != nil {
+		t.Fatal(err)
+	}
+	expect("the stop over the daemon's own", "clear")
+	current = corp
+
+	// a kept file the file system will not give (a lock, a denial; here a directory): an error, and it stays
+	if err := os.Mkdir(savedSystemProxyPath("1000"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	locked := platform(&fakeSetter{})
+	if err := locked.restoreKeptProxyLocked(); err == nil || errors.Is(err, errKeptSetAside) {
+		t.Fatalf("an unreadable file: %v", err)
+	}
+	if _, err := os.Stat(savedSystemProxyPath("1000")); err != nil {
+		t.Fatalf("not left for the next try: %v", err)
+	}
+	if _, err := os.Stat(savedSystemProxyPath("1000") + ".bad"); err == nil {
+		if err = os.Remove(savedSystemProxyPath("1000") + ".bad"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(savedSystemProxyPath("1000")); err != nil {
+		t.Fatal(err)
+	}
+	expect("an unreadable file")
 
 	// an Enable that fails: rolled back, the settings put back and not kept
 	failing := platform(&fakeSetter{failEnable: true})
