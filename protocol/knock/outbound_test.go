@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -424,26 +425,46 @@ func TestStrictOrderWithShortInterval(t *testing.T) {
 	r := &recorder{}
 	var steps []Step
 	var want []string
+	names := map[uint16]string{}
 	for i := 0; i < 6; i++ {
 		name := "p" + strconv.Itoa(i)
-		steps = append(steps, Step{Port: listenTCP(t, r, name)})
+		port := listenTCP(t, r, name)
+		steps = append(steps, Step{Port: port})
 		want = append(want, name)
+		names[port] = name
 	}
 	outbound := newBox(t, Options{Sequence: steps})
 	outbound.interval = 10 * time.Millisecond
+	// the order the knock dials in; the listeners' accepts only show each port was reached (their goroutines wake
+	// in no set order on a busy machine, 10 ms apart)
+	dials := &orderDialer{Dialer: outbound.dialer, names: names}
+	outbound.dialer = dials
 	if _, err := outbound.knock(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 1), false); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	events := r.snapshot()
-	if len(events) != len(want) {
-		t.Fatalf("events %v, want %v", events, want)
+	if order := dials.snapshot(); !slices.Equal(order, want) {
+		t.Fatalf("dialed %v, want %v", order, want)
 	}
-	for i := range want {
-		if events[i] != want[i] {
-			t.Fatalf("events %v, want %v", events, want)
-		}
+	reached := r.snapshot()
+	slices.Sort(reached)
+	if !slices.Equal(reached, want) {
+		t.Fatalf("reached %v, want %v", reached, want)
 	}
+}
+
+// orderDialer records the ports a knock dials, in order, by their listeners' names.
+type orderDialer struct {
+	N.Dialer
+	names map[uint16]string
+	recorder
+}
+
+func (d *orderDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if name, ok := d.names[destination.Port]; ok {
+		d.add(name)
+	}
+	return d.Dialer.DialContext(ctx, network, destination)
 }
 
 // A dropped port never answers; the attempt must end before the kernel
