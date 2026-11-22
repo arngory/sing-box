@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -250,6 +251,43 @@ func TestNekoDNSTTEchoSealed(t *testing.T) {
 	echoThrough(t, "udp://"+server.conn.LocalAddr().String(), pubkey, key)
 }
 
+// A long zone (raycontrol's measure: the owner's domain of more than 20 characters): sealed, with the dnsauth tag
+// that shortens a query most, a zone of 109 characters still carries the stream (a KCP MTU of 57: some 33 bytes of
+// it a query); one of 128 is refused at the start with what is left.
+func TestNekoDNSTTEchoLongZone(t *testing.T) {
+	zone := strings.Repeat("a", 50) + "." + strings.Repeat("b", 50) + ".example" // 109
+	key := make([]byte, 32)
+	rand.Read(key)
+	server, pubkey := startTestServerSealed(t, zone, key)
+	authKey, _ := AuthKey(bytes.Repeat([]byte{0x11}, 32), strings.Repeat("33", 16), 3)
+	resolver, err := ParseResolver("udp://" + server.conn.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := ClientOptions{
+		Context: context.Background(), Logger: logger.NOP(), Dialer: udpDialer{}, Domain: zone, PubKey: pubkey,
+		Resolver: resolver, SealKey: key, AuthKey: authKey,
+	}
+	client, err := NewClient(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("zone of %d characters: %d bytes a query", len(zone), client.mtu)
+	if client.mtu < minQueryMTU {
+		t.Fatalf("MTU %d", client.mtu)
+	}
+	client.Close()
+	// the server checks no tag here: a client without it echoes through the same zone
+	plain := newTestClientDomain(t, zone, "udp://"+server.conn.LocalAddr().String(), pubkey, key, 0)
+	defer plain.Close()
+	echoOnce(t, plain, 0)
+
+	options.Domain = strings.Repeat("c", 60) + "." + strings.Repeat("d", 60) + ".example" // 128
+	if _, err = NewClient(options); err == nil || !strings.Contains(err.Error(), "leaves only") {
+		t.Fatalf("a zone of 128 characters: %v", err)
+	}
+}
+
 // The same over DNS over TCP (RFC 7766): a resolver that takes length-prefixed messages on TCP and asks the server
 // over UDP, as a public resolver reached on TCP 53 does.
 func TestNekoDNSTTEchoTCP(t *testing.T) {
@@ -305,6 +343,10 @@ func tcpToUDP(conn net.Conn, server net.Addr) {
 }
 
 func newTestClient(t *testing.T, resolverURL, pubkey string, sealKey []byte, handshakeTimeout time.Duration) *Client {
+	return newTestClientDomain(t, "t.example.com", resolverURL, pubkey, sealKey, handshakeTimeout)
+}
+
+func newTestClientDomain(t *testing.T, domain, resolverURL, pubkey string, sealKey []byte, handshakeTimeout time.Duration) *Client {
 	resolver, err := ParseResolver(resolverURL)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +355,7 @@ func newTestClient(t *testing.T, resolverURL, pubkey string, sealKey []byte, han
 		Context:          context.Background(),
 		Logger:           logger.NOP(),
 		Dialer:           udpDialer{},
-		Domain:           "t.example.com",
+		Domain:           domain,
 		PubKey:           pubkey,
 		Resolver:         resolver,
 		SealKey:          sealKey,

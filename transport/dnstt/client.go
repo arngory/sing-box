@@ -111,6 +111,10 @@ type ClientOptions struct {
 // and the client would wait for an answer forever.
 const defaultHandshakeTimeout = 30 * time.Second
 
+// minQueryMTU: the least payload a query may carry, kcp-go's own floor. A zone of some 120 characters still leaves it
+// (sealed, with the dnsauth tag), at about 26 bytes of the stream a query; 80 before held the zone to some 72.
+const minQueryMTU = 50
+
 type Client struct {
 	ctx         context.Context
 	logger      logger.ContextLogger
@@ -176,8 +180,9 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if options.AuthKey != nil {
 		mtu -= authTagLen
 	}
-	if mtu < 80 {
-		return nil, E.New("domain ", options.Domain, " leaves only ", mtu, " bytes for the payload")
+	// kcp-go takes an MTU of 50 at least (SetMtu refuses less); below, KCP's 24-byte header leaves too little to move
+	if mtu < minQueryMTU {
+		return nil, E.New("domain ", options.Domain, " leaves only ", mtu, " bytes for the payload, ", minQueryMTU, " at least")
 	}
 	ctx := options.Context
 	if ctx == nil {
