@@ -13,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -88,7 +89,7 @@ func (d *Daemon) setSystemProxyLocked(p *SystemProxy) error {
 		return err
 	}
 	if proxyStatus.Available {
-		return status.Error(codes.InvalidArgument, "the config already sets tun.platform.http_proxy")
+		return errTunSystemProxy
 	}
 	if runtime.GOOS != "windows" && len(p.BypassDomain) > 0 {
 		d.logger.Warn("system proxy: the bypass list applies on Windows only")
@@ -105,6 +106,24 @@ func (d *Daemon) setSystemProxyLocked(p *SystemProxy) error {
 		return E.New("set system proxy: this system has none the daemon can set")
 	}
 	return nil
+}
+
+var errTunSystemProxy = status.Error(codes.InvalidArgument, "the config already sets tun.platform.http_proxy")
+
+// configSetsSystemProxy: a TUN of the config sets the system proxy itself (platform.http_proxy). A config the core
+// cannot read sets none here; the core refuses it.
+func (d *Daemon) configSetsSystemProxy(configContent string) bool {
+	options, err := json.UnmarshalExtendedContext[option.Options](d.ctx, []byte(configContent))
+	if err != nil {
+		return false
+	}
+	for _, inbound := range options.Inbounds {
+		tun, isTun := inbound.Options.(*option.TunInboundOptions)
+		if isTun && tun.Platform != nil && tun.Platform.HTTPProxy != nil && tun.Platform.HTTPProxy.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *SystemProxy) platformOptions() option.TunPlatformOptions {

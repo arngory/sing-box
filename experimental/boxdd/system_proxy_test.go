@@ -14,10 +14,12 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/service/powerreport"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // niko: the system proxy of an added service's start (Host.StartService's SystemProxy), set by the daemon's platform
@@ -179,6 +181,38 @@ func TestNekoSystemProxy(t *testing.T) {
 	}
 }
 
+// statusStream takes the first status SubscribeServiceStatus sends: the one now.
+type statusStream struct {
+	grpc.ServerStream
+	got *daemon.ServiceStatus
+}
+
+func (s *statusStream) Send(status *daemon.ServiceStatus) error {
+	s.got = status
+	return os.ErrClosed
+}
+
+func (s *statusStream) Context() context.Context { return context.Background() }
+
+// coreStatus is the core's status as a client of the daemon sees it.
+func coreStatus(d *Daemon) *daemon.ServiceStatus {
+	stream := &statusStream{}
+	_ = d.startedService.SubscribeServiceStatus(&emptypb.Empty{}, stream)
+	return stream.got
+}
+
+// stoppedForProxy: the core is not running, and its status says why, as a refused config's does.
+func stoppedForProxy(t *testing.T, d *Daemon, what string, err error) {
+	t.Helper()
+	if err == nil || d.startedService.Instance() != nil {
+		t.Fatalf("%s: %v, the core running %v", what, err, d.startedService.Instance() != nil)
+	}
+	got := coreStatus(d)
+	if got == nil || got.Status != daemon.ServiceStatus_FATAL || got.ErrorMessage == "" {
+		t.Fatalf("%s: the status %v", what, got)
+	}
+}
+
 // A system proxy that cannot be set leaves no core running, whoever started it: a start, a reload, a restore; one asked
 // beside a TUN that sets platform.http_proxy is refused as such.
 func TestNekoSystemProxyRefused(t *testing.T) {
@@ -196,12 +230,9 @@ func TestNekoSystemProxyRefused(t *testing.T) {
 	d.lifecycleAccess.Lock()
 	err := (&managedHandler{daemon: d}).ServiceReload(context.Background())
 	d.lifecycleAccess.Unlock()
-	if err == nil || d.startedService.Instance() != nil {
-		t.Fatalf("a reload without its proxy: %v, the core running %v", err, d.startedService.Instance() != nil)
-	}
-	if err = d.StartService(caller("1000"), config, proxy); err == nil || d.startedService.Instance() != nil {
-		t.Fatalf("a start without its proxy: %v, the core running %v", err, d.startedService.Instance() != nil)
-	}
+	stoppedForProxy(t, d, "a reload without its proxy", err)
+	err = d.StartService(caller("1000"), config, proxy)
+	stoppedForProxy(t, d, "a start without its proxy", err)
 	if platform.set {
 		t.Fatal("a system proxy left")
 	}
@@ -218,12 +249,25 @@ func TestNekoSystemProxyRefused(t *testing.T) {
 	again, platform2 := proxyDaemon(t, "1000")
 	platform2.failSet = true
 	again.restore()
-	if again.startedService.Instance() != nil {
-		t.Fatal("restored without its proxy")
+	stoppedForProxy(t, again, "restored without its proxy", os.ErrInvalid)
+
+	// a config whose TUN sets platform.http_proxy: refused before the core starts, the platform not asked
+	const tunConfig = `{"log": {"level": "error"}, "inbounds": [{"type": "tun", "address": ["172.19.0.1/30"],
+		"platform": {"http_proxy": {"enabled": true, "server": "127.0.0.1", "server_port": 2080}}}]}`
+	platform2.failSet = false
+	platform2.take()
+	err = again.StartService(caller("1000"), tunConfig, proxy)
+	if status.Code(err) != codes.InvalidArgument || again.startedService.Instance() != nil {
+		t.Fatalf("a TUN's own: %v, the core running %v", err, again.startedService.Instance() != nil)
+	}
+	for _, call := range platform2.take() {
+		if call != "reset" {
+			t.Fatalf("the platform asked %q before the refusal", call)
+		}
 	}
 
-	// a TUN's platform.http_proxy took the system proxy: refused as such, nothing left running
-	platform2.failSet, platform2.takenByCore = false, true
+	// the backstop: a TUN's platform.http_proxy took the system proxy as the core started: refused as such
+	platform2.takenByCore = true
 	err = again.StartService(caller("1000"), config, proxy)
 	if status.Code(err) != codes.InvalidArgument || again.startedService.Instance() != nil {
 		t.Fatalf("beside a TUN's: %v, the core running %v", err, again.startedService.Instance() != nil)
