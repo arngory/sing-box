@@ -244,6 +244,8 @@ func (p *windowsPlatformInterface) CreateBridge(options adapter.BridgeOptions) (
 func (p *windowsPlatformInterface) PrepareOwner(identity peerIdentity) error {
 	p.access.Lock()
 	defer p.access.Unlock()
+	// niko: the owner's proxy settings left kept by a crash, put back (system_proxy_windows.go)
+	defer p.recoverKeptProxyLocked()
 	if listenAddress != "" {
 		p.ownerUserID = identity.UserID
 		p.sessionID = identity.SessionID
@@ -271,6 +273,8 @@ func (p *windowsPlatformInterface) PrepareOwner(identity peerIdentity) error {
 func (p *windowsPlatformInterface) RestoreOwner(state ownerState) error {
 	p.access.Lock()
 	defer p.access.Unlock()
+	// niko: the owner's proxy settings left kept by a crash, put back (system_proxy_windows.go)
+	defer p.recoverKeptProxyLocked()
 	p.ownerUserID = state.UserID
 	p.sessionID = state.SessionID
 	if listenAddress != "" {

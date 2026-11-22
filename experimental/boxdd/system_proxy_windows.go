@@ -4,9 +4,10 @@ package boxdd
 
 // niko: the owner's own WinINet proxy settings, kept while the daemon's system proxy is on and put back exactly when
 // it goes off. Upstream's Disable clears the proxy (direct and automatic detection), which leaves the server it set in
-// the registry and loses a proxy the user had (a corporate one). The values are kept in a file of the owner's beside
-// the start options, so a crash while the proxy is on does not lose them: the next start finds them, and they are put
-// back when its proxy goes off. Where none were kept, upstream's clear is all there is.
+// the registry and loses a proxy the user had (a corporate one). They are read and written in the owner's hive
+// (HKEY_USERS\<SID>), and kept in a file of the owner's beside the start options, so a crash while the proxy is on does
+// not lose them: kept settings found while the proxy is not on are put back as the owner is set, and before it goes
+// on again. Where none were kept, upstream's clear is all there is.
 
 import (
 	"encoding/binary"
@@ -52,18 +53,35 @@ type savedProxyValue struct {
 	Data []byte `json:"data,omitempty"`
 }
 
-// readProxyValues and writeProxyValues read and put back the current user's values (the owner's, impersonated); a
-// test's own.
+// readProxyValues and writeProxyValues read and put back an owner's values; notifyProxyChanged tells WinINet, as the
+// owner; a test's own.
 var (
-	readProxyValues  = readRegistryProxyValues
-	writeProxyValues = writeRegistryProxyValues
+	readProxyValues    = readRegistryProxyValues
+	writeProxyValues   = writeRegistryProxyValues
+	notifyProxyChanged = notifyWinINet
 )
 
-func readRegistryProxyValues() (*savedSystemProxy, error) {
+// userKeyPath is where a key of the owner's is: their hive, HKEY_USERS\<their SID>, as HKEY_CURRENT_USER is the
+// process's own (SYSTEM's for the service) and does not follow an impersonation; in development mode the daemon runs
+// as its user, and the owner has no SID there ("local").
+func userKeyPath(ownerUserID string, path string) (registry.Key, string) {
+	if listenAddress != "" {
+		return registry.CURRENT_USER, path
+	}
+	return registry.USERS, ownerUserID + `\` + path
+}
+
+// openUserKey opens a key of the owner's (userKeyPath); a test's own.
+var openUserKey = func(ownerUserID string, path string, access uint32) (registry.Key, error) {
+	root, full := userKeyPath(ownerUserID, path)
+	return registry.OpenKey(root, full, access)
+}
+
+func readRegistryProxyValues(ownerUserID string) (*savedSystemProxy, error) {
 	saved := &savedSystemProxy{}
 	for _, value := range savedProxyValues {
 		entry := savedProxyValue{Key: value.key, Name: value.name}
-		key, err := registry.OpenKey(registry.CURRENT_USER, value.key, registry.QUERY_VALUE)
+		key, err := openUserKey(ownerUserID, value.key, registry.QUERY_VALUE)
 		if err == nil {
 			entry.Data, entry.Type, err = rawValue(key, value.name)
 			key.Close()
@@ -89,9 +107,9 @@ func rawValue(key registry.Key, name string) ([]byte, uint32, error) {
 	return data[:n], valueType, nil
 }
 
-func writeRegistryProxyValues(saved *savedSystemProxy) error {
+func writeRegistryProxyValues(ownerUserID string, saved *savedSystemProxy) error {
 	for _, value := range saved.Values {
-		key, err := registry.OpenKey(registry.CURRENT_USER, value.Key, registry.SET_VALUE)
+		key, err := openUserKey(ownerUserID, value.Key, registry.SET_VALUE)
 		if err != nil {
 			if value.Type == 0 && errors.Is(err, registry.ErrNotExist) {
 				continue
@@ -104,7 +122,11 @@ func writeRegistryProxyValues(saved *savedSystemProxy) error {
 			return E.Cause(err, "put back ", value.Name)
 		}
 	}
-	// WinINet reads them again
+	return nil
+}
+
+// notifyWinINet has WinINet read the settings again (run as the owner).
+func notifyWinINet() error {
 	for _, option := range []uintptr{internetOptionSettingsChanged, internetOptionRefresh} {
 		if result, _, err := procInternetSetOption.Call(0, option, 0, 0); result != 1 {
 			return os.NewSyscallError("InternetSetOption", err)
@@ -177,61 +199,76 @@ type systemProxySetter interface {
 	Disable() error
 }
 
-// enableSystemProxyLocked turns the daemon's system proxy on for the owner, their own settings kept first, as the user
-// it impersonates; the file is written by the daemon itself. Those kept already (by a run that crashed with its proxy
-// on) stay: the daemon's own are in the registry now.
+// enableSystemProxyLocked turns the daemon's system proxy on for the owner, their own settings kept first. Settings
+// kept already are stale (a crash, a failed restore): put back first, so what is kept is the user's as they are now.
 func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
-	if p.ownerUserID != "" {
-		if _, err := os.Stat(savedSystemProxyPath(p.ownerUserID)); os.IsNotExist(err) {
-			var saved *savedSystemProxy
-			err = p.runUserOperationLocked(func() (readError error) {
-				saved, readError = readProxyValues()
-				return readError
-			})
-			if err != nil {
-				return E.Cause(err, "keep the owner's proxy settings")
-			}
-			if saved != nil {
-				err = writeSavedSystemProxy(p.ownerUserID, saved)
-				if err != nil {
-					return E.Cause(err, "keep the owner's proxy settings")
-				}
-			}
+	if p.ownerUserID != "" && (listenAddress != "" || p.token != 0) {
+		err := p.restoreKeptProxyLocked()
+		if err != nil {
+			return err
+		}
+		saved, err := readProxyValues(p.ownerUserID)
+		if err != nil {
+			return E.Cause(err, "keep the owner's proxy settings")
+		}
+		err = writeSavedSystemProxy(p.ownerUserID, saved)
+		if err != nil {
+			return E.Cause(err, "keep the owner's proxy settings")
 		}
 	}
 	return p.runUserOperationLocked(p.systemProxy.Enable)
 }
 
 // disableSystemProxyLocked turns it off (upstream's clear) and puts the owner's own settings back where they were
-// kept, then forgets them; none kept: the clear stays.
+// kept: also where it is not on (an Enable that failed, a restore to try again).
 func (p *windowsPlatformInterface) disableSystemProxyLocked() error {
-	if p.systemProxy == nil || !p.systemProxy.IsEnabled() {
+	if p.systemProxy != nil && p.systemProxy.IsEnabled() {
+		err := p.runUserOperationLocked(p.systemProxy.Disable)
+		if err != nil {
+			return err
+		}
+	}
+	return p.restoreKeptProxyLocked()
+}
+
+// restoreKeptProxyLocked writes the owner's kept settings back and forgets them; none kept: nothing. One that cannot
+// be written stays kept, for the next try.
+func (p *windowsPlatformInterface) restoreKeptProxyLocked() error {
+	if p.ownerUserID == "" {
 		return nil
 	}
-	var saved *savedSystemProxy
-	if p.ownerUserID != "" {
-		var err error
-		saved, err = loadSavedSystemProxy(p.ownerUserID)
-		if err != nil && !os.IsNotExist(err) {
-			return E.Cause(err, "read the owner's proxy settings")
-		}
+	saved, err := loadSavedSystemProxy(p.ownerUserID)
+	if os.IsNotExist(err) {
+		return nil
 	}
-	restored := false
-	err := p.runUserOperationLocked(func() error {
-		disableError := p.systemProxy.Disable()
-		if disableError != nil || saved == nil {
-			return disableError
-		}
-		restored = true
-		return writeProxyValues(saved)
-	})
 	if err != nil {
-		return err
+		return E.Cause(err, "read the owner's proxy settings")
 	}
-	if restored {
-		return os.Remove(savedSystemProxyPath(p.ownerUserID))
+	err = writeProxyValues(p.ownerUserID, saved)
+	if err != nil {
+		return E.Cause(err, "put back the owner's proxy settings")
+	}
+	err = p.runUserOperationLocked(notifyProxyChanged)
+	if err != nil {
+		return E.Cause(err, "put back the owner's proxy settings")
+	}
+	err = os.Remove(savedSystemProxyPath(p.ownerUserID))
+	if err != nil && !os.IsNotExist(err) && p.daemon != nil {
+		p.daemon.logger.Warn("forget the owner's proxy settings: ", err)
 	}
 	return nil
+}
+
+// recoverKeptProxyLocked: an owner's settings kept while the daemon's proxy is not on are stale (a crash, a failed
+// restore): put back as the owner is set; told, not failed, and tried again later.
+func (p *windowsPlatformInterface) recoverKeptProxyLocked() {
+	if p.systemProxy != nil && p.systemProxy.IsEnabled() {
+		return
+	}
+	err := p.restoreKeptProxyLocked()
+	if err != nil && p.daemon != nil {
+		p.daemon.logger.Warn(err)
+	}
 }
 
 func writeSavedSystemProxy(ownerUserID string, saved *savedSystemProxy) error {
