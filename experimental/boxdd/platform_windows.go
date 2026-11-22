@@ -41,8 +41,7 @@ type windowsPlatformInterface struct {
 	systemProxy        systemProxySetter
 	systemProxyEnabled bool
 	// niko: the owner's kept proxy settings could not be put back when the proxy went on (system_proxy_windows.go)
-	keptUnrestorable  bool
-	systemProxyServer string
+	keptUnrestorable bool
 }
 
 func newPlatformInterface(daemonInstance *Daemon) (daemonPlatform, error) {
@@ -96,8 +95,6 @@ func (p *windowsPlatformInterface) ProcessPlatformOptions(options option.TunPlat
 		return E.New("only one enabled `tun.platform.http_proxy` is supported")
 	}
 	p.systemProxy = systemProxy
-	// niko: the server as WinINet will have it, told apart from the owner's own (system_proxy_windows.go)
-	p.systemProxyServer = "http://" + M.ParseSocksaddrHostPort(httpProxyOptions.Server, httpProxyOptions.ServerPort).String()
 	err = p.applySystemProxyLocked()
 	if err != nil {
 		rollbackError := p.disableSystemProxyLocked()

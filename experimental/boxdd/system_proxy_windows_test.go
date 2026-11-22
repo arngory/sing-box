@@ -75,14 +75,14 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	})
 	var calls []string
 	// the owner's registry: their own proxy (corp), until the daemon's (ours) is on
-	const corp, ours = "http://corp.example:3128", "http://127.0.0.1:2080"
-	label := map[string]string{corp: "corp", ours: "ours"}
+	const corp, ours, moved = "http://corp.example:3128", "http://127.0.0.1:2080", "http://127.0.0.1:2081"
+	label := map[string]string{corp: "corp", ours: "ours", moved: "moved"}
 	current := corp
 	failWrite := false
 	readProxyValues = func() (*savedSystemProxy, error) {
 		calls = append(calls, "read "+label[current])
 		var enabled uint32
-		if current == ours {
+		if current != corp {
 			enabled = 1
 		}
 		return &savedSystemProxy{Values: []savedProxyValue{
@@ -116,8 +116,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	}
 	platform := func(setter *fakeSetter) *windowsPlatformInterface {
 		setter.calls = &calls
-		return &windowsPlatformInterface{systemProxyEnabled: true, ownerUserID: "1000", systemProxy: setter,
-			systemProxyServer: ours}
+		return &windowsPlatformInterface{systemProxyEnabled: true, ownerUserID: "1000", systemProxy: setter}
 	}
 
 	p := platform(&fakeSetter{})
@@ -217,7 +216,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if err := broken.applySystemProxyLocked(); err != nil {
 		t.Fatal(err)
 	}
-	expect("on with a broken file", "enable")
+	expect("on with a broken file", "read ours", "enable")
 	if _, err := os.Stat(savedSystemProxyPath("1000") + ".bad"); err != nil {
 		t.Fatalf("not set aside: %v", err)
 	}
@@ -228,8 +227,32 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatalf("the stop after a broken file: %v", err)
 	}
 	expect("the stop after a broken file", "clear")
+	if err := os.Remove(savedSystemProxyPath("1000") + ".bad"); err != nil {
+		t.Fatal(err)
+	}
+
+	// the same with the owner's own proxy in the registry (they set it again by hand): set aside, theirs kept anew and
+	// put back
+	if err := os.WriteFile(savedSystemProxyPath("1000"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current = corp
+	fixed := platform(&fakeSetter{})
+	if err := fixed.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("on with a broken file and theirs", "read corp", "enable")
+	if !kept() {
+		t.Fatal("theirs not kept anew")
+	}
+	current = ours
+	if err := fixed.ResetPlatformOptions(); err != nil {
+		t.Fatal(err)
+	}
+	expect("the stop after it", "clear", "write corp", "notify")
 
 	// none kept and the daemon's own proxy in the registry (a crash's, the file lost): not kept as the owner's
+	current = ours
 	lost := platform(&fakeSetter{})
 	if err := lost.applySystemProxyLocked(); err != nil {
 		t.Fatal(err)
@@ -242,6 +265,22 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect("the stop over the daemon's own", "clear")
+	current = corp
+
+	// the daemon's own proxy on another port (the local proxy's changed since a crash): not kept either
+	current = moved
+	movedPort := platform(&fakeSetter{})
+	if err := movedPort.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("on over a crash's on another port", "read moved", "enable")
+	if kept() {
+		t.Fatal("a daemon's proxy on another port kept as the owner's")
+	}
+	if err := movedPort.ResetPlatformOptions(); err != nil {
+		t.Fatal(err)
+	}
+	expect("its stop", "clear")
 	current = corp
 
 	// a kept file the file system will not give (a lock, a denial; here a directory): an error, and it stays
@@ -284,4 +323,28 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect("none kept", "clear")
+}
+
+// A daemon's own proxy on, as a crash leaves it: on, and http://<loopback>:<port>, whatever the port; not the owner's
+// own, off or elsewhere.
+func TestNekoDaemonsProxy(t *testing.T) {
+	values := func(enabled uint32, server string) *savedSystemProxy {
+		return &savedSystemProxy{Values: []savedProxyValue{
+			{Key: internetSettingsKey, Name: "ProxyEnable", Type: registry.DWORD, Data: binary.LittleEndian.AppendUint32(nil, enabled)},
+			{Key: internetSettingsKey, Name: "ProxyServer", Type: registry.SZ, Data: utf16Bytes(server)},
+		}}
+	}
+	for server, want := range map[string]bool{
+		"http://127.0.0.1:2080": true, "http://127.0.0.1:2081": true, "http://127.1.2.3:8080": true,
+		"http://[::1]:2080": true, "http://localhost:2080": true,
+		"http://corp.example:3128": false, "http://10.0.0.1:3128": false, "127.0.0.1:2080": false,
+		"http=127.0.0.1:2080;https=127.0.0.1:2080": false, "http://127.0.0.1": false,
+	} {
+		if got := values(1, server).isDaemons(); got != want {
+			t.Errorf("%s on: %v, want %v", server, got, want)
+		}
+	}
+	if values(0, "http://127.0.0.1:2080").isDaemons() {
+		t.Error("off taken as the daemon's")
+	}
 }

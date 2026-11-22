@@ -13,8 +13,11 @@ package boxdd
 import (
 	"encoding/binary"
 	"errors"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unicode/utf16"
 
@@ -184,8 +187,11 @@ func loadSavedSystemProxy(ownerUserID string) (*savedSystemProxy, error) {
 	return &saved, nil
 }
 
-// isDaemons: the values are the daemon's own proxy on, as a crash leaves them, not the owner's settings.
-func (s *savedSystemProxy) isDaemons(server string) bool {
+// isDaemons: the values are a daemon's own proxy on, as a crash leaves them, not the owner's settings: on, and the
+// server http://<loopback>:<port>, whatever its port (the local proxy's may have changed since the crash). A
+// corporate proxy hardly has that form. It takes WinINet to write ProxyServer to the registry as it was given
+// ("http://" and the address, as upstream's Enable gives it).
+func (s *savedSystemProxy) isDaemons() bool {
 	enabled, current := false, ""
 	for _, value := range s.Values {
 		switch {
@@ -195,7 +201,22 @@ func (s *savedSystemProxy) isDaemons(server string) bool {
 			current = utf16String(value.Data)
 		}
 	}
-	return server != "" && enabled && current == server
+	if !enabled {
+		return false
+	}
+	address, found := strings.CutPrefix(current, "http://")
+	if !found {
+		return false
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 // systemProxySetter is the system proxy as the platform sets it (settings.WindowsSystemProxy); a test's own.
@@ -217,11 +238,12 @@ func (p *windowsPlatformInterface) canRunAsOwnerLocked() bool {
 func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
 	if p.canRunAsOwnerLocked() {
 		err := p.restoreKeptProxyLocked()
-		switch {
-		case errors.Is(err, errKeptSetAside):
-			// what the registry has may be the daemon's own proxy of a crash: none kept, the stop clears alone
-			p.keptUnrestorable = false
+		if errors.Is(err, errKeptSetAside) {
+			// set aside: the registry's kept anew as below, unless it is a daemon's own proxy of a crash
 			p.warn(err)
+			err = nil
+		}
+		switch {
 		case err != nil:
 			// the kept ones cannot be put back: not this Enable's, so their failure does not stop the next stop
 			p.keptUnrestorable = true
@@ -234,7 +256,7 @@ func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
 				return readError
 			})
 			// the daemon's own proxy (a crash's, none kept) is not the owner's: not kept
-			if err == nil && saved != nil && !saved.isDaemons(p.systemProxyServer) {
+			if err == nil && saved != nil && !saved.isDaemons() {
 				err = writeSavedSystemProxy(p.ownerUserID, saved)
 			}
 			if err != nil {
