@@ -167,6 +167,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		ChromeParrot: !options.DisableChromeParrot,
 		RealmOptions: realmOptions,
 		AwaitDial:    options.AwaitDial,
+		// neko: per-connection traffic and stalls in the log
+		LogConnections: options.LogConnections,
 	})
 	if err != nil {
 		return nil, err

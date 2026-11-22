@@ -227,6 +227,9 @@ type Hysteria2OutboundOptions struct {
 	// connect). Only for a server that answers right after its dial: sing-box's, the Hysteria 2 server, niko-server
 	// from v0.14.1 (niko-ack=1 in raycontrol's links); niko-server before answered with the destination's first bytes
 	AwaitDial bool `json:"await_dial,omitempty"`
+	// neko: a sampler on each QUIC connection logs every ten seconds what went each way, and its stalls: packets
+	// out and none in, or both ways quiet with streams open. A debug switch: a timer each second a connection
+	LogConnections bool `json:"log_connections,omitempty"`
 }
 
 type HysteriaRealmUser struct {

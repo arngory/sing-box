@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -61,6 +62,8 @@ type ClientOptions struct {
 	// answers with the destination's first bytes (niko-server before) would wait for ever on a destination that
 	// speaks second.
 	AwaitDial bool
+	// LogConnections (neko): a sampler on each connection logs its traffic and its stalls (diag_neko.go)
+	LogConnections bool
 }
 
 type Client struct {
@@ -86,6 +89,7 @@ type Client struct {
 	realmOptions       *realm.Options
 	controlClient      *realm.ControlClient
 	awaitDial          bool
+	logConnections     bool
 
 	connAccess sync.Mutex
 	conn       *clientQUICConnection
@@ -178,6 +182,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		realmOptions:       options.RealmOptions,
 		controlClient:      controlClient,
 		awaitDial:          options.AwaitDial,
+		logConnections:     options.LogConnections,
 	}, nil
 }
 
@@ -608,9 +613,12 @@ func (c *Client) authenticateAndWrap(ctx context.Context, rawConn io.Closer, cre
 	if actualTx == 0 || actualTx > c.sendBPS {
 		actualTx = c.sendBPS
 	}
+	var cc string
 	if !authResponse.RxAuto && actualTx > 0 {
+		cc = fmt.Sprint("brutal at ", actualTx*8/1000, " kbit/s (asked ", c.sendBPS*8/1000, ", node takes ", authResponse.Rx*8/1000, ")")
 		quicConn.SetCongestionControl(hyCC.NewBrutalSender(actualTx, quicConn.InitialPacketSize(), c.brutalDebug, c.logger))
 	} else {
+		cc = fmt.Sprint("bbr ", c.bbrProfile, " (node rx auto ", authResponse.RxAuto, ")")
 		quicConn.SetCongestionControl(congestion_meta2.NewBbrSenderWithProfile(
 			quicConn.InitialPacketSize(),
 			c.bbrProfile,
@@ -625,12 +633,14 @@ func (c *Client) authenticateAndWrap(ctx context.Context, rawConn io.Closer, cre
 		closeIdle:   &c.closeIdle,
 	}
 	conn.deadPath.logger = c.logger
+	c.diagOpen(conn, rawConn, cc)
 	if !c.udpDisabled {
 		go c.loopMessages(conn)
 	}
 	go func() {
 		<-quicConn.Context().Done()
 		conn.closeWithError(context.Cause(quicConn.Context()))
+		c.diagClose(conn)
 	}()
 	return conn, nil
 }
@@ -754,6 +764,7 @@ type clientQUICConnection struct {
 	streams      int
 	closeIdle    *atomic.Bool
 	deadPath     deadPathWatch
+	diag         *connDiag
 }
 
 func (c *clientQUICConnection) active() bool {
@@ -779,6 +790,9 @@ func (c *clientQUICConnection) acquireStream() bool {
 	default:
 	}
 	c.streams++
+	if c.diag != nil {
+		c.diag.streams.Add(1)
+	}
 	return true
 }
 
