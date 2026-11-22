@@ -122,3 +122,31 @@ func TestNoSocket(t *testing.T) {
 	require.Equal(t, hello[5:], append(payloads[0], payloads[1]...))
 	require.True(t, conn.WriterReplaceable())
 }
+
+// failingConn fails every write.
+type failingConn struct {
+	net.Conn
+	written int
+}
+
+func (c *failingConn) Write(b []byte) (int, error) {
+	c.written += len(b)
+	return 0, io.ErrClosedPipe
+}
+
+// TestHeldHelloFlushFailureSticks: when the timer cannot send a held part of a ClientHello, the stream has a hole;
+// every later write fails with that error instead of reaching the server after it.
+func TestHeldHelloFlushFailureSticks(t *testing.T) {
+	client, _ := loopbackPair(t)
+	hello := chromeHello(t, "www.youtube.com")
+	conn := &failingConn{Conn: client}
+	desync := tcpdesync.NewConn(context.Background(), conn, mustStrategy(t, option.TCPDesyncOptions{TLSRec: []string{"sni+1"}}), nil)
+	n, err := desync.Write(hello[:100])
+	require.NoError(t, err)
+	require.Equal(t, 100, n)
+	time.Sleep(tcpdesync.BufferTimeout + 100*time.Millisecond)
+	_, err = desync.Write(hello[100:])
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+	_, err = desync.Write([]byte("later"))
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+}

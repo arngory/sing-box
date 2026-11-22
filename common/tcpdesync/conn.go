@@ -50,7 +50,9 @@ type Conn struct {
 	pending []byte
 	need    int
 	timer   *time.Timer
-	err     error
+	// a held ClientHello the timer could not send: the stream has a hole, every later write fails with err
+	err    error
+	failed atomic.Bool
 }
 
 // NewConn wraps conn. Without a TCP socket under it (SocketOf) only tlsrec applies.
@@ -70,6 +72,9 @@ func NewConn(ctx context.Context, conn net.Conn, strategy *Strategy, contextLogg
 
 func (c *Conn) Write(b []byte) (int, error) {
 	if c.state.Load() == stateDone {
+		if c.failed.Load() {
+			return 0, c.err
+		}
 		return c.Conn.Write(b)
 	}
 	c.access.Lock()
@@ -125,6 +130,7 @@ func (c *Conn) bufferTimeout() {
 	c.logger.DebugContext(c.ctx, "tcp_desync: no whole ClientHello record in ", BufferTimeout, " (", len(data), " of ", c.need, " bytes), sent as is")
 	if _, err := c.Conn.Write(data); err != nil {
 		c.err = err
+		c.failed.Store(true)
 	}
 	c.state.Store(stateDone)
 }

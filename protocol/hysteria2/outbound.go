@@ -51,6 +51,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
+	// neko: tls.desync cuts a TCP first write; a QUIC handshake has none (udp_desync is its own)
+	if options.TLS.Desync != nil {
+		return nil, E.New("tls.desync is not supported on hysteria2 outbound: use udp_desync")
+	}
 	tlsServerAddress, tlsOptions, err := outboundTLSOptions(options)
 	if err != nil {
 		return nil, err

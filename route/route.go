@@ -686,15 +686,20 @@ match:
 			if routeOptions.UDPTimeout > 0 {
 				metadata.UDPTimeout = routeOptions.UDPTimeout
 			}
+			// neko: tcp_desync and tls_fragment cut the same first write; the last rule that sets either wins
 			if routeOptions.TLSFragment {
 				metadata.TLSFragment = true
 				metadata.TLSFragmentFallbackDelay = routeOptions.TLSFragmentFallbackDelay
+				metadata.TCPDesync = nil
 			}
 			if routeOptions.TLSRecordFragment {
 				metadata.TLSRecordFragment = true
+				metadata.TCPDesync = nil
 			}
 			if routeOptions.TCPDesync != nil {
 				metadata.TCPDesync = routeOptions.TCPDesync
+				metadata.TLSFragment = false
+				metadata.TLSRecordFragment = false
 			}
 			if routeOptions.TLSSpoof != "" {
 				metadata.TLSSpoof = routeOptions.TLSSpoof
