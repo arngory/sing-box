@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 
 	"google.golang.org/grpc"
@@ -60,9 +61,28 @@ type Host interface {
 	Logger() log.ContextLogger
 	// StartService starts or reloads the core with a config for the caller of ctx, as DesktopService.StartService
 	// does with no options: the caller becomes the daemon's owner, the stored start options stay, and the config is
-	// kept for the daemon's next start. PermissionDenied when another user owns the daemon; the core's own error for a
-	// config it refuses. It takes the lifecycle lock: a method that calls it is not PolicyOwner's.
-	StartService(ctx context.Context, configContent string) error
+	// kept for the daemon's next start. With a systemProxy, that is the owner's system proxy while the core runs, as a
+	// TUN's platform.http_proxy is (SystemProxy). PermissionDenied when another user owns the daemon; the core's own
+	// error for a config it refuses. It takes the lifecycle lock: a method that calls it is not PolicyOwner's.
+	StartService(ctx context.Context, configContent string, systemProxy *SystemProxy) error
+}
+
+// SystemProxy is a system proxy a core's start asks for, as a TUN's platform.http_proxy (an HTTP proxy of the
+// config's, often its mixed inbound): set by the daemon for its owner, not for the user the daemon runs as (SYSTEM,
+// root), as the inbound's own set_system_proxy would be. Kept with the start options, it is set again when the daemon
+// starts the core again; ManagedService.SetSystemProxyEnabled turns it off and on, and a stop takes it away.
+type SystemProxy struct {
+	Server       string   `json:"server"`
+	Port         uint16   `json:"port"`
+	BypassDomain []string `json:"bypass_domain,omitempty"`
+}
+
+func (p *SystemProxy) platformOptions() option.TunPlatformOptions {
+	return option.TunPlatformOptions{HTTPProxy: &option.HTTPProxyOptions{
+		Enabled:       true,
+		ServerOptions: option.ServerOptions{Server: p.Server, ServerPort: p.Port},
+		BypassDomain:  p.BypassDomain,
+	}}
 }
 
 // the services Main was given; newDaemon registers them
@@ -80,12 +100,12 @@ func (d *Daemon) Logger() log.ContextLogger {
 	return d.logger
 }
 
-func (d *Daemon) StartService(ctx context.Context, configContent string) error {
+func (d *Daemon) StartService(ctx context.Context, configContent string, systemProxy *SystemProxy) error {
 	identity, err := peerIdentityFromContext(ctx)
 	if err != nil {
 		return status.Error(codes.Unauthenticated, err.Error())
 	}
-	return d.startServiceFor(ctx, identity, configContent, nil)
+	return d.startServiceFor(ctx, identity, configContent, nil, systemProxy)
 }
 
 // registerServices makes and registers the added services, refusing one whose name is taken or whose Methods name a

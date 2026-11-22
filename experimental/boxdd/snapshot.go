@@ -24,6 +24,8 @@ type startOptions struct {
 	OOMMemoryLimit     int64 `json:"oom_memory_limit"`
 	PowerReportEnabled bool  `json:"power_report_enabled,omitempty"`
 	SystemProxyEnabled *bool `json:"system_proxy_enabled,omitempty"`
+	// niko: the system proxy of an added service's start (Host.StartService)
+	SystemProxy *SystemProxy `json:"system_proxy,omitempty"`
 }
 
 type ownerState struct {

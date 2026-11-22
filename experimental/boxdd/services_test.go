@@ -246,7 +246,7 @@ func TestNekoHostStartService(t *testing.T) {
 	if err := saveStartOptions("1000", stored); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.StartService(verified("1000"), config); err != nil {
+	if err := d.StartService(verified("1000"), config, nil); err != nil {
 		t.Fatal(err)
 	}
 	if d.startedService.Instance() == nil {
@@ -264,7 +264,7 @@ func TestNekoHostStartService(t *testing.T) {
 
 	// another user: refused, the owner's core as it was
 	running := d.startedService.Instance()
-	if err := d.StartService(verified("1001"), config); status.Code(err) != codes.PermissionDenied {
+	if err := d.StartService(verified("1001"), config, nil); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("another user: %v", err)
 	}
 	if d.startedService.Instance() != running {
@@ -272,7 +272,7 @@ func TestNekoHostStartService(t *testing.T) {
 	}
 
 	// a config the core refuses: its error, nothing runs, not to be started again with the daemon
-	if err := d.StartService(verified("1000"), `{"inbounds": [{"type": "no-such-inbound"}]}`); err == nil {
+	if err := d.StartService(verified("1000"), `{"inbounds": [{"type": "no-such-inbound"}]}`, nil); err == nil {
 		t.Fatal("a refused config started")
 	}
 	if d.startedService.Instance() != nil {

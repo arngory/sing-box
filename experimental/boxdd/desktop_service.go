@@ -58,7 +58,7 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 		return nil, err
 	}
 	// niko: the start is the daemon's, shared with Host.StartService of an added service (services.go)
-	err = s.daemon.startServiceFor(ctx, identity, request.ConfigContent, request.Options)
+	err = s.daemon.startServiceFor(ctx, identity, request.ConfigContent, request.Options, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -67,8 +67,8 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 
 // startServiceFor starts or reloads the core with a config for a caller, who becomes the daemon's owner; refused when
 // another user owns it. The options given replace the stored ones; nil keeps them. The config and the options are kept
-// for the daemon's next start.
-func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, configContent string, options *StartOptions) error {
+// for the daemon's next start, with the system proxy asked (none: none, services.go's SystemProxy).
+func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, configContent string, options *StartOptions, systemProxy *SystemProxy) error {
 	d.lifecycleAccess.Lock()
 	defer d.lifecycleAccess.Unlock()
 	if d.closed {
@@ -95,6 +95,7 @@ func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, con
 	}
 	mergedOptions := currentOptions
 	mergedOptions.WasRunning = true
+	mergedOptions.SystemProxy = systemProxy
 	if options != nil {
 		mergedOptions.OOMKillerEnabled = options.OomKillerEnabled
 		mergedOptions.OOMKillerDisabled = options.OomKillerDisabled

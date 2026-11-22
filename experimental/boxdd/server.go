@@ -250,6 +250,13 @@ func (d *Daemon) startServiceLocked(ctx context.Context, ownerUserID string, con
 	if err != nil && d.platform != nil {
 		return E.Errors(err, d.platform.ResetPlatformOptions())
 	}
+	// niko: the system proxy the start asked for, the owner's as a TUN's platform.http_proxy (services.go)
+	if err == nil && options.SystemProxy != nil && d.platform != nil {
+		err = d.platform.ProcessPlatformOptions(options.SystemProxy.platformOptions())
+		if err != nil {
+			return E.Errors(E.Cause(err, "set system proxy"), d.platform.ResetPlatformOptions())
+		}
+	}
 	return err
 }
 
