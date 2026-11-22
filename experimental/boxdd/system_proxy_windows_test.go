@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 )
 
 // sessionChange: the owner's new session goes to the platform, which sets the proxy for it (replaceOwnerTokenLocked),
@@ -65,18 +64,18 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	// the owner's registry: their own proxy, until the daemon's is on
 	current := "corp"
 	failWrite := false
-	readProxyValues = func(owner string) (*savedSystemProxy, error) {
+	readProxyValues = func() (*savedSystemProxy, error) {
 		calls = append(calls, "read "+current)
 		return &savedSystemProxy{Values: []savedProxyValue{{Key: internetSettingsKey, Name: "ProxyServer",
 			Type: 1, Data: []byte(current)}}}, nil
 	}
-	writeProxyValues = func(owner string, saved *savedSystemProxy) error {
+	writeProxyValues = func(saved *savedSystemProxy) error {
 		if failWrite {
 			calls = append(calls, "write failed")
 			return os.ErrPermission
 		}
 		current = string(saved.Values[0].Data)
-		calls = append(calls, "write "+current+" of "+owner)
+		calls = append(calls, "write "+current)
 		return nil
 	}
 	notifyProxyChanged = func() error {
@@ -111,7 +110,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if err := p.SetSystemProxyEnabled(false); err != nil {
 		t.Fatal(err)
 	}
-	expect("off", "clear", "write corp of 1000", "notify")
+	expect("off", "clear", "write corp", "notify")
 	if kept() {
 		t.Fatal("still kept after it was put back")
 	}
@@ -127,7 +126,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if err := again.PrepareOwner(peerIdentity{UserID: "1000"}); err != nil {
 		t.Fatal(err)
 	}
-	expect("the owner after a crash", "write corp of 1000", "notify")
+	expect("the owner after a crash", "write corp", "notify")
 	if kept() {
 		t.Fatal("a crash's still kept")
 	}
@@ -143,10 +142,10 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if err := restarted.applySystemProxyLocked(); err != nil {
 		t.Fatal(err)
 	}
-	expect("on after a crash", "write corp of 1000", "notify", "read corp", "enable")
+	expect("on after a crash", "write corp", "notify", "read corp", "enable")
 	current = "ours"
 
-	// a restore that fails: the clear, the settings kept, tried again at the next stop though the proxy is off
+	// a restore that fails after this call turned the proxy off: said, the settings kept
 	failWrite = true
 	if err := restarted.ResetPlatformOptions(); err == nil {
 		t.Fatal("a failed restore said nothing")
@@ -155,11 +154,53 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if !kept() {
 		t.Fatal("not kept for another try")
 	}
-	failWrite = false
+	// stale ones that cannot be put back (the proxy was not on here): told, not failed, kept
 	if err := restarted.ResetPlatformOptions(); err != nil {
 		t.Fatal(err)
 	}
-	expect("tried again", "write corp of 1000", "notify")
+	expect("a stale one failed", "write failed")
+	// the next Enable with the restore failing still: the old ones stay kept, the proxy goes on
+	stale := platform(&fakeSetter{})
+	if err := stale.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("on with a failed restore", "write failed", "enable")
+	if !kept() {
+		t.Fatal("the old ones not kept")
+	}
+	// its stop: the clear, the restore failing again is told, not failed (the core stops), the old ones still kept
+	if err := stale.ResetPlatformOptions(); err != nil {
+		t.Fatalf("the stop failed on old kept settings: %v", err)
+	}
+	expect("the stop with a failed restore", "clear", "write failed")
+	if !kept() {
+		t.Fatal("the old ones not kept")
+	}
+	failWrite = false
+	if err := stale.ResetPlatformOptions(); err != nil {
+		t.Fatal(err)
+	}
+	expect("tried again", "write corp", "notify")
+	if kept() {
+		t.Fatal("still kept after it was put back")
+	}
+
+	// a kept file that cannot be read: set aside as .bad as the proxy goes on, kept anew; one stop puts them back
+	if err := os.WriteFile(savedSystemProxyPath("1000"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := platform(&fakeSetter{})
+	if err := broken.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("on with a broken file", "read corp", "enable")
+	if _, err := os.Stat(savedSystemProxyPath("1000") + ".bad"); err != nil {
+		t.Fatalf("not set aside: %v", err)
+	}
+	if err := broken.ResetPlatformOptions(); err != nil {
+		t.Fatalf("the stop after a broken file: %v", err)
+	}
+	expect("the stop after a broken file", "clear", "write corp", "notify")
 
 	// an Enable that fails: rolled back, the settings put back and not kept
 	failing := platform(&fakeSetter{failEnable: true})
@@ -169,7 +210,7 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if err := failing.disableSystemProxyLocked(); err != nil {
 		t.Fatal(err)
 	}
-	expect("a failed Enable", "read corp", "enable", "write corp of 1000", "notify")
+	expect("a failed Enable", "read corp", "enable", "write corp", "notify")
 	if kept() {
 		t.Fatal("kept after a failed Enable")
 	}
@@ -180,37 +221,4 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect("none kept", "clear")
-}
-
-// The owner's values are read and written in their own hive (HKEY_USERS\<SID>), not HKEY_CURRENT_USER, which is the
-// service's (SYSTEM's) and does not follow an impersonation; in development mode the process's own.
-func TestNekoOwnerProxyHive(t *testing.T) {
-	previousListen, previousOpen := listenAddress, openUserKey
-	t.Cleanup(func() { listenAddress, openUserKey = previousListen, previousOpen })
-	const sid = "S-1-5-21-1000-2000-3000-1001"
-	listenAddress = ""
-	if root, path := userKeyPath(sid, internetSettingsKey); root != registry.USERS || path != sid+`\`+internetSettingsKey {
-		t.Fatalf("the service's: %v %q", root, path)
-	}
-	listenAddress = "127.0.0.1:1"
-	if root, path := userKeyPath("local", internetSettingsKey); root != registry.CURRENT_USER || path != internetSettingsKey {
-		t.Fatalf("development mode's: %v %q", root, path)
-	}
-	// the values are read for the owner asked, each of its keys
-	listenAddress = ""
-	var opened []string
-	openUserKey = func(owner string, path string, access uint32) (registry.Key, error) {
-		root, full := userKeyPath(owner, path)
-		if root != registry.USERS {
-			t.Errorf("%q opened outside HKEY_USERS", full)
-		}
-		opened = append(opened, full)
-		return 0, registry.ErrNotExist
-	}
-	if _, err := readRegistryProxyValues(sid); err != nil {
-		t.Fatal(err)
-	}
-	if len(opened) != len(savedProxyValues) || opened[4] != sid+`\`+internetConnectionsKey {
-		t.Fatalf("opened %q", opened)
-	}
 }

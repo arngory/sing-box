@@ -40,6 +40,8 @@ type windowsPlatformInterface struct {
 	token              windows.Token
 	systemProxy        systemProxySetter
 	systemProxyEnabled bool
+	// niko: the owner's kept proxy settings could not be put back when the proxy went on (system_proxy_windows.go)
+	keptUnrestorable bool
 }
 
 func newPlatformInterface(daemonInstance *Daemon) (daemonPlatform, error) {
