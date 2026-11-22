@@ -75,8 +75,9 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	})
 	var calls []string
 	// the owner's registry: their own proxy (corp), until the daemon's (ours) is on
-	const corp, ours, moved = "http://corp.example:3128", "http://127.0.0.1:2080", "http://127.0.0.1:2081"
-	label := map[string]string{corp: "corp", ours: "ours", moved: "moved"}
+	const corp, ours, moved, foreign = "http://corp.example:3128", "http://127.0.0.1:2080", "http://127.0.0.1:2081",
+		"http://127.0.0.1:3128"
+	label := map[string]string{corp: "corp", ours: "ours", moved: "moved", foreign: "foreign"}
 	current := corp
 	failWrite := false
 	readProxyValues = func() (*savedSystemProxy, error) {
@@ -116,7 +117,8 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	}
 	platform := func(setter *fakeSetter) *windowsPlatformInterface {
 		setter.calls = &calls
-		return &windowsPlatformInterface{systemProxyEnabled: true, ownerUserID: "1000", systemProxy: setter}
+		return &windowsPlatformInterface{systemProxyEnabled: true, ownerUserID: "1000", systemProxy: setter,
+			systemProxyServer: ours}
 	}
 
 	p := platform(&fakeSetter{})
@@ -267,7 +269,11 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	expect("the stop over the daemon's own", "clear")
 	current = corp
 
-	// the daemon's own proxy on another port (the local proxy's changed since a crash): not kept either
+	// the daemon's own proxy on another port (the local proxy's changed since a crash): told by the last server set,
+	// not kept either
+	if err := saveLastSystemProxyServer("1000", moved); err != nil {
+		t.Fatal(err)
+	}
 	current = moved
 	movedPort := platform(&fakeSetter{})
 	if err := movedPort.applySystemProxyLocked(); err != nil {
@@ -277,10 +283,32 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	if kept() {
 		t.Fatal("a daemon's proxy on another port kept as the owner's")
 	}
+	if last := loadLastSystemProxyServer("1000"); last != ours {
+		t.Fatalf("the last server set %q", last)
+	}
 	if err := movedPort.ResetPlatformOptions(); err != nil {
 		t.Fatal(err)
 	}
 	expect("its stop", "clear")
+
+	// another local proxy of the user's (another client, an agent), not one the daemon set: kept and put back
+	if err := os.Remove(lastSystemProxyServerPath("1000")); err != nil {
+		t.Fatal(err)
+	}
+	current = foreign
+	theirs := platform(&fakeSetter{})
+	if err := theirs.applySystemProxyLocked(); err != nil {
+		t.Fatal(err)
+	}
+	expect("on over another local proxy", "read foreign", "enable")
+	if !kept() {
+		t.Fatal("another local proxy not kept")
+	}
+	current = ours
+	if err := theirs.ResetPlatformOptions(); err != nil {
+		t.Fatal(err)
+	}
+	expect("its stop", "clear", "write foreign", "notify")
 	current = corp
 
 	// a kept file the file system will not give (a lock, a denial; here a directory): an error, and it stays
@@ -325,8 +353,8 @@ func TestNekoOwnerProxyKept(t *testing.T) {
 	expect("none kept", "clear")
 }
 
-// A daemon's own proxy on, as a crash leaves it: on, and http://<loopback>:<port>, whatever the port; not the owner's
-// own, off or elsewhere.
+// A daemon's own proxy on, as a crash leaves it: on, and one of the servers the daemon set, on any address; another
+// local proxy, or the proxy off, not.
 func TestNekoDaemonsProxy(t *testing.T) {
 	values := func(enabled uint32, server string) *savedSystemProxy {
 		return &savedSystemProxy{Values: []savedProxyValue{
@@ -334,17 +362,22 @@ func TestNekoDaemonsProxy(t *testing.T) {
 			{Key: internetSettingsKey, Name: "ProxyServer", Type: registry.SZ, Data: utf16Bytes(server)},
 		}}
 	}
-	for server, want := range map[string]bool{
-		"http://127.0.0.1:2080": true, "http://127.0.0.1:2081": true, "http://127.1.2.3:8080": true,
-		"http://[::1]:2080": true, "http://localhost:2080": true,
-		"http://corp.example:3128": false, "http://10.0.0.1:3128": false, "127.0.0.1:2080": false,
-		"http=127.0.0.1:2080;https=127.0.0.1:2080": false, "http://127.0.0.1": false,
+	for _, c := range []struct {
+		server  string
+		servers []string
+		want    bool
+	}{
+		{"http://192.168.1.5:2080", []string{"http://192.168.1.5:2080", ""}, true},
+		{"http://127.0.0.1:2081", []string{"http://127.0.0.1:2080", "http://127.0.0.1:2081"}, true},
+		{"http://127.0.0.1:3128", []string{"http://127.0.0.1:2080", ""}, false},
+		{"http://corp.example:3128", []string{"http://127.0.0.1:2080", "http://127.0.0.1:2081"}, false},
+		{"", []string{""}, false},
 	} {
-		if got := values(1, server).isDaemons(); got != want {
-			t.Errorf("%s on: %v, want %v", server, got, want)
+		if got := values(1, c.server).isDaemons(c.servers...); got != c.want {
+			t.Errorf("%s on, the daemon's %q: %v, want %v", c.server, c.servers, got, c.want)
 		}
 	}
-	if values(0, "http://127.0.0.1:2080").isDaemons() {
+	if values(0, "http://127.0.0.1:2080").isDaemons("http://127.0.0.1:2080") {
 		t.Error("off taken as the daemon's")
 	}
 }

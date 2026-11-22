@@ -13,11 +13,8 @@ package boxdd
 import (
 	"encoding/binary"
 	"errors"
-	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"unicode/utf16"
 
@@ -187,11 +184,11 @@ func loadSavedSystemProxy(ownerUserID string) (*savedSystemProxy, error) {
 	return &saved, nil
 }
 
-// isDaemons: the values are a daemon's own proxy on, as a crash leaves them, not the owner's settings: on, and the
-// server http://<loopback>:<port>, whatever its port (the local proxy's may have changed since the crash). A
-// corporate proxy hardly has that form. It takes WinINet to write ProxyServer to the registry as it was given
-// ("http://" and the address, as upstream's Enable gives it).
-func (s *savedSystemProxy) isDaemons() bool {
+// isDaemons: the values are the daemon's own proxy on, as a crash leaves them, not the owner's settings: on, and the
+// server one the daemon sets (servers: this run's, and the last one set, which a crash may have left on another port).
+// It takes WinINet to write ProxyServer to the registry as it was given ("http://" and the address, as upstream's
+// Enable gives it).
+func (s *savedSystemProxy) isDaemons(servers ...string) bool {
 	enabled, current := false, ""
 	for _, value := range s.Values {
 		switch {
@@ -201,22 +198,39 @@ func (s *savedSystemProxy) isDaemons() bool {
 			current = utf16String(value.Data)
 		}
 	}
-	if !enabled {
+	if !enabled || current == "" {
 		return false
 	}
-	address, found := strings.CutPrefix(current, "http://")
-	if !found {
-		return false
+	for _, server := range servers {
+		if server == current {
+			return true
+		}
 	}
-	host, port, err := net.SplitHostPort(address)
-	if err != nil || port == "" {
-		return false
+	return false
+}
+
+// lastSystemProxyServerFileName holds the server the daemon set last for the owner, written before it goes on and kept
+// after: a crash's proxy is told apart by it when the next run's is on another port.
+const lastSystemProxyServerFileName = "last_system_proxy_server"
+
+func lastSystemProxyServerPath(ownerUserID string) string {
+	return filepath.Join(userWorkingDirectory(ownerUserID), lastSystemProxyServerFileName)
+}
+
+func loadLastSystemProxyServer(ownerUserID string) string {
+	content, err := os.ReadFile(lastSystemProxyServerPath(ownerUserID))
+	if err != nil {
+		return ""
 	}
-	if host == "localhost" {
-		return true
+	return string(content)
+}
+
+func saveLastSystemProxyServer(ownerUserID string, server string) error {
+	err := os.MkdirAll(userWorkingDirectory(ownerUserID), 0o700)
+	if err != nil {
+		return err
 	}
-	ip, err := netip.ParseAddr(host)
-	return err == nil && ip.IsLoopback()
+	return atomicfile.WriteFile(lastSystemProxyServerPath(ownerUserID), []byte(server), 0o600)
 }
 
 // systemProxySetter is the system proxy as the platform sets it (settings.WindowsSystemProxy); a test's own.
@@ -250,17 +264,24 @@ func (p *windowsPlatformInterface) enableSystemProxyLocked() error {
 			p.warn(err)
 		default:
 			p.keptUnrestorable = false
+			last := loadLastSystemProxyServer(p.ownerUserID)
 			var saved *savedSystemProxy
 			err = p.runUserOperationLocked(func() (readError error) {
 				saved, readError = readProxyValues()
 				return readError
 			})
 			// the daemon's own proxy (a crash's, none kept) is not the owner's: not kept
-			if err == nil && saved != nil && !saved.isDaemons() {
+			if err == nil && saved != nil && !saved.isDaemons(p.systemProxyServer, last) {
 				err = writeSavedSystemProxy(p.ownerUserID, saved)
 			}
 			if err != nil {
 				return E.Cause(err, "keep the owner's proxy settings")
+			}
+		}
+		if p.systemProxyServer != "" {
+			err = saveLastSystemProxyServer(p.ownerUserID, p.systemProxyServer)
+			if err != nil {
+				return E.Cause(err, "keep the server set")
 			}
 		}
 	}
