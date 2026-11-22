@@ -42,7 +42,9 @@ Tags of the DNS servers to ask, in order.
 A server fails when its query ends in an error, when it does not answer
 within `timeout`, or when it answers with an rcode other than `NOERROR` and
 `NXDOMAIN` (`SERVFAIL`, `REFUSED`, ...). `NOERROR`, an empty one too, and
-`NXDOMAIN` are answers and are returned as they are.
+`NXDOMAIN` are answers and are returned as they are. A server that gives its
+rcode as an error (Tailscale, OpenVPN, a platform's resolver) is read the same
+way: its `NXDOMAIN` ends the query.
 
 When a server fails with an error or a timeout and a later one answers, the
 one that answered is asked first for the next 5 minutes, so a dead first

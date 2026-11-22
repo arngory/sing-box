@@ -29,6 +29,8 @@ const (
 	fallbackFakeError
 	fallbackFakeHang
 	fallbackFakeRcode
+	// an rcode as an error, as tailscale's, openvpn's and the platforms' local transports give it
+	fallbackFakeRcodeError
 )
 
 type fallbackFakeServer struct {
@@ -84,6 +86,8 @@ func (s *fallbackFakeServer) Exchange(ctx context.Context, message *mDNS.Msg) (*
 		return nil, errors.New(s.tag + " is down")
 	case fallbackFakeRcode:
 		return boxDNS.FixedResponseStatus(message, rcode), nil
+	case fallbackFakeRcodeError:
+		return nil, boxDNS.RcodeError(rcode)
 	default:
 		return boxDNS.FixedResponse(message.Id, message.Question[0], []netip.Addr{s.address}, 300), nil
 	}
@@ -336,6 +340,42 @@ func TestFallbackNXDOMAINIsAnAnswer(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mDNS.RcodeNameError, response.Rcode)
 	require.Equal(t, []int32{1, 0}, f.queries())
+}
+
+func TestFallbackNXDOMAINAsAnErrorIsAnAnswer(t *testing.T) {
+	t.Parallel()
+	f := newFallbackFixture(t, time.Second, 2)
+	f.servers[0].set(fallbackFakeRcodeError, mDNS.RcodeNameError)
+	message := fallbackQuery()
+	message.Id = 777
+	response, err := f.transport.Exchange(context.Background(), message)
+	require.NoError(t, err)
+	require.Equal(t, mDNS.RcodeNameError, response.Rcode)
+	require.Equal(t, uint16(777), response.Id)
+	require.Equal(t, message.Question, response.Question)
+	// the name is not handed to the next server, and nothing is remembered against the first
+	require.Equal(t, []int32{1, 0}, f.queries())
+	_, err = f.transport.Exchange(context.Background(), fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, []int32{2, 0}, f.queries())
+}
+
+func TestFallbackSERVFAILAsAnErrorMovesOnWithoutSticking(t *testing.T) {
+	t.Parallel()
+	f := newFallbackFixture(t, time.Second, 2)
+	f.servers[0].set(fallbackFakeRcodeError, mDNS.RcodeServerFailure)
+	response, err := f.transport.Exchange(context.Background(), fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, "server-b", f.answeredBy(t, response))
+	_, err = f.transport.Exchange(context.Background(), fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, []int32{2, 2}, f.queries(), "an rcode is about the query: the first server is asked again")
+
+	// all of them failing so: the first failing answer, not an error
+	f.servers[1].set(fallbackFakeRcodeError, mDNS.RcodeRefused)
+	response, err = f.transport.Exchange(context.Background(), fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, mDNS.RcodeServerFailure, response.Rcode)
 }
 
 func TestFallbackEmptyNOERRORIsAnAnswer(t *testing.T) {

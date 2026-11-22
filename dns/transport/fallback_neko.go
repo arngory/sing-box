@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -21,7 +22,8 @@ import (
 // The fallback DNS server is a neko addition. It asks other DNS servers in
 // the order given and moves on to the next when one fails: an error, no
 // answer within the timeout, or an answer of SERVFAIL, REFUSED and the like.
-// NOERROR (an empty one too) and NXDOMAIN are answers and end the query.
+// NOERROR (an empty one too) and NXDOMAIN are answers and end the query; an
+// rcode a server gives as an error (dns.RcodeError) counts as that answer.
 //
 // A server that has just failed outright (an error or a timeout, not an
 // rcode) and was followed by one that answered is skipped for a while: for
@@ -244,11 +246,11 @@ func (t *FallbackTransport) exchangeOne(ctx context.Context, server adapter.DNST
 	})
 	select {
 	case result := <-resultCh:
-		return fallbackResultOf(result)
+		return fallbackResultOf(message, result)
 	case <-exchangeCtx.Done():
 		select {
 		case result := <-resultCh:
-			return fallbackResultOf(result)
+			return fallbackResultOf(message, result)
 		default:
 		}
 		if ctx.Err() != nil {
@@ -258,8 +260,15 @@ func (t *FallbackTransport) exchangeOne(ctx context.Context, server adapter.DNST
 	}
 }
 
-func fallbackResultOf(result fallbackResult) (*mDNS.Msg, error) {
+// fallbackResultOf is a server's result as a response where it can be one: an rcode a transport gives as an error
+// (dns.RcodeError: tailscale's, openvpn's, a platform's local resolver) is that rcode's answer, so NXDOMAIN ends the
+// query there, as from any other server, and does not hand the name to the next one.
+func fallbackResultOf(message *mDNS.Msg, result fallbackResult) (*mDNS.Msg, error) {
 	if result.err != nil {
+		var rcodeErr dns.RcodeError
+		if errors.As(result.err, &rcodeErr) {
+			return dns.FixedResponseStatus(message, int(rcodeErr)), nil
+		}
 		return nil, result.err
 	}
 	if result.response == nil {
