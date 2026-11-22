@@ -142,13 +142,20 @@ func (t *FallbackTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*m
 		errors        []error
 		serverFailed  bool
 	)
+	// out of time with a failing answer in hand: that answer, not the deadline (a query cancelled outright gets its
+	// error)
+	expired := func() (*mDNS.Msg, error) {
+		if firstResponse != nil && ctx.Err() == context.DeadlineExceeded {
+			return firstResponse, nil
+		}
+		return nil, ctx.Err()
+	}
 	for i, index := range order {
-		err := ctx.Err()
-		if err != nil {
-			return nil, err
+		if ctx.Err() != nil {
+			return expired()
 		}
 		server := servers[index]
-		response, err := t.exchangeOne(ctx, server, message, i < len(order)-1)
+		response, err := t.exchangeOne(ctx, server, message, t.wait(ctx, len(order)-i))
 		if err == nil && fallbackAccepts(response) {
 			if i > 0 {
 				t.answered(ctx, index, serverFailed)
@@ -156,7 +163,7 @@ func (t *FallbackTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*m
 			return response, nil
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return expired()
 		}
 		if err != nil {
 			serverFailed = true
@@ -221,18 +228,35 @@ func (t *FallbackTransport) answered(ctx context.Context, index int, serverFaile
 	t.logger.InfoContext(ctx, "server[", t.serverTags[index], "] is used first for ", t.stickyDuration, ", the servers before it failed")
 }
 
+// wait is how long a server is given with left servers still to ask, this one included: timeout, and no more than
+// an even share of what is left of the query's deadline, so that the last servers are asked too (three dead servers
+// at 4 s each would spend a 10 s query before the fourth). The last one has the rest of the deadline (0: no limit of
+// our own).
+func (t *FallbackTransport) wait(ctx context.Context, left int) time.Duration {
+	if left <= 1 {
+		return 0
+	}
+	wait := t.timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if share := time.Until(deadline) / time.Duration(left); share < wait {
+			wait = share
+		}
+	}
+	return wait
+}
+
 type fallbackResult struct {
 	response *mDNS.Msg
 	err      error
 }
 
-func (t *FallbackTransport) exchangeOne(ctx context.Context, server adapter.DNSTransport, message *mDNS.Msg, limited bool) (*mDNS.Msg, error) {
+func (t *FallbackTransport) exchangeOne(ctx context.Context, server adapter.DNSTransport, message *mDNS.Msg, wait time.Duration) (*mDNS.Msg, error) {
 	var (
 		exchangeCtx context.Context
 		cancel      context.CancelFunc
 	)
-	if limited {
-		exchangeCtx, cancel = context.WithTimeout(ctx, t.timeout)
+	if wait > 0 {
+		exchangeCtx, cancel = context.WithTimeout(ctx, wait)
 	} else {
 		exchangeCtx, cancel = context.WithCancel(ctx)
 	}
@@ -256,7 +280,7 @@ func (t *FallbackTransport) exchangeOne(ctx context.Context, server adapter.DNST
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, E.Cause(exchangeCtx.Err(), "no answer within ", t.timeout)
+		return nil, E.Cause(exchangeCtx.Err(), "no answer within ", wait)
 	}
 }
 

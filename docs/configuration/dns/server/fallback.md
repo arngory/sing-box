@@ -58,4 +58,8 @@ when there is none.
 #### timeout
 
 How long a server may take to answer before the next one is asked, `4s` by
-default. The last server asked has the query's own deadline.
+default, and never more than an even share of what is left of the query's
+deadline among the servers still to ask, so that the last ones are asked too.
+The last server asked has the rest of the query's deadline. When the deadline
+runs out with a failing answer (such as `SERVFAIL`) in hand, that answer is
+returned.

@@ -442,13 +442,24 @@ func TestFallbackContextCancel(t *testing.T) {
 
 func TestFallbackContextDeadline(t *testing.T) {
 	t.Parallel()
+	// The first server hangs: it is given its share of the deadline, and the second is still asked.
 	f := newFallbackFixture(t, time.Second, 2)
 	f.servers[0].set(fallbackFakeHang, 0)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := f.transport.Exchange(ctx, fallbackQuery())
+	response, err := f.transport.Exchange(ctx, fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, "server-b", f.answeredBy(t, response))
+	require.Equal(t, []int32{1, 1}, f.queries())
+
+	// Both hang: the deadline, with no answer in hand.
+	f = newFallbackFixture(t, time.Second, 2)
+	f.servers[0].set(fallbackFakeHang, 0)
+	f.servers[1].set(fallbackFakeHang, 0)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel2()
+	_, err = f.transport.Exchange(ctx2, fallbackQuery())
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, []int32{1, 0}, f.queries())
 }
 
 func TestFallbackExchangeAsync(t *testing.T) {
@@ -510,4 +521,32 @@ func TestFallbackOptionsJSON(t *testing.T) {
 	require.Equal(t, 2*time.Second, time.Duration(options.Timeout))
 	require.NoError(t, json.Unmarshal([]byte(`{"servers":"a"}`), &options))
 	require.Equal(t, []string{"a"}, []string(options.Servers))
+}
+
+// Three dead servers at a timeout of their own longer than a third of the query's deadline: each is given its share
+// of what is left, and the fourth, which answers, is still asked in time.
+func TestFallbackSharesTheDeadlineSoTheLastServersAreAsked(t *testing.T) {
+	t.Parallel()
+	f := newFallbackFixture(t, 400*time.Millisecond, 4)
+	for i := 0; i < 3; i++ {
+		f.servers[i].set(fallbackFakeHang, 0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	response, err := f.transport.Exchange(ctx, fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, "server-d", f.answeredBy(t, response))
+}
+
+// A failing answer in hand when the query's deadline runs out: that answer, not the deadline.
+func TestFallbackDeadlineKeepsTheFailingAnswer(t *testing.T) {
+	t.Parallel()
+	f := newFallbackFixture(t, time.Second, 2)
+	f.servers[0].set(fallbackFakeRcode, mDNS.RcodeServerFailure)
+	f.servers[1].set(fallbackFakeHang, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	response, err := f.transport.Exchange(ctx, fallbackQuery())
+	require.NoError(t, err)
+	require.Equal(t, mDNS.RcodeServerFailure, response.Rcode)
 }
