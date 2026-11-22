@@ -228,7 +228,7 @@ replace github.com/sagernet/wireguard-go => ./third_party/wireguard-go
 
 replace masterdnsvpn-go => ./third_party/masterdnsvpn
 
-replace github.com/yggdrasil-network/yggdrasil-go => github.com/arngory/yggdrasil-go v0.5.16-0.20261122121822-4d3f749739db
+replace github.com/yggdrasil-network/yggdrasil-go => github.com/arngory/yggdrasil-go v0.5.16-0.20261122152123-0868f924c764
 
 replace github.com/sagernet/cronet-go => github.com/arngory/cronet-go v0.0.0-20261118091355-747109c6b573
 
@@ -248,4 +248,4 @@ replace github.com/sagernet/cronet-go/lib/windows_amd64 => github.com/arngory/cr
 
 replace github.com/sagernet/cronet-go/lib/windows_arm64 => github.com/arngory/cronet-go/lib/windows_arm64 v0.0.0-20261118091355-747109c6b573
 
-replace github.com/Arceliar/ironwood => github.com/arngory/ironwood v0.0.0-20261122120922-15d2d6776ffd
+replace github.com/Arceliar/ironwood => github.com/arngory/ironwood v0.0.0-20261122151243-84054ae08cbd
