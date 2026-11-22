@@ -52,8 +52,8 @@ github.com/arngory/cronet-go/lib/windows_arm64 v0.0.0-20261118091355-747109c6b57
 github.com/arngory/cronet-go/lib/windows_arm64 v0.0.0-20261118091355-747109c6b573/go.mod h1:n34YyLgapgjWdKa0IoeczjAFCwD3/dxbsH5sucKw0bw=
 github.com/arngory/ironwood v0.0.0-20261122074750-e8dbf9c22c36 h1:1CV2g+N+dQRSAhWtM7QDkPqAWU7+p0ZfbLQgQeBPEk4=
 github.com/arngory/ironwood v0.0.0-20261122074750-e8dbf9c22c36/go.mod h1:+4Nkaq0kqo0xK/XGawV7wVyj2D2LZeLJOzozZp7yhdM=
-github.com/arngory/yggdrasil-go v0.5.16-0.20261122080212-368ced800b34 h1:1QqWxR/IxtB6MTgCAIkoK8CXcw1r8Z/OJbziNsuWExY=
-github.com/arngory/yggdrasil-go v0.5.16-0.20261122080212-368ced800b34/go.mod h1:h15KsqpR0WcWyc46qv6TWNwLbZbZwZ+yM7gvbRmNRJI=
+github.com/arngory/yggdrasil-go v0.5.16-0.20261122081220-4f11eeb903b2 h1:te4GLElFOyjFAr6I5rJJqBKKEcJC5Ev0Z8pWLUNrW4s=
+github.com/arngory/yggdrasil-go v0.5.16-0.20261122081220-4f11eeb903b2/go.mod h1:h15KsqpR0WcWyc46qv6TWNwLbZbZwZ+yM7gvbRmNRJI=
 github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02 h1:bXAPYSbdYbS5VTy92NIUbeDI1qyggi+JYh5op9IFlcQ=
 github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02/go.mod h1:k08r+Yj1PRAmuayFiRK6MYuR5Ve4IuZtTfxErMIh0+c=
 github.com/bits-and-blooms/bitset v1.24.2/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=

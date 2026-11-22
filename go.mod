@@ -228,7 +228,7 @@ replace github.com/sagernet/wireguard-go => ./third_party/wireguard-go
 
 replace masterdnsvpn-go => ./third_party/masterdnsvpn
 
-replace github.com/yggdrasil-network/yggdrasil-go => github.com/arngory/yggdrasil-go v0.5.16-0.20261122080212-368ced800b34
+replace github.com/yggdrasil-network/yggdrasil-go => github.com/arngory/yggdrasil-go v0.5.16-0.20261122081220-4f11eeb903b2
 
 replace github.com/sagernet/cronet-go => github.com/arngory/cronet-go v0.0.0-20261118091355-747109c6b573
 
