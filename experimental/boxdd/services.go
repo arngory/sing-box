@@ -6,6 +6,7 @@ package boxdd
 
 import (
 	"context"
+	"runtime"
 	"strings"
 
 	"github.com/sagernet/sing-box/daemon"
@@ -70,11 +71,40 @@ type Host interface {
 // SystemProxy is a system proxy a core's start asks for, as a TUN's platform.http_proxy (an HTTP proxy of the
 // config's, often its mixed inbound): set by the daemon for its owner, not for the user the daemon runs as (SYSTEM,
 // root), as the inbound's own set_system_proxy would be. Kept with the start options, it is set again when the daemon
-// starts the core again; ManagedService.SetSystemProxyEnabled turns it off and on, and a stop takes it away.
+// starts the core again; ManagedService.SetSystemProxyEnabled turns it off and on, and a stop takes it away. The
+// bypass list is Windows' alone (Linux's settings take none). A config whose TUN sets platform.http_proxy has the
+// system proxy already: one asked beside it is refused (InvalidArgument).
 type SystemProxy struct {
 	Server       string   `json:"server"`
 	Port         uint16   `json:"port"`
 	BypassDomain []string `json:"bypass_domain,omitempty"`
+}
+
+// setSystemProxyLocked has the platform set the system proxy asked, after the core started: refused where the
+// config's TUN took it, an error where the platform has none (Linux without gsettings or kwriteconfig).
+func (d *Daemon) setSystemProxyLocked(p *SystemProxy) error {
+	proxyStatus, err := d.platform.SystemProxyStatus()
+	if err != nil {
+		return err
+	}
+	if proxyStatus.Available {
+		return status.Error(codes.InvalidArgument, "the config already sets tun.platform.http_proxy")
+	}
+	if runtime.GOOS != "windows" && len(p.BypassDomain) > 0 {
+		d.logger.Warn("system proxy: the bypass list applies on Windows only")
+	}
+	err = d.platform.ProcessPlatformOptions(p.platformOptions())
+	if err != nil {
+		return E.Cause(err, "set system proxy")
+	}
+	proxyStatus, err = d.platform.SystemProxyStatus()
+	if err != nil {
+		return err
+	}
+	if !proxyStatus.Available {
+		return E.New("set system proxy: this system has none the daemon can set")
+	}
+	return nil
 }
 
 func (p *SystemProxy) platformOptions() option.TunPlatformOptions {

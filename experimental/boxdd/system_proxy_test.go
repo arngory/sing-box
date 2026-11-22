@@ -14,8 +14,10 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/service/powerreport"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // niko: the system proxy of an added service's start (Host.StartService's SystemProxy), set by the daemon's platform
@@ -25,18 +27,28 @@ import (
 type recordingPlatform struct {
 	adapter.PlatformInterface
 	calls []string
+	// set: a system proxy is there (Set made one, Reset took it away); takenByCore: the core's TUN made one; failSet:
+	// Set fails
+	set, takenByCore, failSet bool
 }
 
-func (p *recordingPlatform) note(format string, args ...any) { p.calls = append(p.calls, fmt.Sprintf(format, args...)) }
+func (p *recordingPlatform) note(format string, args ...any) {
+	p.calls = append(p.calls, fmt.Sprintf(format, args...))
+}
 
 func (p *recordingPlatform) ProcessPlatformOptions(options option.TunPlatformOptions) error {
 	proxy := options.HTTPProxy
 	p.note("set %v %s:%d %v", proxy.Enabled, proxy.Server, proxy.ServerPort, []string(proxy.BypassDomain))
+	if p.failSet {
+		return os.ErrPermission
+	}
+	p.set = true
 	return nil
 }
 
 func (p *recordingPlatform) ResetPlatformOptions() error {
 	p.note("reset")
+	p.set = false
 	return nil
 }
 
@@ -57,7 +69,7 @@ func (p *recordingPlatform) RestoreOwner(state ownerState) error {
 func (p *recordingPlatform) ReleaseOwner() error { return nil }
 
 func (p *recordingPlatform) SystemProxyStatus() (*daemon.SystemProxyStatus, error) {
-	return &daemon.SystemProxyStatus{}, nil
+	return &daemon.SystemProxyStatus{Available: p.set || p.takenByCore}, nil
 }
 
 func (p *recordingPlatform) HandleSessionChange(eventType uint32, sessionID uint32, state ownerState) (uint32, bool, error) {
@@ -164,5 +176,56 @@ func TestNekoSystemProxy(t *testing.T) {
 	expect("a start without", "prefer false", "reset")
 	if options, err := loadStartOptions("1000"); err != nil || options.SystemProxy != nil {
 		t.Fatalf("the stored options %+v: %v", options, err)
+	}
+}
+
+// A system proxy that cannot be set leaves no core running, whoever started it: a start, a reload, a restore; one asked
+// beside a TUN that sets platform.http_proxy is refused as such.
+func TestNekoSystemProxyRefused(t *testing.T) {
+	previous := workingDirectory
+	workingDirectory = t.TempDir()
+	t.Cleanup(func() { workingDirectory = previous })
+	const config = `{"log": {"level": "error"}, "outbounds": [{"type": "direct", "tag": "direct"}]}`
+	proxy := &SystemProxy{Server: "127.0.0.1", Port: 2080}
+	d, platform := proxyDaemon(t, "1000")
+	if err := d.StartService(caller("1000"), config, proxy); err != nil {
+		t.Fatal(err)
+	}
+
+	platform.failSet = true
+	d.lifecycleAccess.Lock()
+	err := (&managedHandler{daemon: d}).ServiceReload(context.Background())
+	d.lifecycleAccess.Unlock()
+	if err == nil || d.startedService.Instance() != nil {
+		t.Fatalf("a reload without its proxy: %v, the core running %v", err, d.startedService.Instance() != nil)
+	}
+	if err = d.StartService(caller("1000"), config, proxy); err == nil || d.startedService.Instance() != nil {
+		t.Fatalf("a start without its proxy: %v, the core running %v", err, d.startedService.Instance() != nil)
+	}
+	if platform.set {
+		t.Fatal("a system proxy left")
+	}
+
+	// the daemon restarted: the core it was running is not started again without its proxy
+	options, err := loadStartOptions("1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.WasRunning = true
+	if err = saveStartOptions("1000", options); err != nil {
+		t.Fatal(err)
+	}
+	again, platform2 := proxyDaemon(t, "1000")
+	platform2.failSet = true
+	again.restore()
+	if again.startedService.Instance() != nil {
+		t.Fatal("restored without its proxy")
+	}
+
+	// a TUN's platform.http_proxy took the system proxy: refused as such, nothing left running
+	platform2.failSet, platform2.takenByCore = false, true
+	err = again.StartService(caller("1000"), config, proxy)
+	if status.Code(err) != codes.InvalidArgument || again.startedService.Instance() != nil {
+		t.Fatalf("beside a TUN's: %v, the core running %v", err, again.startedService.Instance() != nil)
 	}
 }
