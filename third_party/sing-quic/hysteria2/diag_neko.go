@@ -168,7 +168,10 @@ func (w *stallWatch) tick(now time.Time, in, out, open bool) (stallEvent, time.D
 		*w = stallWatch{}
 		return event, gap
 	case out:
-		w.quietSince, w.quiet = time.Time{}, false
+		// a quiet spell logged ends with the next packet in, an answer to this one or not; one not logged yet is over
+		if !w.quiet {
+			w.quietSince = time.Time{}
+		}
 		if w.outSince.IsZero() {
 			w.outSince = now
 		} else if gap := now.Sub(w.outSince); gap >= diagStall && !w.stalled {

@@ -54,6 +54,25 @@ func TestStallWatch(t *testing.T) {
 		{open: true},
 		{in: true, open: true, want: stallOverQuiet, gap: 5 * time.Second},
 	})
+	// a quiet spell logged, then a request answered within diagStall: the spell's end is logged, from its start
+	run("quiet then a request", []sample{
+		{in: true, open: true},
+		{open: true},
+		{open: true},
+		{open: true},
+		{open: true, want: stallQuiet, gap: 3 * time.Second},
+		{out: true, open: true},
+		{in: true, open: true, want: stallOverQuiet, gap: 5 * time.Second},
+	})
+	// a request in a quiet spell not yet logged: no quiet, the request's answer due as any
+	run("short quiet then a request", []sample{
+		{in: true, open: true},
+		{open: true},
+		{open: true},
+		{out: true, open: true},
+		{open: true},
+		{in: true, open: true},
+	})
 	// idle with nothing open is not quiet
 	run("idle closed", idle(10))
 }
