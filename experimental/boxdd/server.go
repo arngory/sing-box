@@ -67,6 +67,7 @@ func newDaemon() (*Daemon, error) {
 	d.startedService = daemon.NewStartedService(daemon.ServiceOptions{
 		Context:     ctx,
 		LogMaxLines: 3000,
+		LogRedactor: activeOptions.LogRedactor,
 	})
 	d.oomRecorder = oomkiller.NewRecorder(libbox.OOMRecorderOptions(d.startedService))
 	service.MustRegister[*oomkiller.Recorder](ctx, d.oomRecorder)

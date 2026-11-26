@@ -220,6 +220,8 @@ func (s *desktopService) takeOverServiceLocked(identity peerIdentity, ownerUserI
 		if err != nil {
 			return err
 		}
+		// Clear in-memory logs before handing ownership to another user (BG-10).
+		s.daemon.startedService.ResetLogs()
 		if s.daemon.platform != nil {
 			err = s.daemon.platform.ReleaseOwner()
 			if err != nil {

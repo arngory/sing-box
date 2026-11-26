@@ -35,6 +35,9 @@ type Options struct {
 	InstallManifestSHA256 string
 	// DevelopmentListen enables the --listen 127.0.0.1:<port> development mode flag.
 	DevelopmentListen bool
+	// LogRedactor, if non-nil, scrubs secrets and node addresses from daemon log lines and exported
+	// crash/OOM report logs before storing or returning them (BG-10).
+	LogRedactor func(string) string
 }
 
 // Caller is the verified local peer invoking a daemon RPC.

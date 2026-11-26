@@ -192,6 +192,10 @@ func exportReportArchive(reportsDirectory string, name string, userID string, wi
 	if !withLog {
 		os.Remove(filepath.Join(strippedPath, goLogFileName))
 		os.Remove(filepath.Join(strippedPath, nativeLogFileName))
+	} else {
+		if err = redactReportLogFiles(strippedPath); err != nil {
+			return nil, err
+		}
 	}
 	fileName := name + ".zip"
 	if encrypt {
@@ -210,6 +214,34 @@ func exportReportArchive(reportsDirectory string, name string, userID string, wi
 		FileName: fileName,
 		Data:     data,
 	}, nil
+}
+
+func redactReportText(text string) string {
+	if activeOptions.LogRedactor == nil {
+		return text
+	}
+	return activeOptions.LogRedactor(text)
+}
+
+func redactReportLogFiles(reportDir string) error {
+	if activeOptions.LogRedactor == nil {
+		return nil
+	}
+	for _, name := range []string{goLogFileName, nativeLogFileName} {
+		path := filepath.Join(reportDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		redacted := activeOptions.LogRedactor(string(data))
+		if err := os.WriteFile(path, []byte(redacted), 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyDirectory(sourcePath string, destinationPath string) error {

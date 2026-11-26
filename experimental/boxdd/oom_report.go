@@ -69,6 +69,9 @@ func (s *desktopService) ReadOOMReport(ctx context.Context, request *OOMReportRe
 			}
 			return nil, readError
 		}
+		if fileName == goLogFileName || fileName == nativeLogFileName {
+			content = []byte(redactReportText(string(content)))
+		}
 		files = append(files, &OOMReportFile{
 			Name:    fileName,
 			Content: content,

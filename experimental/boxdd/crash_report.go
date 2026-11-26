@@ -64,9 +64,13 @@ func (s *desktopService) ReadCrashReport(ctx context.Context, request *CrashRepo
 			}
 			return nil, readError
 		}
+		text := string(content)
+		if fileName == goLogFileName || fileName == nativeLogFileName {
+			text = redactReportText(text)
+		}
 		files = append(files, &CrashReportFile{
 			Name:    fileName,
-			Content: string(content),
+			Content: text,
 		})
 	}
 	return &CrashReportContent{Files: files}, nil

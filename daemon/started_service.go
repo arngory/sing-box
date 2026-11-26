@@ -65,6 +65,7 @@ type StartedService struct {
 	serviceStatusObserver   *observable.Observer[*ServiceStatus]
 	logAccess               sync.RWMutex
 	logLines                logRing
+	logRedactor             func(string) string
 	logSubscriber           *observable.Subscriber[*log.Entry]
 	logObserver             *observable.Observer[*log.Entry]
 	instance                *Instance
@@ -83,6 +84,7 @@ type ServiceOptions struct {
 	Handler           PlatformHandler
 	Debug             bool
 	LogMaxLines       int
+	LogRedactor       func(string) string
 	OOMKillerEnabled  bool
 	OOMKillerDisabled bool
 	OOMMemoryLimit    uint64
@@ -100,6 +102,7 @@ func NewStartedService(options ServiceOptions) *StartedService {
 		handler:           options.Handler,
 		debug:             options.Debug,
 		logLines:          logRing{maxLines: options.LogMaxLines},
+		logRedactor:       options.LogRedactor,
 		oomKillerEnabled:  options.OOMKillerEnabled,
 		oomKillerDisabled: options.OOMKillerDisabled,
 		oomMemoryLimit:    options.OOMMemoryLimit,
@@ -143,6 +146,11 @@ func (s *StartedService) resetLogs() {
 	s.logLines.reset()
 	s.logAccess.Unlock()
 	s.logSubscriber.Emit(nil)
+}
+
+// ResetLogs clears the in-memory log ring and notifies active log subscribers (niko: owner take-over).
+func (s *StartedService) ResetLogs() {
+	s.resetLogs()
 }
 
 func (s *StartedService) updateStatus(newStatus ServiceStatus_Type) {
@@ -2106,6 +2114,9 @@ func (s *StartedService) mustEmbedUnimplementedStartedServiceServer() {
 }
 
 func (s *StartedService) WriteMessage(level log.Level, message string) {
+	if s.logRedactor != nil {
+		message = s.logRedactor(message)
+	}
 	item := &log.Entry{Level: level, Message: message}
 	s.logAccess.Lock()
 	s.logLines.push(item)
