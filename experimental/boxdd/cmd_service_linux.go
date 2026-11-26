@@ -14,11 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	defaultServiceWorkingDirectory = "/var/lib/sing-box-daemon"
-	serviceUnitName                = serviceName + ".service"
-)
-
 var commandServiceRestart = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the system service",
@@ -107,7 +102,7 @@ func runSystemctl(arguments ...string) error {
 }
 
 func serviceStart() error {
-	return runSystemctl("start", serviceUnitName)
+	return runSystemctl("start", activeNames.serviceUnitName())
 }
 
 func serviceStop() error {
@@ -119,11 +114,11 @@ func serviceStop() error {
 		log.Info("service not installed")
 		return nil
 	}
-	return runSystemctl("stop", serviceUnitName)
+	return runSystemctl("stop", activeNames.serviceUnitName())
 }
 
 func serviceRestart() error {
-	return runSystemctl("restart", serviceUnitName)
+	return runSystemctl("restart", activeNames.serviceUnitName())
 }
 
 func serviceInstalled() (bool, error) {
@@ -135,7 +130,7 @@ func serviceInstalled() (bool, error) {
 }
 
 func systemctlProperty(property string) (string, error) {
-	output, err := exec.Command("systemctl", "show", "--property="+property, "--value", serviceUnitName).CombinedOutput()
+	output, err := exec.Command("systemctl", "show", "--property="+property, "--value", activeNames.serviceUnitName()).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if message == "" {

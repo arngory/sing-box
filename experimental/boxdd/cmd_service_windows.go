@@ -17,12 +17,6 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const (
-	serviceDisplayName             = "sing-box Service"
-	serviceDescriptionText         = "Privileged service for sing-box"
-	defaultServiceWorkingDirectory = `C:\ProgramData\sing-box-daemon`
-)
-
 var commandServiceFlagAllowUnsafeInstallation bool
 
 var commandServiceInstall = &cobra.Command{
@@ -32,6 +26,11 @@ var commandServiceInstall = &cobra.Command{
 	Run: func(command *cobra.Command, args []string) {
 		err := serviceInstall()
 		if err != nil {
+			var exitErr *installExitError
+			if errors.As(err, &exitErr) {
+				log.Error(E.Cause(err, "install service"))
+				os.Exit(exitErr.code)
+			}
 			log.Fatal(E.Cause(err, "install service"))
 		}
 	},
@@ -104,7 +103,7 @@ func installedServiceWorkingDirectory() (string, error) {
 		return "", E.Cause(err, "connect to service manager")
 	}
 	defer manager.Disconnect()
-	service, err := manager.OpenService(serviceName)
+	service, err := manager.OpenService(activeNames.Service)
 	if err != nil {
 		return "", E.Cause(err, "open service")
 	}
@@ -126,16 +125,28 @@ func installedServiceWorkingDirectory() (string, error) {
 }
 
 func serviceInstall() error {
+	// Restrict DLL search to System32 before any elevated work runs from a user-writable portable folder.
+	_ = windows.SetDefaultDllDirectories(windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
 	executablePath, err := os.Executable()
 	if err != nil {
 		return E.Cause(err, "get executable path")
 	}
+	// Validate working directory BEFORE touching Program Files or stopping an existing service.
 	serviceWorkingDirectory, err := resolveWindowsServiceWorkingDirectory(
 		commandServiceFlagWorkingDirectory,
 		commandServiceFlagAllowUnsafeInstallation,
 	)
 	if err != nil {
 		return E.Cause(err, "validate working directory")
+	}
+	var staged *stagedInstallation
+	if activeOptions.InstallRoot == InstallProgramFiles {
+		staged, err = stageAndInstallToProgramFiles(executablePath, commandServiceFlagAllowUnsafeInstallation)
+		if err != nil {
+			return err
+		}
+		defer staged.Rollback()
+		executablePath = staged.daemonPath
 	}
 	executablePath, err = secureWindowsInstallation(executablePath, commandServiceFlagAllowUnsafeInstallation)
 	if err != nil {
@@ -155,19 +166,19 @@ func serviceInstall() error {
 		arguments = append(arguments, "--allow-unsafe-installation-directory-permissions")
 	}
 	config := mgr.Config{
-		DisplayName:  serviceDisplayName,
-		Description:  serviceDescriptionText,
+		DisplayName:  activeNames.DisplayName,
+		Description:  activeNames.Description,
 		StartType:    mgr.StartAutomatic,
 		Dependencies: []string{"Tcpip"},
 		SidType:      windows.SERVICE_SID_TYPE_UNRESTRICTED,
 	}
 	created := false
-	service, err := manager.OpenService(serviceName)
+	service, err := manager.OpenService(activeNames.Service)
 	if err != nil {
 		if !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 			return E.Cause(err, "open service")
 		}
-		service, err = manager.CreateService(serviceName, executablePath, config, arguments...)
+		service, err = manager.CreateService(activeNames.Service, executablePath, config, arguments...)
 		if err != nil {
 			return E.Cause(err, "create service")
 		}
@@ -208,7 +219,7 @@ func serviceInstall() error {
 		rollback()
 		return E.Cause(err, "secure service")
 	}
-	err = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
+	err = eventlog.InstallAsEventCreate(activeNames.Service, eventlog.Error|eventlog.Warning|eventlog.Info)
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		rollback()
 		return E.Cause(err, "install event log source")
@@ -223,6 +234,7 @@ func serviceInstall() error {
 	if err != nil {
 		return E.Cause(err, "start service")
 	}
+	staged.Commit()
 	return nil
 }
 
@@ -251,7 +263,7 @@ func serviceUninstall() error {
 		return E.Cause(err, "connect to service manager")
 	}
 	defer manager.Disconnect()
-	service, err := manager.OpenService(serviceName)
+	service, err := manager.OpenService(activeNames.Service)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 			log.Info("service not installed")
@@ -268,7 +280,7 @@ func serviceUninstall() error {
 	if err != nil {
 		return E.Cause(err, "delete service")
 	}
-	err = eventlog.Remove(serviceName)
+	err = eventlog.Remove(activeNames.Service)
 	if err != nil {
 		log.Warn("remove event log source: ", err)
 	}
@@ -281,7 +293,7 @@ func serviceStart() error {
 		return E.Cause(err, "connect to service manager")
 	}
 	defer manager.Disconnect()
-	service, err := manager.OpenService(serviceName)
+	service, err := manager.OpenService(activeNames.Service)
 	if err != nil {
 		return E.Cause(err, "open service")
 	}
@@ -295,7 +307,7 @@ func serviceStop() error {
 		return E.Cause(err, "connect to service manager")
 	}
 	defer manager.Disconnect()
-	service, err := manager.OpenService(serviceName)
+	service, err := manager.OpenService(activeNames.Service)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 			log.Info("service not installed")
@@ -376,25 +388,37 @@ func serviceStatus() (*serviceStatusResult, error) {
 		return nil, E.Cause(err, "connect to service manager")
 	}
 	defer windows.CloseServiceHandle(manager)
-	namePointer, err := windows.UTF16PtrFromString(serviceName)
+	namePointer, err := windows.UTF16PtrFromString(activeNames.Service)
 	if err != nil {
 		return nil, err
 	}
-	service, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS)
+	canQueryConfig := true
+	serviceHandle, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
+	if err != nil && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		canQueryConfig = false
+		serviceHandle, err = windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS)
+	}
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 			return &serviceStatusResult{exitCode: 3, description: "not installed"}, nil
 		}
 		return nil, E.Cause(err, "open service")
 	}
-	defer windows.CloseServiceHandle(service)
+	defer windows.CloseServiceHandle(serviceHandle)
 	var status windows.SERVICE_STATUS
-	err = windows.QueryServiceStatus(service, &status)
+	err = windows.QueryServiceStatus(serviceHandle, &status)
 	if err != nil {
 		return nil, E.Cause(err, "query service status")
 	}
-	if status.CurrentState == windows.SERVICE_RUNNING {
-		return &serviceStatusResult{exitCode: 0, description: "running"}, nil
+	var binaryPath string
+	if canQueryConfig {
+		svcObj := &mgr.Service{Name: activeNames.Service, Handle: serviceHandle}
+		if cfg, cfgErr := svcObj.Config(); cfgErr == nil {
+			binaryPath = cfg.BinaryPathName
+		}
 	}
-	return &serviceStatusResult{exitCode: 2, description: "stopped"}, nil
+	if status.CurrentState == windows.SERVICE_RUNNING {
+		return &serviceStatusResult{exitCode: 0, description: "running", binary: binaryPath}, nil
+	}
+	return &serviceStatusResult{exitCode: 2, description: "stopped", binary: binaryPath}, nil
 }

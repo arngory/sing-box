@@ -1,6 +1,7 @@
 package boxdd
 
 import (
+	"encoding/json"
 	"os"
 
 	"github.com/sagernet/sing-box/log"
@@ -9,7 +10,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var commandServiceFlagWorkingDirectory string
+var (
+	commandServiceFlagWorkingDirectory string
+	commandServiceStatusFlagFormat     string
+)
 
 var commandService = &cobra.Command{
 	Use:   "service",
@@ -49,7 +53,24 @@ var commandServiceStatus = &cobra.Command{
 		if err != nil {
 			log.Fatal(E.Cause(err, "query service status"))
 		}
-		os.Stdout.WriteString(status.description + "\n")
+		switch commandServiceStatusFlagFormat {
+		case "", "text":
+			os.Stdout.WriteString(status.description + "\n")
+		case "json":
+			payload, marshalErr := json.Marshal(struct {
+				State  string `json:"state"`
+				Binary string `json:"binary,omitempty"`
+			}{
+				State:  status.state(),
+				Binary: status.binary,
+			})
+			if marshalErr != nil {
+				log.Fatal(E.Cause(marshalErr, "encode service status"))
+			}
+			os.Stdout.WriteString(string(payload) + "\n")
+		default:
+			log.Fatal(E.New("unsupported status format: ", commandServiceStatusFlagFormat))
+		}
 		os.Exit(status.exitCode)
 	},
 }
@@ -57,10 +78,25 @@ var commandServiceStatus = &cobra.Command{
 type serviceStatusResult struct {
 	exitCode    int
 	description string
+	binary      string
+}
+
+func (r *serviceStatusResult) state() string {
+	switch r.exitCode {
+	case 0:
+		return "running"
+	case 2:
+		return "stopped"
+	case 3:
+		return "not-installed"
+	default:
+		return r.description
+	}
 }
 
 func init() {
-	commandService.PersistentFlags().StringVarP(&commandServiceFlagWorkingDirectory, "working-directory", "D", defaultServiceWorkingDirectory, "daemon working directory")
+	commandService.PersistentFlags().StringVarP(&commandServiceFlagWorkingDirectory, "working-directory", "D", activeNames.defaultWorkingDirectory(), "daemon working directory")
+	commandServiceStatus.Flags().StringVar(&commandServiceStatusFlagFormat, "format", "text", "output format: text or json")
 	commandService.AddCommand(commandServiceStart)
 	commandService.AddCommand(commandServiceStop)
 	commandService.AddCommand(commandServiceStatus)

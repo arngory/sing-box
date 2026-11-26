@@ -6,8 +6,6 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-const defaultServiceWorkingDirectory = ""
-
 func addPlatformServiceCommands() {
 }
 

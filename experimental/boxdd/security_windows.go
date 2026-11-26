@@ -22,8 +22,11 @@ import (
 )
 
 const (
-	trustedInstallerUserID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
-	fileDeleteChildAccess  = 0x00000040
+	trustedInstallerUserID             = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+	fileDeleteChildAccess              = 0x00000040
+	accessDeniedObjectACEType          = 6  // ACCESS_DENIED_OBJECT_ACE_TYPE (<winnt.h>)
+	accessDeniedCallbackACEType        = 10 // ACCESS_DENIED_CALLBACK_ACE_TYPE (<winnt.h>)
+	accessDeniedCallbackObjectACEType  = 12 // ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE (<winnt.h>)
 )
 
 func secureWindowsInstallation(executablePath string, allowUnsafeInstallation bool) (string, error) {
@@ -90,12 +93,12 @@ func installedApplicationPath(daemonPath string) (string, string, error) {
 	daemonDirectory := filepath.Dir(daemonPath)
 	resourcesDirectory := filepath.Dir(daemonDirectory)
 	installationDirectory := filepath.Dir(resourcesDirectory)
-	if !strings.EqualFold(filepath.Base(daemonPath), daemonExecutableName) ||
+	if !strings.EqualFold(filepath.Base(daemonPath), activeNames.DaemonExe) ||
 		!strings.EqualFold(filepath.Base(daemonDirectory), "daemon") ||
 		!strings.EqualFold(filepath.Base(resourcesDirectory), "resources") {
-		return "", "", E.New("daemon executable is outside the installed sing-box layout")
+		return "", "", E.New("daemon executable is outside the installed ", activeNames.Product, " layout")
 	}
-	return installationDirectory, filepath.Join(installationDirectory, applicationExecutableName), nil
+	return installationDirectory, filepath.Join(installationDirectory, activeNames.ApplicationExe), nil
 }
 
 func windowsWorkingDirectorySecurityDescriptors(serviceUserID *windows.SID) (string, string, error) {
@@ -141,7 +144,7 @@ func secureWindowsWorkingDirectoryRoot(path string, serviceUserID *windows.SID) 
 }
 
 func windowsServiceSID() (*windows.SID, error) {
-	serviceNameUTF16 := utf16.Encode([]rune(strings.ToUpper(serviceName)))
+	serviceNameUTF16 := utf16.Encode([]rune(strings.ToUpper(activeNames.Service)))
 	serviceNameContent := make([]byte, len(serviceNameUTF16)*2)
 	for index, codeUnit := range serviceNameUTF16 {
 		binary.LittleEndian.PutUint16(serviceNameContent[index*2:], codeUnit)
@@ -314,7 +317,7 @@ func validateFixedNTFSVolume(path string) (string, error) {
 		return "", err
 	}
 	if windows.GetDriveType(volumePathPointer) != windows.DRIVE_FIXED {
-		return "", E.New("sing-box must be installed on a fixed local drive")
+		return "", E.New(activeNames.Product, " must be installed on a fixed local drive")
 	}
 	fileSystemNameBuffer := make([]uint16, 32)
 	err = windows.GetVolumeInformation(
@@ -331,7 +334,7 @@ func validateFixedNTFSVolume(path string) (string, error) {
 		return "", E.Cause(err, "query installation file system")
 	}
 	if !strings.EqualFold(windows.UTF16ToString(fileSystemNameBuffer), "NTFS") {
-		return "", E.New("sing-box must be installed on NTFS")
+		return "", E.New(activeNames.Product, " must be installed on NTFS")
 	}
 	return filepath.Clean(volumePath), nil
 }
@@ -434,8 +437,17 @@ func validateInstallationAncestor(path string, allowUnsafePermissions bool) erro
 		if accessControlEntry.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
-		if accessControlEntry.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		// Deny ACE types restrict access and cannot grant write privileges.
+		switch accessControlEntry.Header.AceType {
+		case windows.ACCESS_DENIED_ACE_TYPE,
+			accessDeniedObjectACEType,
+			accessDeniedCallbackACEType,
+			accessDeniedCallbackObjectACEType:
 			continue
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		default:
+			// Treat conditional/callback/unknown allow ACE types as unsafe because they may grant write access.
+			return E.New("installation ancestor has an unsupported access control entry type: ", path)
 		}
 		mask := uint32(accessControlEntry.Mask)
 		dangerousAccess := uint32(windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL | fileDeleteChildAccess)
