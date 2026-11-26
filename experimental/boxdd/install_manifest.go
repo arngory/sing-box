@@ -131,10 +131,27 @@ func verifyInstallManifest(root string, expectedManifestSHA256 string, daemonExe
 }
 
 func parseInstallManifest(data []byte, daemonExe string) ([]manifestEntry, error) {
-	seen := make(map[string]bool)
-	var entries []manifestEntry
 	selfDaemonRel := strings.ToLower(path.Join("resources", "daemon", daemonExe))
 	manifestRel := strings.ToLower(installManifestRelativePath)
+	return parseManifestEntries(data, []string{selfDaemonRel, manifestRel}, false)
+}
+
+func parseLinuxDaemonManifest(data []byte, daemonBin string) ([]manifestEntry, error) {
+	reserved := []string{
+		strings.ToLower(daemonBin),
+		"files.sha256",
+		".niko-install",
+	}
+	return parseManifestEntries(data, reserved, true)
+}
+
+func parseManifestEntries(data []byte, reservedKeys []string, allowEmpty bool) ([]manifestEntry, error) {
+	seen := make(map[string]bool)
+	reserved := make(map[string]bool, len(reservedKeys))
+	for _, r := range reservedKeys {
+		reserved[r] = true
+	}
+	var entries []manifestEntry
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	lineNum := 0
@@ -168,7 +185,7 @@ func parseInstallManifest(data []byte, daemonExe string) ([]manifestEntry, error
 			}
 		}
 		key := strings.ToLower(cleaned)
-		if key == manifestRel || key == selfDaemonRel {
+		if reserved[key] {
 			return nil, E.New("reserved self-referential path in install manifest: ", cleaned)
 		}
 		if seen[key] {
@@ -184,7 +201,7 @@ func parseInstallManifest(data []byte, daemonExe string) ([]manifestEntry, error
 	if err := scanner.Err(); err != nil {
 		return nil, E.Cause(err, "scan install manifest")
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && !allowEmpty {
 		return nil, E.New("install manifest is empty")
 	}
 	return entries, nil

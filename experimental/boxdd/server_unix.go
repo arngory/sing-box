@@ -6,6 +6,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
+
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
 func listenEndpoint() (net.Listener, error) {
@@ -13,8 +16,30 @@ func listenEndpoint() (net.Listener, error) {
 	if path == "" {
 		path = filepath.Join(workingDirectory, activeNames.Service+".sock")
 	}
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != workingDirectory {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		if os.Geteuid() == 0 {
+			info, err := os.Lstat(dir)
+			if err != nil {
+				return nil, err
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ok || st.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+				return nil, E.New("socket directory is not a root-owned protected directory: ", dir)
+			}
+		}
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, E.New("refusing to remove non-socket path at ", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 	listener, err := net.Listen("unix", path)
