@@ -34,8 +34,12 @@ type ownerState struct {
 }
 
 func userWorkingDirectory(userID string) string {
+	return userWorkingDirectoryAt(workingDirectory, userID)
+}
+
+func userWorkingDirectoryAt(root string, userID string) string {
 	digest := sha256.Sum256([]byte(userID))
-	return filepath.Join(workingDirectory, usersDirectoryName, hex.EncodeToString(digest[:]))
+	return filepath.Join(root, usersDirectoryName, hex.EncodeToString(digest[:]))
 }
 
 func loadOwner() (string, error) {

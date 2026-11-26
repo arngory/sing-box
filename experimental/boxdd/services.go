@@ -23,6 +23,25 @@ import (
 // Options are what a program adds to the daemon.
 type Options struct {
 	Services []Service
+	// Names selects the service, pipe, executable, working directory, and PolicyKit identifiers.
+	// Zero value uses DefaultNames() (upstream sing-box).
+	Names Names
+	// WorkerTransport selects the window <-> worker IPC transport on Windows (default: named pipe).
+	WorkerTransport WorkerTransport
+	// InstallRoot selects whether "service install" installs in place or copies into <ProgramFiles>\<Product>.
+	InstallRoot InstallRoot
+	// InstallManifestSHA256 is the expected hex SHA-256 of resources\files.sha256 when installing into
+	// Program Files. Empty skips manifest verification unless required by the caller.
+	InstallManifestSHA256 string
+	// DevelopmentListen enables the --listen 127.0.0.1:<port> development mode flag.
+	DevelopmentListen bool
+}
+
+// Caller is the verified local peer invoking a daemon RPC.
+type Caller struct {
+	UserID    string
+	SessionID uint32
+	ProcessID uint32
 }
 
 // Service is a gRPC service the daemon serves beside its own, through the same listener, credentials and
@@ -67,6 +86,15 @@ type Host interface {
 	// TUN's platform.http_proxy is (SystemProxy). PermissionDenied when another user owns the daemon; the core's own
 	// error for a config it refuses. It takes the lifecycle lock: a method that calls it is not PolicyOwner's.
 	StartService(ctx context.Context, configContent string, systemProxy *SystemProxy) error
+	// Caller returns the verified peer identity for ctx, or codes.Unauthenticated if absent.
+	Caller(ctx context.Context) (Caller, error)
+	// WorkingDirectory returns the daemon's absolute root working directory captured at startup,
+	// unaffected by runtime os.Chdir calls into per-user directories.
+	WorkingDirectory() string
+	// UserDirectory returns the daemon's per-user directory (<WorkingDirectory>/users/<sha256(userID)>),
+	// or empty string when userID is empty. Callers running in a privileged service must pass only a
+	// UserID obtained from Caller(ctx) (or an already-authorized owner) to avoid cross-user access.
+	UserDirectory(userID string) string
 }
 
 // SystemProxy is a system proxy a core's start asks for, as a TUN's platform.http_proxy (an HTTP proxy of the
@@ -155,6 +183,32 @@ func (d *Daemon) StartService(ctx context.Context, configContent string, systemP
 		return status.Error(codes.Unauthenticated, err.Error())
 	}
 	return d.startServiceFor(ctx, identity, configContent, nil, systemProxy)
+}
+
+func (d *Daemon) Caller(ctx context.Context) (Caller, error) {
+	identity, err := peerIdentityFromContext(ctx)
+	if err != nil {
+		return Caller{}, status.Error(codes.Unauthenticated, err.Error())
+	}
+	return Caller{
+		UserID:    identity.UserID,
+		SessionID: identity.SessionID,
+		ProcessID: identity.ProcessID,
+	}, nil
+}
+
+func (d *Daemon) WorkingDirectory() string {
+	if d.rootDirectory != "" {
+		return d.rootDirectory
+	}
+	return workingDirectory
+}
+
+func (d *Daemon) UserDirectory(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	return userWorkingDirectoryAt(d.WorkingDirectory(), userID)
 }
 
 // registerServices makes and registers the added services, refusing one whose name is taken or whose Methods name a
