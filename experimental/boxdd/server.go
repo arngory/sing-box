@@ -35,6 +35,7 @@ type Daemon struct {
 	powerManager            *powerreport.Manager
 	oomRecorder             *oomkiller.Recorder
 	server                  *grpc.Server
+	rootDirectory           string
 	runtimeWorkingDirectory string
 	lifecycleAccess         sync.Mutex
 	closed                  bool
@@ -51,6 +52,7 @@ func newDaemon() (*Daemon, error) {
 	d := &Daemon{
 		ctx:                     ctx,
 		logger:                  log.StdLogger(),
+		rootDirectory:           workingDirectory,
 		runtimeWorkingDirectory: workingDirectory,
 	}
 	platformInterface, err := newPlatformInterface(d)
@@ -110,8 +112,12 @@ func newDaemon() (*Daemon, error) {
 
 func (d *Daemon) listen() (net.Listener, error) {
 	if listenAddress != "" {
-		d.logger.Warn("listening on TCP address ", listenAddress, ": development only, no access control")
-		return net.Listen("tcp", listenAddress)
+		addrPort, err := validateListenAddress(listenAddress)
+		if err != nil {
+			return nil, err
+		}
+		d.logger.Warn("listening on TCP address ", addrPort.String(), ": development only, no access control")
+		return net.Listen("tcp4", addrPort.String())
 	}
 	return listenEndpoint()
 }

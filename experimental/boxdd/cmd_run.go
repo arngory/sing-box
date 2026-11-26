@@ -1,6 +1,7 @@
 package boxdd
 
 import (
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -71,7 +72,33 @@ func prepareWorkingDirectory() error {
 	return nil
 }
 
+var loopbackIPv4 = netip.AddrFrom4([4]byte{127, 0, 0, 1})
+
+// niko: --listen accepts 127.0.0.1:<1024..65535> literally, and only when the binary was built with
+// DevelopmentListen enabled (docs/design/desktop-stage3.md, §6).
+func validateListenAddress(raw string) (netip.AddrPort, error) {
+	if !activeOptions.DevelopmentListen {
+		return netip.AddrPort{}, E.New("this build has no development mode")
+	}
+	addrPort, err := netip.ParseAddrPort(raw)
+	if err != nil {
+		return netip.AddrPort{}, E.New("--listen takes 127.0.0.1:<1024..65535> and nothing else")
+	}
+	if !addrPort.Addr().Is4() || addrPort.Addr() != loopbackIPv4 || addrPort.Addr().Zone() != "" {
+		return netip.AddrPort{}, E.New("--listen takes 127.0.0.1:<1024..65535> and nothing else")
+	}
+	if addrPort.Port() < 1024 {
+		return netip.AddrPort{}, E.New("--listen port must be between 1024 and 65535")
+	}
+	return addrPort, nil
+}
+
 func run() error {
+	if listenAddress != "" {
+		if _, err := validateListenAddress(listenAddress); err != nil {
+			return err
+		}
+	}
 	handled, err := runService()
 	if handled {
 		return err

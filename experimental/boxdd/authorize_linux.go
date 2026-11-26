@@ -18,12 +18,10 @@ import (
 )
 
 const (
-	policyKitService               = "org.freedesktop.PolicyKit1"
-	policyKitAuthorityPath         = dbus.ObjectPath("/org/freedesktop/PolicyKit1/Authority")
-	policyKitAuthorityInterface    = "org.freedesktop.PolicyKit1.Authority"
-	policyKitTakeOverAction        = "io.nekohasekai.sfl.take-over-service"
-	policyKitSetInsecureModeAction = "io.nekohasekai.sfl.set-insecure-mode"
-	policyKitAllowUserInteraction  = uint32(1)
+	policyKitService              = "org.freedesktop.PolicyKit1"
+	policyKitAuthorityPath        = dbus.ObjectPath("/org/freedesktop/PolicyKit1/Authority")
+	policyKitAuthorityInterface   = "org.freedesktop.PolicyKit1.Authority"
+	policyKitAllowUserInteraction = uint32(1)
 )
 
 type policyKitSubject struct {
@@ -38,12 +36,12 @@ type policyKitAuthorizationResult struct {
 }
 
 func authorizeTakeOver(ctx context.Context, identity peerIdentity) error {
-	return checkPolicyKitAuthorization(ctx, identity, policyKitTakeOverAction)
+	return checkPolicyKitAuthorization(ctx, identity, activeNames.polkitTakeOverAction())
 }
 
 func authorizeSetInsecureMode(ctx context.Context, identity peerIdentity, enabled bool) error {
 	if enabled {
-		return checkPolicyKitAuthorization(ctx, identity, policyKitSetInsecureModeAction)
+		return checkPolicyKitAuthorization(ctx, identity, activeNames.polkitSetInsecureModeAction())
 	}
 	ownerUserID, err := loadOwner()
 	if err != nil {
@@ -74,7 +72,7 @@ func checkPolicyKitAuthorization(ctx context.Context, identity peerIdentity, act
 	if err != nil {
 		return E.Cause(err, "create PolicyKit cancellation ID")
 	}
-	cancellationID := "sing-box-" + hex.EncodeToString(cancellationContent)
+	cancellationID := activeNames.Service + "-" + hex.EncodeToString(cancellationContent)
 	connection, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return E.Cause(err, "connect to system bus")

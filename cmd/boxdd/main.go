@@ -5,5 +5,5 @@ package main
 import "github.com/sagernet/sing-box/experimental/boxdd"
 
 func main() {
-	boxdd.Main(boxdd.Options{})
+	boxdd.Main(boxdd.Options{DevelopmentListen: true})
 }

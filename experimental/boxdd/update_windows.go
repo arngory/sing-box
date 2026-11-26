@@ -22,7 +22,6 @@ import (
 
 const (
 	updateInstallerDesktop = `winsta0\default`
-	updateProductName      = "sing-box"
 	seTcbPrivilege         = "SeTcbPrivilege"
 	seAssignPrimaryToken   = "SeAssignPrimaryTokenPrivilege"
 	seIncreaseQuota        = "SeIncreaseQuotaPrivilege"
@@ -63,12 +62,12 @@ func (d *Daemon) installUpdate(identity peerIdentity, installerPath string) (*In
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, E.Cause(err, "read update installer identity").Error())
 	}
-	if installerIdentity.productName != updateProductName {
-		return nil, status.Error(codes.InvalidArgument, "update executable is not a sing-box installer")
+	if installerIdentity.productName != activeNames.UpdateProductName {
+		return nil, status.Error(codes.InvalidArgument, "update executable is not a "+activeNames.Product+" installer")
 	}
 	err = validateNSISExecutable(installerFinalPath)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, E.Cause(err, "update executable is not a sing-box installer").Error())
+		return nil, status.Error(codes.InvalidArgument, E.Cause(err, "update executable is not a "+activeNames.Product+" installer").Error())
 	}
 	installerSigner, err := authenticodeSigner(installerFinalPath, installer)
 	if err != nil {

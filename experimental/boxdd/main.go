@@ -14,10 +14,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const serviceName = "sing-box-daemon"
-
 var mainCommand = &cobra.Command{
-	Use:     serviceName,
+	Use:     activeNames.Service,
 	Version: C.Version,
 }
 
@@ -26,7 +24,7 @@ var commandVersion = &cobra.Command{
 	Short: "Print the daemon version",
 	Args:  cobra.NoArgs,
 	Run: func(command *cobra.Command, args []string) {
-		fmt.Println("sing-box-daemon version", C.Version)
+		fmt.Println(activeNames.Service, "version", C.Version)
 		fmt.Println("core api version", daemon.APIVersion)
 	},
 }
@@ -38,13 +36,15 @@ func init() {
 // Main runs the daemon's command line with what a program adds to it (niko: services.go); cmd/boxdd gives nothing and
 // is upstream's boxdd.
 func Main(options Options) {
-	addedServices = options.Services
 	logFactory := log.NewDefaultFactory(context.Background(), log.Formatter{
 		BaseTime:      time.Now(),
 		DisableColors: true,
 	}, os.Stderr, "", nil, false)
 	common.Must(logFactory.Start())
 	log.SetStdLogger(logFactory.Logger())
+	if err := applyOptions(options); err != nil {
+		log.Fatal(err)
+	}
 	err := mainCommand.Execute()
 	if err != nil {
 		log.Fatal(err)

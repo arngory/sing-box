@@ -11,7 +11,7 @@ import (
 func listenEndpoint() (net.Listener, error) {
 	path := socketPath
 	if path == "" {
-		path = filepath.Join(workingDirectory, serviceName+".sock")
+		path = filepath.Join(workingDirectory, activeNames.Service+".sock")
 	}
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {

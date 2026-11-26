@@ -31,7 +31,7 @@ func runService() (bool, error) {
 	if !isWindowsService {
 		return false, nil
 	}
-	return true, svc.Run(serviceName, &windowsService{})
+	return true, svc.Run(activeNames.Service, &windowsService{})
 }
 
 func preparePlatformWorkingDirectory() error {
@@ -113,7 +113,7 @@ func (s *windowsService) Execute(arguments []string, requests <-chan svc.ChangeR
 }
 
 func serviceLogError(err error) {
-	eventLog, openError := eventlog.Open(serviceName)
+	eventLog, openError := eventlog.Open(activeNames.Service)
 	if openError != nil {
 		return
 	}
