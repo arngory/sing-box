@@ -1,0 +1,22 @@
+[
+  {
+    "name": "sequential-bytes",
+    "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "client_nonce_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "server_nonce_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "window_pid": 1234,
+    "worker_pid": 5678,
+    "server_mac_hex": "66f3ee69ed8f875a4ee6f16c4a52d8cfe49eaa47f1419e2bef0892df7ec6ef28",
+    "client_mac_hex": "041ad7eefcd51ee0492ad9f6327a7018ccd2943bde1aa482700c9936b835ebd4"
+  },
+  {
+    "name": "high-pids",
+    "key_hex": "ffffffffffffffffffffffffffffffff00000000000000000000000000000000",
+    "client_nonce_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "server_nonce_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+    "window_pid": 2147483647,
+    "worker_pid": 2147483649,
+    "server_mac_hex": "b9216e2b60d264e95c1434381733a682202fbcb36e7071c4ca693c8e2f0d7868",
+    "client_mac_hex": "248357f19795fc14984e911db9e1c61a2ee9ed6c39ec2d922487873f96654bd7"
+  }
+]

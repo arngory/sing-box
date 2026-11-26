@@ -16,6 +16,10 @@ func (unixWorkerParent) Close() error {
 	return nil
 }
 
+func (unixWorkerParent) Exited() <-chan struct{} {
+	return nil
+}
+
 func prepareWorkerParent(parentProcessID uint32) (workerParent, error) {
 	if uint32(os.Getppid()) != parentProcessID {
 		return nil, E.New("worker was not started by the expected application process")
@@ -45,4 +49,8 @@ func startWorkerDaemonRelay(path string, parent workerParent, onFailure func(err
 		return nil, E.New("daemon relay is only supported on Windows")
 	}
 	return nil, nil
+}
+
+func startWorkerUnixDaemonRelay(path string, parent workerParent, key *[workerKeySize]byte, onFailure func(error)) (io.Closer, string, error) {
+	return nil, "", E.New("AF_UNIX daemon relay is only supported on Windows")
 }

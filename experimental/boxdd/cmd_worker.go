@@ -19,11 +19,13 @@ import (
 var (
 	workerSocketPath            string
 	workerDaemonRelaySocketPath string
+	workerDaemonRelayUnixPath   string
 	workerParentProcessID       uint32
 )
 
 type workerParent interface {
 	Close() error
+	Exited() <-chan struct{}
 }
 
 var commandWorker = &cobra.Command{
@@ -41,16 +43,49 @@ var commandWorker = &cobra.Command{
 func init() {
 	commandWorker.Flags().StringVar(&workerSocketPath, "socket", "", "listen on the specified unix domain socket path, or named pipe path on Windows")
 	commandWorker.Flags().StringVar(&workerDaemonRelaySocketPath, "daemon-relay-socket", "", "relay the authenticated Windows daemon connection on the specified named pipe path")
+	commandWorker.Flags().StringVar(&workerDaemonRelayUnixPath, "daemon-relay-unix", "", "relay the authenticated Windows daemon connection on the specified AF_UNIX socket path")
 	commandWorker.Flags().Uint32Var(&workerParentProcessID, "parent-pid", 0, "expected application parent process ID")
 	mainCommand.AddCommand(commandWorker)
 }
 
-func runWorker() error {
-	if workerSocketPath == "" {
-		return E.New("missing --socket")
-	}
-	if workerParentProcessID == 0 {
+func validateWorkerFlags(transport WorkerTransport, socket, relaySocket, relayUnix string, parentPID uint32) error {
+	if parentPID == 0 {
 		return E.New("missing --parent-pid")
+	}
+	switch transport {
+	case WorkerTransportUnix:
+		if socket != "" || relaySocket != "" {
+			return E.New("--socket and --daemon-relay-socket are not supported in AF_UNIX worker mode")
+		}
+		if relayUnix == "" {
+			return E.New("missing --daemon-relay-unix")
+		}
+		return validateWorkerUnixSocketPath(relayUnix)
+	case WorkerTransportPipe:
+		if relayUnix != "" {
+			return E.New("--daemon-relay-unix is not supported in named pipe worker mode")
+		}
+		if socket == "" {
+			return E.New("missing --socket")
+		}
+		return nil
+	default:
+		return E.New("unsupported worker transport")
+	}
+}
+
+func runWorker() error {
+	if err := validateWorkerFlags(
+		activeOptions.WorkerTransport,
+		workerSocketPath,
+		workerDaemonRelaySocketPath,
+		workerDaemonRelayUnixPath,
+		workerParentProcessID,
+	); err != nil {
+		return err
+	}
+	if activeOptions.WorkerTransport == WorkerTransportUnix {
+		return runUnixRelayWorker()
 	}
 	parent, err := prepareWorkerParent(workerParentProcessID)
 	if err != nil {
@@ -101,4 +136,48 @@ func runWorker() error {
 		return err
 	}
 	return nil
+}
+
+func runUnixRelayWorker() error {
+	key, err := readWorkerKey(os.Stdin, workerHandshakeTimeout)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(key[:])
+
+	parent, err := prepareWorkerParent(workerParentProcessID)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+
+	relayErrorChannel := make(chan error, 1)
+	doneChannel := make(chan struct{})
+	relay, bindPath, err := startWorkerUnixDaemonRelay(workerDaemonRelayUnixPath, parent, key, func(relayError error) {
+		select {
+		case relayErrorChannel <- relayError:
+		default:
+		}
+	})
+	if err != nil {
+		return err
+	}
+	defer relay.Close()
+
+	go func() {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		close(doneChannel)
+	}()
+
+	fmt.Printf("READY %s\n", bindPath)
+	_ = os.Stdout.Sync()
+
+	select {
+	case relayError := <-relayErrorChannel:
+		return relayError
+	case <-doneChannel:
+		return nil
+	case <-parent.Exited():
+		return nil
+	}
 }

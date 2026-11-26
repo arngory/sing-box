@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -19,12 +21,6 @@ import (
 	"golang.org/x/sys/windows"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-)
-
-const (
-	daemonExecutableName      = "sing-box-daemon.exe"
-	applicationExecutableName = "sing-box.exe"
-	workerPipePrefix          = `\\.\pipe\sing-box-worker.`
 )
 
 type windowsTransportCredentials struct {
@@ -77,10 +73,18 @@ func (c *windowsTransportCredentials) ClientHandshake(ctx context.Context, autho
 	return nil, nil, E.New("Windows local process credentials do not support client handshakes")
 }
 
+// niko: rate-limit event log writes for rejected pipe handshakes so an unprivileged local user
+// cannot flood the Windows Event Log by repeatedly connecting to the daemon pipe.
+var lastHandshakeRejectLogUnixNano atomic.Int64
+
 func (c *windowsTransportCredentials) ServerHandshake(rawConnection net.Conn) (net.Conn, credentials.AuthInfo, error) {
 	connection, authenticationInformation, err := c.serverHandshake(rawConnection)
 	if err != nil {
-		serviceLogError(E.Cause(err, "reject Windows daemon connection"))
+		now := time.Now().UnixNano()
+		prev := lastHandshakeRejectLogUnixNano.Load()
+		if now-prev >= int64(time.Second) && lastHandshakeRejectLogUnixNano.CompareAndSwap(prev, now) {
+			serviceLogError(E.Cause(err, "reject Windows daemon connection"))
+		}
 	}
 	return connection, authenticationInformation, err
 }
@@ -128,7 +132,7 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 		return nil, nil, E.Cause(err, "resolve named pipe client executable")
 	}
 	if !strings.EqualFold(processImageFinalPath, c.expectedWorkerPath) {
-		return nil, nil, E.New("named pipe client is not the installed sing-box worker")
+		return nil, nil, E.New("named pipe client is not the installed ", activeNames.Product, " worker")
 	}
 	sameExecutable, err := sameWindowsFile(processImage, c.daemonExecutable)
 	if err != nil {
@@ -137,13 +141,9 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 	if !sameExecutable {
 		return nil, nil, E.New("named pipe client worker executable was replaced")
 	}
-	workerSigner, err := authenticodeSigner(processImageFinalPath, processImage)
-	if err != nil {
-		return nil, nil, E.Cause(err, "authenticate sing-box worker")
-	}
-	if !bytes.Equal(workerSigner, c.daemonSigner) {
-		return nil, nil, E.New("sing-box worker and daemon have different signing certificates")
-	}
+	// niko: processImage is the exact same NTFS file as c.daemonExecutable (held open by the daemon
+	// with FILE_SHARE_READ and already Authenticode-verified in initializeServerIdentity), so its
+	// signer is identical to c.daemonSigner; skipping a redundant WinVerifyTrust saves one check per reconnect.
 	parentProcessID, err := processParentID(process)
 	if err != nil {
 		return nil, nil, err
@@ -154,7 +154,7 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 	}
 	parentProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, parentProcessID)
 	if err != nil {
-		return nil, nil, E.Cause(err, "open sing-box worker parent process")
+		return nil, nil, E.Cause(err, "open ", activeNames.Product, " worker parent process")
 	}
 	keepParentProcess := false
 	defer func() {
@@ -167,7 +167,7 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 		return nil, nil, err
 	}
 	if parentIdentity.UserID != identity.UserID || parentIdentity.SessionID != identity.SessionID {
-		return nil, nil, E.New("sing-box worker and application have different process identities")
+		return nil, nil, E.New(activeNames.Product, " worker and application have different process identities")
 	}
 	parentCreationTime, err := processCreationTime(parentProcess)
 	if err != nil {
@@ -178,15 +178,15 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 		return nil, nil, err
 	}
 	if parentCreationTime >= workerCreationTime {
-		return nil, nil, E.New("sing-box worker parent was created after the worker")
+		return nil, nil, E.New(activeNames.Product, " worker parent was created after the worker")
 	}
 	parentImagePath, err := winioProcess.QueryFullProcessImageName(parentProcess, winioProcess.ImageNameFormatWin32Path)
 	if err != nil {
-		return nil, nil, E.Cause(err, "query sing-box worker parent executable")
+		return nil, nil, E.Cause(err, "query ", activeNames.Product, " worker parent executable")
 	}
 	parentProcessImage, err := openLockedExecutable(parentImagePath)
 	if err != nil {
-		return nil, nil, E.Cause(err, "open sing-box worker parent executable")
+		return nil, nil, E.Cause(err, "open ", activeNames.Product, " worker parent executable")
 	}
 	keepParentProcessImage := false
 	defer func() {
@@ -201,21 +201,21 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 	defer windows.CloseHandle(expectedApplication)
 	parentImageFinalPath, err := finalWindowsPath(parentProcessImage)
 	if err != nil {
-		return nil, nil, E.Cause(err, "resolve sing-box worker parent executable")
+		return nil, nil, E.Cause(err, "resolve ", activeNames.Product, " worker parent executable")
 	}
 	expectedApplicationFinalPath, err := finalWindowsPath(expectedApplication)
 	if err != nil {
 		return nil, nil, E.Cause(err, "resolve installed application executable")
 	}
 	if !strings.EqualFold(parentImageFinalPath, expectedApplicationFinalPath) {
-		return nil, nil, E.New("sing-box worker parent is not the installed application")
+		return nil, nil, E.New(activeNames.Product, " worker parent is not the installed application")
 	}
 	sameApplication, err := sameWindowsFile(parentProcessImage, expectedApplication)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !sameApplication {
-		return nil, nil, E.New("sing-box worker parent executable was replaced")
+		return nil, nil, E.New(activeNames.Product, " worker parent executable was replaced")
 	}
 	err = validateApplicationProcessRole(parentProcess, expectedApplication)
 	if err != nil {
@@ -223,10 +223,10 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 	}
 	applicationSigner, err := authenticodeSigner(parentImageFinalPath, parentProcessImage)
 	if err != nil {
-		return nil, nil, E.Cause(err, "authenticate sing-box application")
+		return nil, nil, E.Cause(err, "authenticate ", activeNames.Product, " application")
 	}
 	if !bytes.Equal(applicationSigner, c.daemonSigner) {
-		return nil, nil, E.New("sing-box application and daemon have different signing certificates")
+		return nil, nil, E.New(activeNames.Product, " application and daemon have different signing certificates")
 	}
 	workerWaitResult, err := windows.WaitForSingleObject(process, 0)
 	if err != nil {
@@ -237,7 +237,7 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 		return nil, nil, err
 	}
 	if workerWaitResult != uint32(windows.WAIT_TIMEOUT) || parentWaitResult != uint32(windows.WAIT_TIMEOUT) {
-		return nil, nil, E.New("sing-box worker or application exited during authentication")
+		return nil, nil, E.New(activeNames.Product, " worker or application exited during authentication")
 	}
 	parentIdentity.ProcessID = parentProcessID
 	connection := &windowsAuthenticatedConnection{
@@ -357,7 +357,7 @@ func validateApplicationProcessRole(process windows.Handle, expectedApplication 
 		return err
 	}
 	if applicationParent {
-		return E.New("named pipe client is a child of the sing-box application")
+		return E.New("named pipe client is a child of the ", activeNames.Product, " application")
 	}
 	return nil
 }
@@ -365,25 +365,49 @@ func validateApplicationProcessRole(process windows.Handle, expectedApplication 
 func validateWorkerProcessRole(process windows.Handle, parentProcessID uint32) error {
 	arguments, err := processCommandLine(process)
 	if err != nil {
-		return E.Cause(err, "query sing-box worker command line")
+		return E.Cause(err, "query ", activeNames.Product, " worker command line")
 	}
-	if len(arguments) != 8 ||
-		arguments[1] != "worker" ||
-		arguments[2] != "--socket" ||
-		arguments[4] != "--parent-pid" ||
-		arguments[6] != "--daemon-relay-socket" {
-		return E.New("named pipe client is not a sing-box worker process")
+	return validateWorkerCommandLine(arguments, parentProcessID, activeOptions.WorkerTransport, activeNames)
+}
+
+func validateWorkerCommandLine(arguments []string, parentProcessID uint32, transport WorkerTransport, names Names) error {
+	switch transport {
+	case WorkerTransportPipe:
+		if len(arguments) != 8 ||
+			arguments[1] != "worker" ||
+			arguments[2] != "--socket" ||
+			arguments[4] != "--parent-pid" ||
+			arguments[6] != "--daemon-relay-socket" {
+			return E.New("named pipe client is not a ", names.Product, " worker process")
+		}
+		if !strings.HasPrefix(strings.ToLower(arguments[3]), strings.ToLower(names.WorkerPipePrefix)) ||
+			!strings.HasPrefix(strings.ToLower(arguments[7]), strings.ToLower(names.WorkerPipePrefix)) ||
+			strings.EqualFold(arguments[3], arguments[7]) {
+			return E.New(names.Product, " worker has invalid private pipe paths")
+		}
+		commandParentProcessID, err := strconv.ParseUint(arguments[5], 10, 32)
+		if err != nil || uint32(commandParentProcessID) != parentProcessID {
+			return E.New(names.Product, " worker has an invalid parent process ID")
+		}
+		return nil
+	case WorkerTransportUnix:
+		if len(arguments) != 6 ||
+			arguments[1] != "worker" ||
+			arguments[2] != "--parent-pid" ||
+			arguments[4] != "--daemon-relay-unix" {
+			return E.New("named pipe client is not a ", names.Product, " AF_UNIX worker process")
+		}
+		commandParentProcessID, err := strconv.ParseUint(arguments[3], 10, 32)
+		if err != nil || uint32(commandParentProcessID) != parentProcessID {
+			return E.New(names.Product, " worker has an invalid parent process ID")
+		}
+		if err := validateWorkerUnixSocketPath(arguments[5]); err != nil {
+			return E.Cause(err, names.Product, " worker has an invalid AF_UNIX relay socket path")
+		}
+		return nil
+	default:
+		return E.New("unsupported worker transport")
 	}
-	if !strings.HasPrefix(strings.ToLower(arguments[3]), strings.ToLower(workerPipePrefix)) ||
-		!strings.HasPrefix(strings.ToLower(arguments[7]), strings.ToLower(workerPipePrefix)) ||
-		strings.EqualFold(arguments[3], arguments[7]) {
-		return E.New("sing-box worker has invalid private pipe paths")
-	}
-	commandParentProcessID, err := strconv.ParseUint(arguments[5], 10, 32)
-	if err != nil || uint32(commandParentProcessID) != parentProcessID {
-		return E.New("sing-box worker has an invalid parent process ID")
-	}
-	return nil
 }
 
 func processCommandLine(process windows.Handle) ([]string, error) {

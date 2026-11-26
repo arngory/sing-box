@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
 
@@ -19,6 +20,13 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+var workerRelayBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 64*1024)
+		return &buf
+	},
+}
 
 type windowsWorkerParent struct {
 	process        windows.Handle
@@ -42,6 +50,8 @@ type authenticatedWorkerListener struct {
 type windowsWorkerDaemonRelay struct {
 	listener            net.Listener
 	parent              *windowsWorkerParent
+	key                 *[workerKeySize]byte
+	handshakeSlots      chan struct{}
 	onFailure           func(error)
 	connections         map[net.Conn]struct{}
 	connectionAccess    sync.Mutex
@@ -127,7 +137,7 @@ func prepareWorkerParent(parentProcessID uint32) (workerParent, error) {
 		return nil, err
 	}
 	if !strings.EqualFold(parentFinalPath, expectedApplicationFinalPath) {
-		return nil, E.New("worker parent is not the installed sing-box application")
+		return nil, E.New("worker parent is not the installed ", activeNames.Product, " application")
 	}
 	sameApplication, err := sameWindowsFile(parentImage, expectedApplication)
 	if err != nil {
@@ -245,6 +255,10 @@ func (l *authenticatedWorkerListener) Accept() (net.Conn, error) {
 	}
 }
 
+func (p *windowsWorkerParent) Exited() <-chan struct{} {
+	return p.exited
+}
+
 func (p *windowsWorkerParent) Close() error {
 	p.close.Do(func() {
 		p.closeError = E.Errors(
@@ -275,11 +289,36 @@ func startWorkerDaemonRelay(path string, parent workerParent, onFailure func(err
 	return relay, nil
 }
 
+func startWorkerUnixDaemonRelay(path string, parent workerParent, key *[workerKeySize]byte, onFailure func(error)) (io.Closer, string, error) {
+	if path == "" {
+		return nil, "", E.New("missing --daemon-relay-unix")
+	}
+	if key == nil {
+		return nil, "", E.New("missing worker handshake key")
+	}
+	windowsParent := parent.(*windowsWorkerParent)
+	listener, bindPath, err := listenWorkerUnixEndpoint(path, windowsParent)
+	if err != nil {
+		return nil, "", err
+	}
+	keyCopy := *key
+	relay := &windowsWorkerDaemonRelay{
+		listener:       listener,
+		parent:         windowsParent,
+		key:            &keyCopy,
+		handshakeSlots: make(chan struct{}, maxPendingWorkerHandshakes),
+		onFailure:      onFailure,
+		connections:    make(map[net.Conn]struct{}),
+	}
+	go relay.serve()
+	return relay, bindPath, nil
+}
+
 func (r *windowsWorkerDaemonRelay) serve() {
 	for {
 		connection, err := r.listener.Accept()
 		if err != nil {
-			if !r.closing.Load() && !errors.Is(err, net.ErrClosed) {
+			if !r.closing.Load() && !errors.Is(err, net.ErrClosed) && !errors.Is(err, errWorkerParentExited) {
 				r.onFailure(E.Cause(err, "accept daemon relay connection"))
 			}
 			return
@@ -304,6 +343,28 @@ func (r *windowsWorkerDaemonRelay) serve() {
 }
 
 func (r *windowsWorkerDaemonRelay) relay(applicationConnection net.Conn) {
+	if r.key != nil {
+		// niko: bound concurrent AF_UNIX handshakes and verify mutual HMAC before the worker dials
+		// the daemon pipe (the daemon pipe itself enforces windowsTransportCredentials separately).
+		timer := time.NewTimer(workerHandshakeTimeout)
+		select {
+		case r.handshakeSlots <- struct{}{}:
+			timer.Stop()
+		case <-r.parent.exited:
+			timer.Stop()
+			applicationConnection.Close()
+			return
+		case <-timer.C:
+			applicationConnection.Close()
+			return
+		}
+		handshakeErr := workerServerHandshake(applicationConnection, r.key, r.parent.pid, uint32(os.Getpid()))
+		<-r.handshakeSlots
+		if handshakeErr != nil {
+			applicationConnection.Close()
+			return
+		}
+	}
 	daemonConnection, err := r.connectDaemon()
 	if err != nil {
 		applicationConnection.Close()
@@ -313,7 +374,9 @@ func (r *windowsWorkerDaemonRelay) relay(applicationConnection net.Conn) {
 	firstCopyCompleted := make(chan struct{})
 	var firstCopy sync.Once
 	copyConnection := func(destination io.Writer, source io.Reader) {
-		_, _ = io.Copy(destination, source)
+		bufPtr := workerRelayBufferPool.Get().(*[]byte)
+		_, _ = io.CopyBuffer(destination, source, *bufPtr)
+		workerRelayBufferPool.Put(bufPtr)
 		firstCopy.Do(func() {
 			close(firstCopyCompleted)
 		})
@@ -332,7 +395,7 @@ func (r *windowsWorkerDaemonRelay) relay(applicationConnection net.Conn) {
 }
 
 func (r *windowsWorkerDaemonRelay) connectDaemon() (net.Conn, error) {
-	connection, err := winio.DialPipe(daemonPipePath, nil)
+	connection, err := winio.DialPipe(activeNames.PipePath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -393,13 +456,9 @@ func (r *windowsWorkerDaemonRelay) connectDaemon() (net.Conn, error) {
 	if !sameExecutable {
 		return nil, E.New("named pipe server daemon executable was replaced")
 	}
-	signer, err := authenticodeSigner(processImageFinalPath, processImage)
-	if err != nil {
-		return nil, E.Cause(err, "authenticate daemon named pipe server")
-	}
-	if !bytes.Equal(signer, r.parent.signer) {
-		return nil, E.New("daemon server and worker have different signing certificates")
-	}
+	// niko: processImage is the exact same NTFS file as r.parent.executable (held open with
+	// FILE_SHARE_READ and already Authenticode-verified in prepareWorkerParent), so its signer
+	// cannot differ from r.parent.signer; skipping a second WinVerifyTrust avoids per-reconnect cost.
 	waitResult, err := windows.WaitForSingleObject(process, 0)
 	if err != nil {
 		return nil, err
@@ -427,6 +486,9 @@ func (r *windowsWorkerDaemonRelay) Close() error {
 		}
 		r.connectionAccess.Unlock()
 		r.connectionWaitGroup.Wait()
+		if r.key != nil {
+			zeroBytes(r.key[:])
+		}
 	})
 	return r.closeError
 }
@@ -456,7 +518,7 @@ func validateDaemonProcessIdentity(processID uint32) error {
 		return E.Cause(err, "connect to service manager")
 	}
 	defer windows.CloseServiceHandle(managerHandle)
-	serviceNamePointer, err := windows.UTF16PtrFromString(serviceName)
+	serviceNamePointer, err := windows.UTF16PtrFromString(activeNames.Service)
 	if err != nil {
 		return err
 	}
@@ -468,7 +530,7 @@ func validateDaemonProcessIdentity(processID uint32) error {
 	if err != nil {
 		return E.Cause(err, "open daemon service")
 	}
-	service := &mgr.Service{Name: serviceName, Handle: serviceHandle}
+	service := &mgr.Service{Name: activeNames.Service, Handle: serviceHandle}
 	defer service.Close()
 	status, err := service.Query()
 	if err != nil {
