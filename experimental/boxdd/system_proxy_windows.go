@@ -250,10 +250,10 @@ type systemProxySetter interface {
 	Disable() error
 }
 
-// canRunAsOwnerLocked: the owner's operations can run: in development mode as this process, as a service with the
-// owner's token. Without it upstream's runUserOperationLocked does nothing, and the owner's settings are not reached.
+// canRunAsOwnerLocked: the owner's operations can run: in development mode or user-mode as this process,
+// as a service with the owner's token. Without it upstream's runUserOperationLocked does nothing, and the owner's settings are not reached.
 func (p *windowsPlatformInterface) canRunAsOwnerLocked() bool {
-	return p.ownerUserID != "" && (listenAddress != "" || p.token != 0)
+	return p.ownerUserID != "" && (listenAddress != "" || userMode || p.token != 0)
 }
 
 // enableSystemProxyLocked turns the daemon's system proxy on for the owner, their own settings kept first. Settings

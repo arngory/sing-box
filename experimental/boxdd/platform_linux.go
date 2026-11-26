@@ -204,7 +204,7 @@ func (p *linuxPlatformInterface) CreateBridge(options adapter.BridgeOptions) (ad
 func (p *linuxPlatformInterface) PrepareOwner(identity peerIdentity) error {
 	p.access.Lock()
 	defer p.access.Unlock()
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return p.applySystemProxyLocked()
 	}
 	if p.ownerUser != nil && p.ownerUser.Uid == identity.UserID {
@@ -220,7 +220,7 @@ func (p *linuxPlatformInterface) PrepareOwner(identity peerIdentity) error {
 func (p *linuxPlatformInterface) RestoreOwner(state ownerState) error {
 	p.access.Lock()
 	defer p.access.Unlock()
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return nil
 	}
 	ownerUser, err := user.LookupId(state.UserID)
@@ -323,7 +323,7 @@ func (p *linuxPlatformInterface) disableSystemProxyLocked() error {
 }
 
 func (p *linuxPlatformInterface) ownerSessionActiveLocked() bool {
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return true
 	}
 	if p.ownerUser == nil {
@@ -334,7 +334,7 @@ func (p *linuxPlatformInterface) ownerSessionActiveLocked() bool {
 }
 
 func (p *linuxPlatformInterface) executeAsOwner(name string, args ...string) error {
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return shell.Exec(name, args...).Attach().Run()
 	}
 	ownerUser := p.ownerUser

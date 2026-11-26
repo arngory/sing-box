@@ -48,7 +48,7 @@ type fileDescriptorConnection interface {
 }
 
 func platformServerOptions(daemon *Daemon) ([]grpc.ServerOption, error) {
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return nil, nil
 	}
 	transportCredentials := &windowsTransportCredentials{daemon: daemon}
@@ -61,6 +61,9 @@ func platformServerOptions(daemon *Daemon) ([]grpc.ServerOption, error) {
 }
 
 func platformFallbackPeerIdentity(ctx context.Context) (peerIdentity, error) {
+	if userMode {
+		return currentWindowsUserIdentity()
+	}
 	// niko: --listen (development only, TCP without credentials) has no peer to authenticate, as on Linux
 	// (peer_linux.go). Without this DesktopService refuses every call there and the mode cannot start a service
 	if listenAddress != "" {

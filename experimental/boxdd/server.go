@@ -135,7 +135,9 @@ func (d *Daemon) Start() error {
 			d.logger.Error("serve: ", serveError)
 		}
 	}()
-	go d.restore()
+	if !noRestore {
+		go d.restore()
+	}
 	return nil
 }
 

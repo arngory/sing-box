@@ -38,6 +38,9 @@ func preparePlatformWorkingDirectory() error {
 	if listenAddress != "" {
 		return os.MkdirAll(workingDirectory, 0o700)
 	}
+	if userMode {
+		return ensureUserOnlySocketDir(workingDirectory)
+	}
 	serviceWorkingDirectory, err := resolveWindowsServiceWorkingDirectory(
 		workingDirectory,
 		commandRunFlagAllowUnsafeInstallation,

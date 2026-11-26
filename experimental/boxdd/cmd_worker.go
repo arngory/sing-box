@@ -21,6 +21,8 @@ var (
 	workerDaemonRelaySocketPath string
 	workerDaemonRelayUnixPath   string
 	workerParentProcessID       uint32
+	workerUserMode              bool
+	workerWorkingDirectory      string
 )
 
 type workerParent interface {
@@ -45,6 +47,8 @@ func init() {
 	commandWorker.Flags().StringVar(&workerDaemonRelaySocketPath, "daemon-relay-socket", "", "relay the authenticated Windows daemon connection on the specified named pipe path")
 	commandWorker.Flags().StringVar(&workerDaemonRelayUnixPath, "daemon-relay-unix", "", "relay the authenticated Windows daemon connection on the specified AF_UNIX socket path")
 	commandWorker.Flags().Uint32Var(&workerParentProcessID, "parent-pid", 0, "expected application parent process ID")
+	commandWorker.Flags().BoolVar(&workerUserMode, "user-mode", false, "host the unprivileged user-mode daemon directly behind the authenticated AF_UNIX worker socket")
+	commandWorker.Flags().StringVarP(&workerWorkingDirectory, "working-directory", "D", "", "working directory for --user-mode worker")
 	mainCommand.AddCommand(commandWorker)
 }
 
@@ -85,6 +89,9 @@ func runWorker() error {
 		return err
 	}
 	if activeOptions.WorkerTransport == WorkerTransportUnix {
+		if workerUserMode {
+			return runUserModeWorker()
+		}
 		return runUnixRelayWorker()
 	}
 	parent, err := prepareWorkerParent(workerParentProcessID)

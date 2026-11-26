@@ -251,7 +251,7 @@ func (p *windowsPlatformInterface) PrepareOwner(identity peerIdentity) error {
 	defer p.access.Unlock()
 	// niko: the owner's proxy settings left kept by a crash, put back (system_proxy_windows.go)
 	defer p.recoverKeptProxyLocked()
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		p.ownerUserID = identity.UserID
 		p.sessionID = identity.SessionID
 		return p.applySystemProxyLocked()
@@ -282,7 +282,7 @@ func (p *windowsPlatformInterface) RestoreOwner(state ownerState) error {
 	defer p.recoverKeptProxyLocked()
 	p.ownerUserID = state.UserID
 	p.sessionID = state.SessionID
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return nil
 	}
 	if state.SessionID == 0 {
@@ -436,7 +436,7 @@ func (p *windowsPlatformInterface) applySystemProxyLocked() error {
 }
 
 func (p *windowsPlatformInterface) runUserOperationLocked(operation func() error) error {
-	if listenAddress != "" {
+	if listenAddress != "" || userMode {
 		return operation()
 	}
 	if p.token == 0 {

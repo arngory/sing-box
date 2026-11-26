@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -19,6 +18,8 @@ var (
 	workingDirectory string
 	socketPath       string
 	listenAddress    string
+	userMode         bool
+	noRestore        bool
 )
 
 var commandRun = &cobra.Command{
@@ -37,6 +38,8 @@ func init() {
 	commandRun.Flags().StringVarP(&workingDirectory, "working-directory", "D", "", "working directory")
 	commandRun.Flags().StringVar(&socketPath, "socket", "", "listen on the specified unix domain socket path, or named pipe path on Windows")
 	commandRun.Flags().StringVar(&listenAddress, "listen", "", "listen on the specified TCP address (development only)")
+	commandRun.Flags().BoolVar(&userMode, "user-mode", false, "run unprivileged in the current user session (proxy mode without system service)")
+	commandRun.Flags().BoolVar(&noRestore, "no-restore", false, "do not auto-restore the previous running session on startup")
 	mainCommand.AddCommand(commandRun)
 }
 
@@ -99,11 +102,19 @@ func run() error {
 			return err
 		}
 	}
-	handled, err := runService()
-	if handled {
-		return err
+	if userMode {
+		unlock, err := prepareUserModeRun()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	} else {
+		handled, err := runService()
+		if handled {
+			return err
+		}
 	}
-	err = prepareWorkingDirectory()
+	err := prepareWorkingDirectory()
 	if err != nil {
 		return err
 	}
@@ -116,7 +127,7 @@ func run() error {
 		return err
 	}
 	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(signalChannel, runSignals()...)
 	<-signalChannel
 	d.Close()
 	return nil

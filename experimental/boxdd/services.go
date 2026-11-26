@@ -6,6 +6,7 @@ package boxdd
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"strings"
 
@@ -98,6 +99,12 @@ type Host interface {
 	// or empty string when userID is empty. Callers running in a privileged service must pass only a
 	// UserID obtained from Caller(ctx) (or an already-authorized owner) to avoid cross-user access.
 	UserDirectory(userID string) string
+	// UserMode reports whether the daemon is running unprivileged in the current user's session
+	// (proxy-only mode without TUN or system service privileges).
+	UserMode() bool
+	// CanStartService checks whether the caller of ctx is permitted to start or reload the core
+	// (either the service has no owner yet or the caller is the current owner) without claiming ownership.
+	CanStartService(ctx context.Context) error
 }
 
 // SystemProxy is a system proxy a core's start asks for, as a TUN's platform.http_proxy (an HTTP proxy of the
@@ -212,6 +219,33 @@ func (d *Daemon) UserDirectory(userID string) string {
 		return ""
 	}
 	return userWorkingDirectoryAt(d.WorkingDirectory(), userID)
+}
+
+func (d *Daemon) UserMode() bool {
+	return userMode
+}
+
+func (d *Daemon) CanStartService(ctx context.Context) error {
+	if listenAddress != "" || userMode {
+		return nil
+	}
+	identity, err := peerIdentityFromContext(ctx)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, err.Error())
+	}
+	d.lifecycleAccess.Lock()
+	defer d.lifecycleAccess.Unlock()
+	ownerState, err := loadOwnerState()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return status.Error(codes.Internal, err.Error())
+	}
+	if ownerState.UserID != "" && ownerState.UserID != identity.UserID {
+		return status.Error(codes.PermissionDenied, "another user owns this service")
+	}
+	return nil
 }
 
 // registerServices makes and registers the added services, refusing one whose name is taken or whose Methods name a

@@ -104,6 +104,9 @@ func linuxPeerIdentity(connection net.Conn) (peerIdentity, error) {
 	if peerCredentials == nil || peerCredentials.Pid <= 0 {
 		return peerIdentity{}, E.New("daemon peer has invalid credentials")
 	}
+	if userMode && peerCredentials.Uid != uint32(os.Geteuid()) {
+		return peerIdentity{}, E.New("user-mode daemon accepts connections only from its own UID")
+	}
 	processID := uint32(peerCredentials.Pid)
 	processStartTime, err := linuxProcessStartTime(processID)
 	if err != nil {
