@@ -36,7 +36,7 @@ func (h *managedHandler) ServiceReload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	configContent, err := h.daemon.loadOrBuildServiceConfigLocked(ctx, ownerUserID)
+	configContent, managedByPreparer, err := h.daemon.loadOrBuildServiceConfigLocked(ctx, ownerUserID)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func (h *managedHandler) ServiceReload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = h.daemon.startServiceLocked(ctx, ownerUserID, configContent, options)
+	err = h.daemon.startServiceLocked(ctx, ownerUserID, configContent, options, managedByPreparer)
 	if err != nil {
 		return err
 	}

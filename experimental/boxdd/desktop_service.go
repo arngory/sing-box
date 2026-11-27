@@ -58,7 +58,7 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 		return nil, err
 	}
 	// niko: the start is the daemon's, shared with Host.StartService of an added service (services.go)
-	err = s.daemon.startServiceFor(ctx, identity, request.ConfigContent, request.Options, nil)
+	err = s.daemon.startServiceFor(ctx, identity, request.ConfigContent, request.Options, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 // startServiceFor starts or reloads the core with a config for a caller, who becomes the daemon's owner; refused when
 // another user owns it. The options given replace the stored ones; nil keeps them. The config and the options are kept
 // for the daemon's next start, with the system proxy asked (none: none, services.go's SystemProxy).
-func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, configContent string, options *StartOptions, systemProxy *SystemProxy) error {
+func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, configContent string, options *StartOptions, systemProxy *SystemProxy, fromAddedService bool) error {
 	d.lifecycleAccess.Lock()
 	defer d.lifecycleAccess.Unlock()
 	if d.closed {
@@ -107,12 +107,23 @@ func (d *Daemon) startServiceFor(ctx context.Context, identity peerIdentity, con
 		mergedOptions.OOMMemoryLimit = options.OomMemoryLimit
 		mergedOptions.PowerReportEnabled = options.PowerReportEnabled
 	}
-	err = d.startServiceLocked(ctx, identity.UserID, configContent, mergedOptions)
+	if !fromAddedService {
+		// Raw DesktopService.StartService replaces any added-service managed session (e.g., clears active profile state and helpers).
+		d.notifyStopHooks(identity.UserID)
+	}
+	err = d.startServiceLocked(ctx, identity.UserID, configContent, mergedOptions, fromAddedService && d.hasRestorePreparer())
 	if err != nil {
 		return d.cleanFailedStartLocked(identity.UserID, mergedOptions, err)
 	}
 	directory := userWorkingDirectory(identity.UserID)
-	configError := atomicfile.WriteFile(filepath.Join(directory, serviceConfigFileName), []byte(configContent), 0o600)
+	var configError error
+	if fromAddedService && d.hasRestorePreparer() {
+		// Added service with RestorePreparer rebuilds from its own sealed store; do not persist plaintext config.json.
+		_ = os.Remove(filepath.Join(directory, serviceConfigFileName))
+		_ = os.Remove(filepath.Join(directory, configSnapshotFileName))
+	} else {
+		configError = atomicfile.WriteFile(filepath.Join(directory, serviceConfigFileName), []byte(configContent), 0o600)
+	}
 	optionsError := saveStartOptions(identity.UserID, mergedOptions)
 	if configError != nil || optionsError != nil {
 		return d.cleanFailedStartLocked(identity.UserID, mergedOptions, E.Errors(configError, optionsError))

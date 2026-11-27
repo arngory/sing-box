@@ -4,9 +4,11 @@ package boxdd
 
 import (
 	"context"
+	"encoding/json"
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,23 +21,76 @@ import (
 	"github.com/sagernet/sing/common/logger"
 )
 
-// darwinPlatformInterface configures the macOS user-session system HTTP/HTTPS proxy via `networksetup`
-// for unprivileged user-mode proxy connections (M1).
+const darwinProxySnapshotName = "darwin_proxy_snapshot.json"
+
+type darwinServiceProxyState struct {
+	Enabled bool   `json:"enabled"`
+	Server  string `json:"server"`
+	Port    string `json:"port"`
+}
+
+type darwinServiceSnapshot struct {
+	Service string                  `json:"service"`
+	Web     darwinServiceProxyState `json:"web"`
+	Secure  darwinServiceProxyState `json:"secure"`
+}
+
+// darwinPlatformInterface configures system-wide macOS HTTP/HTTPS proxy settings via `networksetup`.
+// Note: `networksetup` modifies system-wide network service proxy settings and may require administrator
+// privileges depending on macOS authorization settings. Prior proxy settings are snapshotted to disk before
+// modification and restored on disable, reset, or crash recovery.
 type darwinPlatformInterface struct {
 	daemon             *Daemon
 	access             sync.Mutex
 	proxyServer        string
 	proxyPort          uint16
-	configuredServices []string
+	savedSnapshots     []darwinServiceSnapshot
 	systemProxyActive  bool
 	systemProxyEnabled bool
 }
 
 func newPlatformInterface(daemonInstance *Daemon) (daemonPlatform, error) {
-	return &darwinPlatformInterface{
+	p := &darwinPlatformInterface{
 		daemon:             daemonInstance,
 		systemProxyEnabled: true,
-	}, nil
+	}
+	// Crash recovery: if a prior daemon exited abruptly while holding system proxy settings, restore them.
+	p.recoverSnapshotLocked()
+	return p, nil
+}
+
+func (p *darwinPlatformInterface) snapshotPath() string {
+	dir := ""
+	if p.daemon != nil {
+		dir = p.daemon.WorkingDirectory()
+	}
+	if dir == "" {
+		dir = workingDirectory
+	}
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, darwinProxySnapshotName)
+}
+
+func (p *darwinPlatformInterface) recoverSnapshotLocked() {
+	path := p.snapshotPath()
+	if path == "" {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var snaps []darwinServiceSnapshot
+	if err := json.Unmarshal(raw, &snaps); err != nil || len(snaps) == 0 {
+		_ = os.Remove(path)
+		return
+	}
+	for _, snap := range snaps {
+		_ = restoreDarwinServiceSnapshot(snap)
+	}
+	_ = os.Remove(path)
 }
 
 func (p *darwinPlatformInterface) Initialize(networkManager adapter.NetworkManager) error { return nil }
@@ -131,10 +186,9 @@ func (p *darwinPlatformInterface) ResetPlatformOptions() error {
 	p.access.Lock()
 	defer p.access.Unlock()
 	err := p.disableSystemProxyLocked()
-	if err == nil {
-		p.proxyServer = ""
-		p.proxyPort = 0
-	}
+	// Always clear local proxy target state even when networksetup fails so future starts never wedge on "only one enabled".
+	p.proxyServer = ""
+	p.proxyPort = 0
 	return err
 }
 
@@ -205,40 +259,105 @@ func (p *darwinPlatformInterface) applySystemProxyLocked() error {
 		return E.New("no active macOS network services found")
 	}
 	portStr := strconv.Itoa(int(p.proxyPort))
-	var applied []string
+	var snapshots []darwinServiceSnapshot
 	for _, svc := range services {
+		snap := snapshotDarwinServiceProxy(svc)
 		if err := runNetworkSetup("-setwebproxy", svc, p.proxyServer, portStr); err != nil {
 			continue
 		}
 		if err := runNetworkSetup("-setsecurewebproxy", svc, p.proxyServer, portStr); err != nil {
-			_ = runNetworkSetup("-setwebproxystate", svc, "off")
+			_ = restoreDarwinServiceSnapshot(snap)
 			continue
 		}
-		applied = append(applied, svc)
+		snapshots = append(snapshots, snap)
 	}
-	if len(applied) == 0 {
-		return E.New("networksetup failed on all macOS network services")
+	if len(snapshots) == 0 {
+		return E.New("networksetup failed on all macOS network services (admin privileges may be required)")
 	}
-	p.configuredServices = applied
+	p.savedSnapshots = snapshots
 	p.systemProxyActive = true
+	if path := p.snapshotPath(); path != "" {
+		if raw, err := json.Marshal(snapshots); err == nil {
+			_ = os.MkdirAll(filepath.Dir(path), 0o700)
+			_ = os.WriteFile(path, raw, 0o600)
+		}
+	}
 	return nil
 }
 
 func (p *darwinPlatformInterface) disableSystemProxyLocked() error {
-	if !p.systemProxyActive {
+	if !p.systemProxyActive && len(p.savedSnapshots) == 0 {
 		return nil
 	}
 	var errs []error
-	for _, svc := range p.configuredServices {
-		if err := runNetworkSetup("-setwebproxystate", svc, "off"); err != nil {
-			errs = append(errs, err)
-		}
-		if err := runNetworkSetup("-setsecurewebproxystate", svc, "off"); err != nil {
+	for _, snap := range p.savedSnapshots {
+		if err := restoreDarwinServiceSnapshot(snap); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	p.configuredServices = nil
+	p.savedSnapshots = nil
 	p.systemProxyActive = false
+	if path := p.snapshotPath(); path != "" {
+		_ = os.Remove(path)
+	}
+	return E.Errors(errs...)
+}
+
+func snapshotDarwinServiceProxy(service string) darwinServiceSnapshot {
+	return darwinServiceSnapshot{
+		Service: service,
+		Web:     readDarwinProxyState("-getwebproxy", service),
+		Secure:  readDarwinProxyState("-getsecurewebproxy", service),
+	}
+}
+
+func readDarwinProxyState(flag string, service string) darwinServiceProxyState {
+	out, err := exec.Command("/usr/sbin/networksetup", flag, service).Output()
+	if err != nil {
+		return darwinServiceProxyState{}
+	}
+	var st darwinServiceProxyState
+	for _, line := range strings.Split(string(out), "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		switch k {
+		case "Enabled":
+			st.Enabled = strings.EqualFold(v, "Yes")
+		case "Server":
+			st.Server = v
+		case "Port":
+			if v != "0" {
+				st.Port = v
+			}
+		}
+	}
+	return st
+}
+
+func restoreDarwinServiceSnapshot(snap darwinServiceSnapshot) error {
+	var errs []error
+	if snap.Web.Enabled && snap.Web.Server != "" && snap.Web.Port != "" {
+		if err := runNetworkSetup("-setwebproxy", snap.Service, snap.Web.Server, snap.Web.Port); err != nil {
+			errs = append(errs, err)
+		}
+	} else {
+		if err := runNetworkSetup("-setwebproxystate", snap.Service, "off"); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if snap.Secure.Enabled && snap.Secure.Server != "" && snap.Secure.Port != "" {
+		if err := runNetworkSetup("-setsecurewebproxy", snap.Service, snap.Secure.Server, snap.Secure.Port); err != nil {
+			errs = append(errs, err)
+		}
+	} else {
+		if err := runNetworkSetup("-setsecurewebproxystate", snap.Service, "off"); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return E.Errors(errs...)
 }
 

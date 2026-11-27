@@ -294,15 +294,26 @@ func TestNekoHostStartService(t *testing.T) {
 }
 
 type fakeRestorePreparer struct {
-	called bool
-	owner  string
-	config string
+	called   bool
+	stopped  bool
+	owner    string
+	stopUser string
+	config   string
+	err      error
 }
 
 func (f *fakeRestorePreparer) BeforeRestore(ctx context.Context, ownerUserID string) (string, bool, error) {
 	f.called = true
 	f.owner = ownerUserID
+	if f.err != nil {
+		return "", false, f.err
+	}
 	return f.config, f.config != "", nil
+}
+
+func (f *fakeRestorePreparer) AfterStop(ownerUserID string) {
+	f.stopped = true
+	f.stopUser = ownerUserID
 }
 
 func TestRestorePreparerAndStopRemovesPlaintextConfig(t *testing.T) {
@@ -317,21 +328,19 @@ func TestRestorePreparerAndStopRemovesPlaintextConfig(t *testing.T) {
 	}
 	cfgPath := filepath.Join(userWorkingDirectory("1000"), serviceConfigFileName)
 	snapPath := filepath.Join(userWorkingDirectory("1000"), configSnapshotFileName)
-	if _, err := os.Stat(cfgPath); err != nil {
-		t.Fatalf("expected config.json while running: %v", err)
+	// When a RestorePreparer is registered, Host.StartService must not persist plaintext config snapshots on disk.
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no plaintext config.json with RestorePreparer, err=%v", err)
 	}
-	if _, err := os.Stat(snapPath); err != nil {
-		t.Fatalf("expected configuration.json while running: %v", err)
+	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no plaintext configuration.json with RestorePreparer, err=%v", err)
 	}
 
 	if err := d.stopServiceLocked("1000"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
-		t.Fatalf("expected config.json removed on stop, err=%v", err)
-	}
-	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
-		t.Fatalf("expected configuration.json removed on stop, err=%v", err)
+	if !prep.stopped || prep.stopUser != "1000" {
+		t.Fatalf("AfterStop hook not called properly: %+v", prep)
 	}
 
 	// Simulate daemon restart with WasRunning=true: RestorePreparer supplies fresh config even without config.json.
@@ -344,5 +353,21 @@ func TestRestorePreparerAndStopRemovesPlaintextConfig(t *testing.T) {
 	}
 	if d.startedService.Instance() == nil {
 		t.Fatal("expected core to be running after restore via RestorePreparer")
+	}
+
+	// If BeforeRestore fails, restore must fall back to saved config.json when present.
+	if err := d.stopServiceLocked("1000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(initialConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prep.err = os.ErrPermission
+	if err := saveStartOptions("1000", startOptions{WasRunning: true}); err != nil {
+		t.Fatal(err)
+	}
+	d.restore()
+	if d.startedService.Instance() == nil {
+		t.Fatal("expected fallback to saved config.json when BeforeRestore returns error")
 	}
 }

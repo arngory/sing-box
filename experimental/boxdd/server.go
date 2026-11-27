@@ -187,13 +187,13 @@ func (d *Daemon) restore() {
 			d.logger.Warn("restore owner session: ", err)
 		}
 	}
-	configContent, err := d.loadOrBuildServiceConfigLocked(d.ctx, ownerUserID)
+	configContent, managedByPreparer, err := d.loadOrBuildServiceConfigLocked(d.ctx, ownerUserID)
 	if err != nil {
 		d.logger.Error("restore service: ", err)
 		return
 	}
 	d.logger.Info("restoring service")
-	err = d.startServiceLocked(d.ctx, ownerUserID, configContent, options)
+	err = d.startServiceLocked(d.ctx, ownerUserID, configContent, options, managedByPreparer)
 	if err != nil {
 		d.logger.Error("restore service: ", err)
 	}
@@ -208,7 +208,15 @@ func (d *Daemon) hasRestorePreparer() bool {
 	return false
 }
 
-func (d *Daemon) loadOrBuildServiceConfigLocked(ctx context.Context, ownerUserID string) (string, error) {
+func (d *Daemon) notifyStopHooks(ownerUserID string) {
+	for _, impl := range d.serviceImpls {
+		if hook, ok := impl.(StopHook); ok {
+			hook.AfterStop(ownerUserID)
+		}
+	}
+}
+
+func (d *Daemon) loadOrBuildServiceConfigLocked(ctx context.Context, ownerUserID string) (string, bool, error) {
 	for _, impl := range d.serviceImpls {
 		preparer, ok := impl.(RestorePreparer)
 		if !ok {
@@ -216,13 +224,17 @@ func (d *Daemon) loadOrBuildServiceConfigLocked(ctx context.Context, ownerUserID
 		}
 		cfg, handled, err := preparer.BeforeRestore(ctx, ownerUserID)
 		if err != nil {
-			return "", err
+			if d.logger != nil {
+				d.logger.Warn("prepare restore failed, falling back to saved config: ", err)
+			}
+			continue
 		}
 		if handled && cfg != "" {
-			return cfg, nil
+			return cfg, true, nil
 		}
 	}
-	return loadServiceConfig(ownerUserID)
+	cfg, err := loadServiceConfig(ownerUserID)
+	return cfg, false, err
 }
 
 func (d *Daemon) configureWorkingDirectoryLocked(directory string) error {
@@ -253,13 +265,17 @@ func (d *Daemon) configureWorkingDirectoryLocked(directory string) error {
 	return nil
 }
 
-func (d *Daemon) startServiceLocked(ctx context.Context, ownerUserID string, configContent string, options startOptions) error {
+func (d *Daemon) startServiceLocked(ctx context.Context, ownerUserID string, configContent string, options startOptions, omitPlaintextSnapshot bool) error {
 	directory := userWorkingDirectory(ownerUserID)
 	err := d.configureWorkingDirectoryLocked(directory)
 	if err != nil {
 		return err
 	}
-	_ = os.WriteFile(filepath.Join(directory, configSnapshotFileName), []byte(configContent), 0o600)
+	if omitPlaintextSnapshot {
+		_ = os.Remove(filepath.Join(directory, configSnapshotFileName))
+	} else {
+		_ = os.WriteFile(filepath.Join(directory, configSnapshotFileName), []byte(configContent), 0o600)
+	}
 	libbox.ReloadSetupOptions(&libbox.SetupOptions{
 		OomKillerEnabled:   options.OOMKillerEnabled,
 		OomKillerDisabled:  options.OOMKillerDisabled,
@@ -319,6 +335,7 @@ func (d *Daemon) stopServiceLocked(ownerUserID string) error {
 	}
 	d.powerManager.Close()
 	libbox.DiscardPowerReportDraft()
+	d.notifyStopHooks(ownerUserID)
 	directory := userWorkingDirectory(ownerUserID)
 	// Remove plaintext config snapshots when the core stops; added services with RestorePreparer
 	// rebuild the config from their own sealed store on next restore.
@@ -352,6 +369,7 @@ func (d *Daemon) Close() {
 		_ = d.platform.ResetPlatformOptions()
 	}
 	_ = d.startedService.CloseService()
+	d.notifyStopHooks("")
 	d.startedService.Close()
 	_ = d.oomRecorder.Close()
 	if d.platform != nil {

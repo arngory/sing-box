@@ -67,6 +67,12 @@ type RestorePreparer interface {
 	BeforeRestore(ctx context.Context, ownerUserID string) (configContent string, handled bool, err error)
 }
 
+// StopHook may be implemented by an added service to clean up auxiliary child processes (such as
+// external tunnel helpers) and active-connection state whenever boxdd stops the core or closes.
+type StopHook interface {
+	AfterStop(ownerUserID string)
+}
+
 // MethodPolicy is who may call a method of an added service.
 type MethodPolicy int
 
@@ -199,7 +205,7 @@ func (d *Daemon) StartService(ctx context.Context, configContent string, systemP
 	if err != nil {
 		return status.Error(codes.Unauthenticated, err.Error())
 	}
-	return d.startServiceFor(ctx, identity, configContent, nil, systemProxy)
+	return d.startServiceFor(ctx, identity, configContent, nil, systemProxy, true)
 }
 
 func (d *Daemon) Caller(ctx context.Context) (Caller, error) {

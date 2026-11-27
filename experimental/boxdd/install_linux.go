@@ -618,7 +618,11 @@ func serviceInstallLinux(env linuxInstallEnv) error {
 				}
 			}
 			dstPath := filepath.Join(stagingHost, filepath.FromSlash(entry.relSlash))
-			copied, sum, copyErr := copyLinuxFDWithSHA256(fd, dstPath, 0o644, maxInstallTotalBytes-totalCopied)
+			fileMode := os.FileMode(0o644)
+			if entry.relSlash == "slipstream-client" || strings.HasSuffix(entry.relSlash, "/slipstream-client") {
+				fileMode = 0o755
+			}
+			copied, sum, copyErr := copyLinuxFDWithSHA256(fd, dstPath, fileMode, maxInstallTotalBytes-totalCopied)
 			_ = unix.Close(fd)
 			if copyErr != nil {
 				return &installExitError{
