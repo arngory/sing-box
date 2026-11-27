@@ -118,6 +118,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if userMode {
+		if err := ensureUserModeOwner(); err != nil {
+			return E.Cause(err, "initialize user-mode owner")
+		}
+	}
 	d, err := newDaemon()
 	if err != nil {
 		return err

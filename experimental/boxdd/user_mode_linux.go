@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -108,6 +109,10 @@ func prepareUserModeRun() (func(), error) {
 		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
 		_ = lockFile.Close()
 	}, nil
+}
+
+func ensureUserModeOwner() error {
+	return saveOwner(strconv.Itoa(os.Geteuid()), 0)
 }
 
 func runUserModeWorker() error {

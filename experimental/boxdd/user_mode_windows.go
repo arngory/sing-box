@@ -55,6 +55,10 @@ func prepareUserModeRun() (func(), error) {
 	return nil, E.New("on Windows use 'worker --user-mode' instead of 'run --user-mode'")
 }
 
+func ensureUserModeOwner() error {
+	return nil
+}
+
 // prepareUserModeWorkerParent verifies that the worker's parent is the expected application
 // executable in the same user session and was created before this worker (defending against PID reuse).
 func prepareUserModeWorkerParent(parentProcessID uint32) (*windowsWorkerParent, error) {
@@ -228,6 +232,9 @@ func runUserModeWorker() error {
 	}
 	if err := prepareWorkingDirectory(); err != nil {
 		return E.Cause(err, "prepare user-mode working directory")
+	}
+	if err := saveOwner(parent.userID, parent.sessionID); err != nil {
+		return E.Cause(err, "save user-mode owner")
 	}
 
 	listener, bindPath, err := listenWorkerUnixEndpoint(workerDaemonRelayUnixPath, parent)

@@ -17,6 +17,10 @@ func prepareUserModeRun() (func(), error) {
 	return nil, E.New("--user-mode is not supported on this platform")
 }
 
+func ensureUserModeOwner() error {
+	return nil
+}
+
 func runUserModeWorker() error {
 	return E.New("worker --user-mode is not supported on this platform")
 }

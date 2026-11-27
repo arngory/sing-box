@@ -63,6 +63,22 @@ func TestUserModeLinuxDefaultsFlockAndPermissions(t *testing.T) {
 		t.Fatalf("lock PID = %q, want %d", strings.TrimSpace(string(pidBytes)), os.Getpid())
 	}
 
+	// User-mode immediately claims owner.json for the current euid so SubscribeServiceStatus works on first connect.
+	if err := ensureUserModeOwner(); err != nil {
+		t.Fatalf("ensureUserModeOwner failed: %v", err)
+	}
+	ownerID, err := loadOwner()
+	if err != nil {
+		t.Fatalf("loadOwner after ensureUserModeOwner failed: %v", err)
+	}
+	wantUID := strconv.Itoa(os.Geteuid())
+	if ownerID != wantUID {
+		t.Fatalf("ownerID = %q, want %q", ownerID, wantUID)
+	}
+	if err := (&Daemon{}).authorizeOwnerLocked(wantUID); err != nil {
+		t.Fatalf("authorizeOwnerLocked(%q) failed: %v", wantUID, err)
+	}
+
 	// Second concurrent instance on the same workingDirectory must be refused even with a different socket path.
 	socketPath = filepath.Join(tmp, "other-run", "other.sock")
 	if _, err := prepareUserModeRun(); err == nil {
