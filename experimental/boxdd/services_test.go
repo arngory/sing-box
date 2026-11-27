@@ -5,6 +5,7 @@ package boxdd
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -289,5 +290,59 @@ func TestNekoHostStartService(t *testing.T) {
 	}
 	if options, err := loadStartOptions("1000"); err != nil || !options.WasRunning || options.OOMMemoryLimit != 456 {
 		t.Fatalf("options from the request %+v: %v", options, err)
+	}
+}
+
+type fakeRestorePreparer struct {
+	called bool
+	owner  string
+	config string
+}
+
+func (f *fakeRestorePreparer) BeforeRestore(ctx context.Context, ownerUserID string) (string, bool, error) {
+	f.called = true
+	f.owner = ownerUserID
+	return f.config, f.config != "", nil
+}
+
+func TestRestorePreparerAndStopRemovesPlaintextConfig(t *testing.T) {
+	d := startingDaemon(t, "1000")
+	const initialConfig = `{"log": {"level": "error"}, "outbounds": [{"type": "direct", "tag": "direct"}]}`
+	const rebuiltConfig = `{"log": {"level": "warn"}, "outbounds": [{"type": "direct", "tag": "direct"}]}`
+	prep := &fakeRestorePreparer{config: rebuiltConfig}
+	d.serviceImpls = []any{prep}
+
+	if err := d.StartService(verified("1000"), initialConfig, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(userWorkingDirectory("1000"), serviceConfigFileName)
+	snapPath := filepath.Join(userWorkingDirectory("1000"), configSnapshotFileName)
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("expected config.json while running: %v", err)
+	}
+	if _, err := os.Stat(snapPath); err != nil {
+		t.Fatalf("expected configuration.json while running: %v", err)
+	}
+
+	if err := d.stopServiceLocked("1000"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("expected config.json removed on stop, err=%v", err)
+	}
+	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
+		t.Fatalf("expected configuration.json removed on stop, err=%v", err)
+	}
+
+	// Simulate daemon restart with WasRunning=true: RestorePreparer supplies fresh config even without config.json.
+	if err := saveStartOptions("1000", startOptions{WasRunning: true}); err != nil {
+		t.Fatal(err)
+	}
+	d.restore()
+	if !prep.called || prep.owner != "1000" {
+		t.Fatalf("BeforeRestore not called properly: %+v", prep)
+	}
+	if d.startedService.Instance() == nil {
+		t.Fatal("expected core to be running after restore via RestorePreparer")
 	}
 }

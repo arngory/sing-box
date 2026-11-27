@@ -43,7 +43,8 @@ type Daemon struct {
 	peerConnections         map[peerConnection]peerIdentity
 	platform                daemonPlatform
 	// niko: the services a program added (services.go)
-	services []Service
+	services     []Service
+	serviceImpls []any
 }
 
 func newDaemon() (*Daemon, error) {
@@ -186,7 +187,7 @@ func (d *Daemon) restore() {
 			d.logger.Warn("restore owner session: ", err)
 		}
 	}
-	configContent, err := loadServiceConfig(ownerUserID)
+	configContent, err := d.loadOrBuildServiceConfigLocked(d.ctx, ownerUserID)
 	if err != nil {
 		d.logger.Error("restore service: ", err)
 		return
@@ -196,6 +197,32 @@ func (d *Daemon) restore() {
 	if err != nil {
 		d.logger.Error("restore service: ", err)
 	}
+}
+
+func (d *Daemon) hasRestorePreparer() bool {
+	for _, impl := range d.serviceImpls {
+		if _, ok := impl.(RestorePreparer); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) loadOrBuildServiceConfigLocked(ctx context.Context, ownerUserID string) (string, error) {
+	for _, impl := range d.serviceImpls {
+		preparer, ok := impl.(RestorePreparer)
+		if !ok {
+			continue
+		}
+		cfg, handled, err := preparer.BeforeRestore(ctx, ownerUserID)
+		if err != nil {
+			return "", err
+		}
+		if handled && cfg != "" {
+			return cfg, nil
+		}
+	}
+	return loadServiceConfig(ownerUserID)
 }
 
 func (d *Daemon) configureWorkingDirectoryLocked(directory string) error {
@@ -293,6 +320,12 @@ func (d *Daemon) stopServiceLocked(ownerUserID string) error {
 	d.powerManager.Close()
 	libbox.DiscardPowerReportDraft()
 	directory := userWorkingDirectory(ownerUserID)
+	// Remove plaintext config snapshots when the core stops; added services with RestorePreparer
+	// rebuild the config from their own sealed store on next restore.
+	_ = os.Remove(filepath.Join(directory, configSnapshotFileName))
+	if d.hasRestorePreparer() {
+		_ = os.Remove(filepath.Join(directory, serviceConfigFileName))
+	}
 	crashReportError := tagUnownedReports(filepath.Join(directory, crashReportsDirectoryName), ownerUserID)
 	if crashReportError != nil {
 		return crashReportError

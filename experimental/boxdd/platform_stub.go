@@ -1,4 +1,4 @@
-//go:build !windows && !(linux && !android)
+//go:build !windows && !darwin && !(linux && !android)
 
 package boxdd
 

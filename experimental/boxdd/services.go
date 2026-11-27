@@ -60,6 +60,13 @@ type Service struct {
 	Methods map[string]MethodPolicy
 }
 
+// RestorePreparer may be implemented by an added service (returned from Service.New) to load
+// runtime state (such as sealed device keys) and optionally rebuild the active config from its
+// encrypted store before boxdd restores or reloads the core.
+type RestorePreparer interface {
+	BeforeRestore(ctx context.Context, ownerUserID string) (configContent string, handled bool, err error)
+}
+
 // MethodPolicy is who may call a method of an added service.
 type MethodPolicy int
 
@@ -274,6 +281,7 @@ func (d *Daemon) registerServices(services []Service, setServing func(string)) e
 			return E.Cause(err, "service ", name)
 		}
 		d.server.RegisterService(added.Desc, implementation)
+		d.serviceImpls = append(d.serviceImpls, implementation)
 		setServing(name)
 	}
 	d.services = services

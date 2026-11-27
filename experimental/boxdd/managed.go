@@ -36,7 +36,7 @@ func (h *managedHandler) ServiceReload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	configContent, err := loadServiceConfig(ownerUserID)
+	configContent, err := h.daemon.loadOrBuildServiceConfigLocked(ctx, ownerUserID)
 	if err != nil {
 		return err
 	}
