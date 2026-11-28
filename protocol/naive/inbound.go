@@ -146,12 +146,13 @@ func (n *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 
 func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ctx := log.ContextWithNewID(request.Context())
+	// Answer 404 (not 400/407) to non-CONNECT, missing padding, or bad auth to resist active probing (B16).
 	if request.Method != "CONNECT" {
-		rejectHTTP(writer, http.StatusBadRequest)
+		rejectHTTP(writer, http.StatusNotFound)
 		n.badRequest(ctx, request, E.New("not CONNECT request"))
 		return
 	} else if request.Header.Get("Padding") == "" {
-		rejectHTTP(writer, http.StatusBadRequest)
+		rejectHTTP(writer, http.StatusNotFound)
 		n.badRequest(ctx, request, E.New("missing naive padding"))
 		return
 	}
@@ -160,7 +161,7 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		authOk = n.authenticator.Verify(userName, password)
 	}
 	if !authOk {
-		rejectHTTP(writer, http.StatusProxyAuthRequired)
+		rejectHTTP(writer, http.StatusNotFound)
 		n.badRequest(ctx, request, E.New("authorization failed"))
 		return
 	}

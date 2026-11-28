@@ -151,6 +151,42 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		trustedRootCertificates = string(content)
 	}
 
+	var exactCertificates [][]byte
+	for _, rawCert := range options.ExactServerCertificates {
+		trimmed := strings.TrimSpace(rawCert)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "-----BEGIN ") {
+			rest := []byte(trimmed)
+			foundPEM := false
+			for len(rest) > 0 {
+				var block *pem.Block
+				block, rest = pem.Decode(rest)
+				if block == nil {
+					break
+				}
+				if block.Type != "CERTIFICATE" || len(block.Bytes) == 0 {
+					return nil, E.New("invalid exact_server_certificates PEM block type: ", block.Type)
+				}
+				exactCertificates = append(exactCertificates, block.Bytes)
+				foundPEM = true
+			}
+			if !foundPEM {
+				return nil, E.New("invalid exact_server_certificates PEM entry")
+			}
+			continue
+		}
+		der, decErr := base64.StdEncoding.DecodeString(trimmed)
+		if decErr != nil {
+			der, decErr = base64.RawURLEncoding.DecodeString(trimmed)
+		}
+		if decErr != nil || len(der) == 0 {
+			return nil, E.New("invalid exact_server_certificates entry")
+		}
+		exactCertificates = append(exactCertificates, der)
+	}
+
 	// neko: Chromium is held to the list of the core's certificate store besides its own verification
 	// (certificate.StorePublicKeyHashes): it verifies as it does, and a key of that list has to be in the chain: of
 	// a root, or of an intermediate Chromium ends a chain at (an anchor of the library's store under a root of the
@@ -161,7 +197,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	// beside them would let any root of the list pass for the pinned leaf), its own certificate takes the place of
 	// every list and is in none, and Chromium pins a name, never an address
 	publicKeyPins := [][]byte(options.TLS.CertificatePublicKeySHA256)
-	if _, addressErr := netip.ParseAddr(serverName); len(publicKeyPins) == 0 && trustedRootCertificates == "" && addressErr != nil {
+	if _, addressErr := netip.ParseAddr(serverName); len(exactCertificates) == 0 && len(publicKeyPins) == 0 && trustedRootCertificates == "" && addressErr != nil {
 		if store, isStore := service.FromContext[adapter.CertificateStore](ctx).(interface{ StoreKind() string }); isStore {
 			publicKeyPins = certificate.StorePublicKeyHashes(store.StoreKind(), libraryAnchors())
 			if len(publicKeyPins) > 0 {
@@ -174,13 +210,22 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 
 	extraHeaders := make(map[string]string)
+	datagramExtraHeaders := make(map[string]string)
 	for key, values := range options.ExtraHeaders.Build() {
-		if len(values) > 0 {
-			extraHeaders[key] = values[0]
+		if len(values) == 0 {
+			continue
 		}
+		// Never allow profile extra_headers to override protocol-controlled framing/auth headers (B11).
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "padding", "padding-type-request", "padding-type-reply", "proxy-authorization", "niko-udp", "niko-ack":
+			logger.Warn("naive: ignoring reserved extra_header ", key)
+			continue
+		}
+		extraHeaders[key] = values[0]
+		datagramExtraHeaders[key] = values[0]
 	}
 	if options.AwaitDial {
-		// asks the server to answer a CONNECT after its dial, not before (neko)
+		// asks the server to answer a CONNECT after its dial, not before (neko); TCP CONNECT only, never connect-udp (B16)
 		extraHeaders[ackHeader] = "1"
 	}
 
@@ -269,36 +314,33 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		// or a hash of another length fails here
 		// Without pins of the profile's: the keys of the roots of the core's store, where it is a list (above)
 		CertificatePublicKeySHA256: publicKeyPins,
+		ExactServerCertificates:    exactCertificates,
 	}
 	client, err := cronet.NewNaiveClient(clientOptions)
 	if err != nil {
 		return nil, err
 	}
-	var uotClient *uot.Client
-	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
-	if uotOptions.Enabled {
-		uotClient = &uot.Client{
-			Dialer:  &naiveDialer{client},
-			Version: uotOptions.Version,
-		}
-	}
 	var datagram *datagramClient
 	if options.UDPDatagram {
-		if uotClient == nil {
+		uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
+		if !uotOptions.Enabled {
 			return nil, E.New("udp_datagram needs udp_over_tcp: UDP goes that way until the probe and after a refusal")
 		}
 		var authorization string
 		if options.Username != "" {
 			authorization = "Basic " + base64.StdEncoding.EncodeToString([]byte(options.Username+":"+options.Password))
 		}
-		datagram = newDatagramClient(ctx, logger, clientOptions, serverName, authorization)
+		dgOpts := clientOptions
+		dgOpts.ExtraHeaders = datagramExtraHeaders
+		datagram = newDatagramClient(ctx, logger, dgOpts, serverName, authorization)
 		if options.UDPDatagramAllowed {
 			datagram.allowedAlways = true
 			datagram.allowed.Store(true)
 		}
 	}
+	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
 	var networks []string
-	if uotClient != nil {
+	if uotOptions.Enabled {
 		networks = []string{N.NetworkTCP, N.NetworkUDP}
 	} else {
 		networks = []string{N.NetworkTCP}
@@ -311,9 +353,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		ctx:       ctx,
 		logger:    logger,
 		client:    client,
-		uotClient: uotClient,
 		awaitDial: options.AwaitDial,
 		datagram:  datagram,
+	}
+	if uotOptions.Enabled {
+		// Route UDP-over-TCP through statusConn so 429/407 refusals surface cleanly instead of silent EOF (B10).
+		naiveOutbound.uotClient = &uot.Client{
+			Dialer:  &naiveDialer{outbound: naiveOutbound},
+			Version: uotOptions.Version,
+		}
 	}
 	if options.ICMP {
 		naiveOutbound.icmp = nikoicmp.NewPort(ctx, logger, func(ctx context.Context) (net.Conn, error) {
@@ -364,31 +412,35 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	return nil
 }
 
+func (h *Outbound) dialTCPChecked(ctx context.Context, destination M.Socksaddr, awaitDial bool) (net.Conn, error) {
+	conn, err := h.client.DialEarly(ctx, destination)
+	if err != nil {
+		return nil, err
+	}
+	// the stream comes before the proxy's answer: a refusal (429: the node's connection limit) is told on the
+	// first read, where it would read as a stream that ends (neko)
+	stream, isStream := upstreamOf[*cronet.BidirectionalConn](conn)
+	if !isStream {
+		// a cronet that wraps its stream another way: said aloud, the refusals read as before
+		h.logger.WarnContext(ctx, "naive: no stream under the connection, a refused CONNECT will read as its end")
+		return conn, nil
+	}
+	checked := &statusConn{Conn: conn, ctx: ctx, logger: h.logger, headers: stream.WaitForHeadersContext, ack: awaitDial}
+	if awaitDial {
+		// the dial's outcome at the destination before the connection is handed out (neko)
+		if err = checked.await(ctx); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	return checked, nil
+}
+
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		conn, err := h.client.DialEarly(ctx, destination)
-		if err != nil {
-			return nil, err
-		}
-		// the stream comes before the proxy's answer: a refusal (429: the node's connection limit) is told on the
-		// first read, where it would read as a stream that ends (neko)
-		stream, isStream := upstreamOf[*cronet.BidirectionalConn](conn)
-		if !isStream {
-			// a cronet that wraps its stream another way: said aloud, the refusals read as before
-			h.logger.WarnContext(ctx, "naive: no stream under the connection, a refused CONNECT will read as its end")
-			return conn, nil
-		}
-		checked := &statusConn{Conn: conn, ctx: ctx, logger: h.logger, headers: stream.WaitForHeadersContext, ack: h.awaitDial}
-		if h.awaitDial {
-			// the dial's outcome at the destination before the connection is handed out (neko)
-			if err = checked.await(ctx); err != nil {
-				conn.Close()
-				return nil, err
-			}
-		}
-		return checked, nil
+		return h.dialTCPChecked(ctx, destination, h.awaitDial)
 	case N.NetworkUDP:
 		if h.uotClient == nil {
 			return nil, E.New("UDP is not supported unless UDP over TCP is enabled")
@@ -487,12 +539,25 @@ func (h *Outbound) Client() *cronet.NaiveClient {
 	return h.client
 }
 
+// DatagramProbeReady opens a connect-udp stream and waits for the server's HTTP/3 response,
+// returning nil only when the server answers 200 with niko-udp: 1.
+func (h *Outbound) DatagramProbeReady(ctx context.Context) error {
+	if h.datagram == nil {
+		return E.New("naive: datagrams are not enabled on this outbound")
+	}
+	return h.datagram.probeReady(ctx)
+}
+
 type naiveDialer struct {
-	*cronet.NaiveClient
+	outbound *Outbound
 }
 
 func (d *naiveDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	return d.NaiveClient.DialEarly(ctx, destination)
+	return d.outbound.dialTCPChecked(ctx, destination, d.outbound.awaitDial)
+}
+
+func (d *naiveDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	return nil, E.New("naiveDialer does not support ListenPacket")
 }
 
 // libraryAnchors are the intermediates the library's own store has as trust anchors, each with its root's key: the

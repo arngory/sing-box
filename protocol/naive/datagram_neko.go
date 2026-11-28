@@ -583,6 +583,28 @@ func (d *datagramClient) listenPacket(ctx context.Context) (net.PacketConn, erro
 	return packetConn, nil
 }
 
+// probeReady opens a connect-udp stream and waits for the server's response headers, returning nil
+// only when the server answers 200 with niko-udp: 1.
+func (d *datagramClient) probeReady(ctx context.Context) error {
+	client, err := d.start()
+	if err != nil {
+		return err
+	}
+	conn, err := openDatagram(ctx, client, d.url, d.headers())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	status, headers, err := conn.WaitReady(ctx)
+	if err != nil {
+		return err
+	}
+	if !datagramAccepted(status, headers) {
+		return E.New("naive: datagram probe refused with status ", status)
+	}
+	return nil
+}
+
 // headers are a request's (§3.2), as the tunnel's: Padding, the authorization, QUIC forced, the user's extra
 // headers last; niko-udp: 1 registers the datagram format. The library adds :protocol and capsule-protocol.
 func (d *datagramClient) headers() map[string]string {

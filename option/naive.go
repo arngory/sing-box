@@ -53,4 +53,6 @@ type NaiveOutboundOptions struct {
 	// has the socket, which is its own as without the option. reorder_initial needs every datagram to pass through
 	// the core, so the socket Chromium gets is then a pipe to the core's: a copy a datagram each way
 	UDPDesync *UDPDesyncOptions `json:"udp_desync,omitempty"`
+	// neko: exact DER/PEM leaf certificates pinned byte-for-byte (for IP-literal servers with self-signed certs, B12).
+	ExactServerCertificates badoption.Listable[string] `json:"exact_server_certificates,omitempty"`
 }
